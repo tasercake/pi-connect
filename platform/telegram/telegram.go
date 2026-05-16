@@ -953,33 +953,13 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if err != nil {
 		return err
 	}
-
-	html := core.MarkdownToSimpleHTML(content)
-	params := &tgbot.SendMessageParams{
-		ChatID:          rc.chatID,
-		MessageThreadID: rc.threadID,
-		Text:            html,
-		ParseMode:       models.ParseModeHTML,
-		ReplyParameters: &models.ReplyParameters{MessageID: rc.messageID},
-	}
-
-	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
-			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
-				"method", "Reply",
-				"error", err.Error(),
-				"html_prefix", truncateForLog(html, 200),
-				"html_len", len(html),
-			)
-			params.Text = content
-			params.ParseMode = ""
-			_, err = bot.SendMessage(ctx, params)
-		}
-		if err != nil {
-			return fmt.Errorf("telegram: send: %w", err)
-		}
-	}
-	return nil
+	return p.sendChunked(ctx, bot, content, chunkSendOptions{
+		chatID:       rc.chatID,
+		threadID:     rc.threadID,
+		replyTo:      &models.ReplyParameters{MessageID: rc.messageID},
+		logMethod:    "Reply",
+		logChunkInfo: true,
+	})
 }
 
 // Send sends a new message (not a reply)
@@ -992,32 +972,12 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if err != nil {
 		return err
 	}
-
-	html := core.MarkdownToSimpleHTML(content)
-	params := &tgbot.SendMessageParams{
-		ChatID:          rc.chatID,
-		MessageThreadID: rc.threadID,
-		Text:            html,
-		ParseMode:       models.ParseModeHTML,
-	}
-
-	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
-			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
-				"method", "Send",
-				"error", err.Error(),
-				"html_prefix", truncateForLog(html, 200),
-				"html_len", len(html),
-			)
-			params.Text = content
-			params.ParseMode = ""
-			_, err = bot.SendMessage(ctx, params)
-		}
-		if err != nil {
-			return fmt.Errorf("telegram: send: %w", err)
-		}
-	}
-	return nil
+	return p.sendChunked(ctx, bot, content, chunkSendOptions{
+		chatID:       rc.chatID,
+		threadID:     rc.threadID,
+		logMethod:    "Send",
+		logChunkInfo: true,
+	})
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
@@ -1179,32 +1139,13 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		rows = append(rows, btns)
 	}
 
-	html := core.MarkdownToSimpleHTML(content)
-	params := &tgbot.SendMessageParams{
-		ChatID:          rc.chatID,
-		MessageThreadID: rc.threadID,
-		Text:            html,
-		ParseMode:       models.ParseModeHTML,
-		ReplyMarkup:     &models.InlineKeyboardMarkup{InlineKeyboard: rows},
-	}
-
-	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
-			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
-				"method", "SendWithButtons",
-				"error", err.Error(),
-				"html_prefix", truncateForLog(html, 200),
-				"html_len", len(html),
-			)
-			params.Text = content
-			params.ParseMode = ""
-			_, err = bot.SendMessage(ctx, params)
-		}
-		if err != nil {
-			return fmt.Errorf("telegram: sendWithButtons: %w", err)
-		}
-	}
-	return nil
+	return p.sendChunked(ctx, bot, content, chunkSendOptions{
+		chatID:       rc.chatID,
+		threadID:     rc.threadID,
+		replyMarkup:  &models.InlineKeyboardMarkup{InlineKeyboard: rows},
+		logMethod:    "SendWithButtons",
+		logChunkInfo: true,
+	})
 }
 
 // DeletePreviewMessage deletes a stale preview message so the caller can send a fresh one.
