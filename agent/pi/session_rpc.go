@@ -287,7 +287,46 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		errMsg, _ := raw["error"].(string)
 		extPath, _ := raw["extensionPath"].(string)
 		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("extension %s: %s", filepath.Base(extPath), errMsg)})
+	case "turn_end":
+		s.rpcHandleTurnEnd(raw)
 	}
+}
+
+// rpcHandleTurnEnd emits EventResult{Done: true} so the engine flushes the
+// buffered text-delta segments to the platform and marks the turn complete.
+// Required for RPC mode because the pi process is persistent across turns —
+// the readLoop's terminal EventResult only fires on session close, never per
+// turn. Without this, text replies never reach the user and the typing
+// indicator stays on forever.
+func (s *piRPCSession) rpcHandleTurnEnd(raw map[string]any) {
+	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
+	if msg, ok := raw["message"].(map[string]any); ok && msg != nil {
+		if content, ok := msg["content"].([]any); ok {
+			var b strings.Builder
+			for _, c := range content {
+				item, _ := c.(map[string]any)
+				if item == nil {
+					continue
+				}
+				if t, _ := item["type"].(string); t != "text" {
+					continue
+				}
+				if text, ok := item["text"].(string); ok {
+					b.WriteString(text)
+				}
+			}
+			evt.Content = b.String()
+		}
+		if usage, ok := msg["usage"].(map[string]any); ok {
+			if v, ok := usage["input"].(float64); ok {
+				evt.InputTokens = int(v)
+			}
+			if v, ok := usage["output"].(float64); ok {
+				evt.OutputTokens = int(v)
+			}
+		}
+	}
+	s.tryEmit(evt)
 }
 
 func (s *piRPCSession) rpcHandleMessageUpdate(raw map[string]any) {
@@ -466,13 +505,21 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 	if len(images) > 0 {
 		atFiles = append(atFiles, saveImagesToDisk(s.workDir, images)...)
 	}
-	if len(files) > 0 {
-		atFiles = append(atFiles, core.SaveFilesToDisk(s.workDir, files)...)
+	// File attachments are classified: inline-safe text/code stays on the
+	// `@<path>` inline path; everything else is surfaced as a path-only
+	// reference in the message body so the model uses its `read` tool /
+	// domain skills rather than blowing the context window. See
+	// attachments.go for classification rules and rationale.
+	attached := classifyFileAttachments(s.workDir, files)
+	atFiles = append(atFiles, attached.inlinePaths...)
+	body := prompt
+	if refPrefix := buildAttachmentPrefix(attached.referencePaths, files); refPrefix != "" {
+		body = refPrefix + body
 	}
-	// Pi RPC mode's `prompt` command doesn't accept @file arguments; instead,
-	// for parity with JSON mode, we prefix the message with @file mentions.
-	// Pi expands @file references in messages the same way.
-	msg := prompt
+	// Pi RPC mode's `prompt` command doesn't accept @file as a separate
+	// argument; we prefix `@<path>` tokens into the message text instead.
+	// Pi expands those references identically to the CLI's positional form.
+	msg := body
 	if len(atFiles) > 0 {
 		var b strings.Builder
 		for _, f := range atFiles {
@@ -480,7 +527,7 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 			b.WriteString(f)
 			b.WriteString(" ")
 		}
-		b.WriteString(prompt)
+		b.WriteString(body)
 		msg = b.String()
 	}
 

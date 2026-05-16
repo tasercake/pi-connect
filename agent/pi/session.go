@@ -67,13 +67,21 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 	// Clean up attachments from previous turns.
 	cleanAttachments(s.workDir)
 
-	// Save all attachments to disk — pi reads them via @file syntax.
+	// Images keep their existing inline behavior (Telegram already caps
+	// photo sizes; the model can handle them as multimodal input).
 	var atFiles []string
 	if len(images) > 0 {
 		atFiles = append(atFiles, saveImagesToDisk(s.workDir, images)...)
 	}
-	if len(files) > 0 {
-		atFiles = append(atFiles, core.SaveFilesToDisk(s.workDir, files)...)
+	// File attachments are classified: inline-safe text/code keeps the
+	// `@<path>` inline behavior, everything else (PDFs, audio, video,
+	// docs, large logs) is surfaced as a path reference in the prompt so
+	// the model uses its `read` tool / domain skills instead of bloating
+	// the context window. See attachments.go for the classification rules.
+	attached := classifyFileAttachments(s.workDir, files)
+	atFiles = append(atFiles, attached.inlinePaths...)
+	if prefix := buildAttachmentPrefix(attached.referencePaths, files); prefix != "" {
+		prompt = prefix + prompt
 	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
