@@ -20,13 +20,17 @@ func init() {
 	core.RegisterAgent("pi", New)
 }
 
-// Agent drives the pi coding agent CLI (`pi --mode json --no-input`).
+// Agent drives the pi coding agent CLI. Default transport is `pi --mode json -p`
+// (one process per Send). Set transport="rpc" in options to use `pi --mode rpc`
+// as a persistent subprocess — required for extension commands like /goals,
+// /sisyphus, and any other slash command provided by an installed pi extension.
 type Agent struct {
 	cmd        string // path to pi binary
 	workDir    string
 	model      string
 	mode       string // "default" | "yolo"
 	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
+	transport  string // "json" (default) | "rpc"
 	sessionEnv []string
 	mu         sync.Mutex
 }
@@ -49,12 +53,25 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("pi: '%s' not found in PATH, install with: npm install -g @mariozechner/pi-coding-agent", cmd)
 	}
 
+	transport, _ := opts["transport"].(string)
+	transport = normalizeTransport(transport)
+
 	return &Agent{
-		cmd:     cmd,
-		workDir: workDir,
-		model:   model,
-		mode:    mode,
+		cmd:       cmd,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		transport: transport,
 	}, nil
+}
+
+func normalizeTransport(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "rpc":
+		return "rpc"
+	default:
+		return "json"
+	}
 }
 
 func normalizeMode(raw string) string {
@@ -98,8 +115,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	thinking := a.thinking
+	transport := a.transport
 	extraEnv := append([]string{}, a.sessionEnv...)
 	a.mu.Unlock()
+	if transport == "rpc" {
+		return newPiRPCSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
+	}
 	return newPiSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
 }
 
