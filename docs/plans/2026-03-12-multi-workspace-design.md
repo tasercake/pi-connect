@@ -76,7 +76,7 @@ Each workspace gets its own SessionManager instance with a separate JSON file (s
 
 In `Engine.handleMessage`, the multi-workspace path inserts before the existing flow:
 
-1. **Extract channel ID** from the message's session key (`slack:channelID:userID`).
+1. **Extract channel ID** from the message's session key (`slack:u:channelID:userID`).
 2. **Resolve workspace** — look up binding, convention match, or trigger init flow.
 3. **If no workspace resolved** (init flow in progress) — handle the init conversation directly, don't forward to any agent.
 4. **If workspace resolved** — get or spawn the agent subprocess for that workspace, then continue with existing message processing.

@@ -238,6 +238,7 @@
     "sharedChannelSession": "チャンネルセッションを共有",
     "guildId": "サーバー ID",
     "guildIdHint": "スラッシュコマンドの即時登録用",
+    "sessionPerThread": "スレッドごとにセッション分離",
     "threadIsolation": "スレッド分離",
     "clientId": "クライアント ID (AppKey)",
     "clientSecret": "クライアントシークレット (AppSecret)",

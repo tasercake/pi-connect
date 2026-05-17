@@ -252,7 +252,7 @@ type Engine struct {
 	// Terminal observation (--observe)
 	observeEnabled    bool
 	observeProjectDir string // ~/.claude/projects/{projectKey}
-	observeSessionKey string // e.g. "slack:C123:U456" — target for forwarding
+	observeSessionKey string // e.g. "slack:u:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
 	// Interactive agent session management
@@ -1025,7 +1025,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 	// Fallback: in multi-workspace mode the stored session key may be prefixed
-	// with the workspace path (e.g. "/home/user/project:slack:C123:U456").
+	// with the workspace path (e.g. "/home/user/project:slack:u:C123:U456").
 	// Search for a known platform name within the key and strip the prefix.
 	if targetPlatform == nil {
 		for _, p := range e.platforms {
@@ -1423,7 +1423,7 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 		}
 	}
 	// Fallback: in multi-workspace mode the stored session key may be prefixed
-	// with the workspace path (e.g. "/home/user/project:slack:C123:U456").
+	// with the workspace path (e.g. "/home/user/project:slack:u:C123:U456").
 	// Search for a known platform name within the key and strip the prefix.
 	if targetPlatform == nil {
 		for _, p := range e.platforms {
@@ -3087,7 +3087,6 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 	return sb.String()
 }
 
-
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
 // for the reader goroutine to exit. The reader is structured so its iterations
 // are short (blocking adapter calls like RespondPermission are offloaded), so
@@ -3430,8 +3429,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry // track tool calls for card content
-	var cardThinkingText string       // latest thinking text
+	var cardToolCalls []cardToolEntry  // track tool calls for card content
+	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
@@ -13022,14 +13021,12 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 }
 
 func extractChannelID(sessionKey string) string {
-	// Format: "platform:channelID:userID" or "platform:channelID"
-	// Some platforms encode a short type tag as an extra segment, e.g.
-	// "platform:t:channelID:userID" where t is a single-char tag.
-	// When 4+ segments exist and parts[1] is a single char, treat parts[2]
-	// as the real channel ID.
-	parts := strings.SplitN(sessionKey, ":", 4)
-	if len(parts) >= 4 && len(parts[1]) == 1 {
-		return parts[2]
+	parts := strings.Split(sessionKey, ":")
+	if channelID, _, ok := parseTypedSessionKeyParts(parts); ok {
+		return channelID
+	}
+	if len(parts) > 0 && parts[0] == "slack" {
+		return ""
 	}
 	if len(parts) >= 2 {
 		return parts[1]
@@ -13038,17 +13035,56 @@ func extractChannelID(sessionKey string) string {
 }
 
 func extractUserID(sessionKey string) string {
-	// Format: "platform:channelID:userID" or "platform:type:channelID:userID"
-	// When 4+ segments exist and parts[1] is a single-char type tag, the
-	// user ID is in parts[3].
-	parts := strings.SplitN(sessionKey, ":", 5)
-	if len(parts) >= 4 && len(parts[1]) == 1 {
-		return parts[3]
+	parts := strings.Split(sessionKey, ":")
+	if _, userID, ok := parseTypedSessionKeyParts(parts); ok {
+		return userID
+	}
+	if len(parts) > 0 && parts[0] == "slack" {
+		return ""
 	}
 	if len(parts) >= 3 {
 		return parts[2]
 	}
 	return ""
+}
+
+func parseTypedSessionKeyParts(parts []string) (channelID, userID string, ok bool) {
+	if len(parts) < 3 {
+		return "", "", false
+	}
+
+	if parts[0] == "slack" {
+		switch parts[1] {
+		case "c":
+			if len(parts) == 3 && parts[2] != "" {
+				return parts[2], "", true
+			}
+		case "u":
+			if len(parts) == 4 && parts[2] != "" && parts[3] != "" {
+				return parts[2], parts[3], true
+			}
+		case "t":
+			if len(parts) == 4 && parts[2] != "" && parts[3] != "" {
+				return parts[2], "", true
+			}
+		case "ut":
+			if len(parts) == 5 && parts[2] != "" && parts[3] != "" && parts[4] != "" {
+				return parts[2], parts[3], true
+			}
+		}
+		return "", "", false
+	}
+
+	// Existing non-Slack platforms use single-letter type tags such as
+	// dingtalk:g:<conversation>:<user>. Keep that behavior separate from
+	// Slack's explicit typed-key matrix.
+	switch parts[1] {
+	case "g", "d":
+		if len(parts) == 4 && parts[2] != "" && parts[3] != "" {
+			return parts[2], parts[3], true
+		}
+	}
+	return "", "", false
 }
 
 func stringSliceContains(ss []string, target string) bool {

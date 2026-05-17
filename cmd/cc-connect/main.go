@@ -349,7 +349,7 @@ func main() {
 				if projectDir == "" {
 					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
 				} else {
-					sessionKey := fmt.Sprintf("slack:%s", obsChan)
+					sessionKey := fmt.Sprintf("slack:c:%s", obsChan)
 					engine.SetObserveConfig(projectDir, sessionKey)
 				}
 			}

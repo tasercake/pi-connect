@@ -41,6 +41,7 @@ export const platformMeta: Record<string, PlatformMeta> = {
       { key: 'app_token', labelKey: 'fields.appToken', required: true, type: 'password', placeholder: 'xapp-...' },
       { key: 'allow_from', labelKey: 'fields.allowFrom', placeholder: '* (all)', group: 'advanced' },
       { key: 'share_session_in_channel', labelKey: 'fields.sharedChannelSession', type: 'boolean', group: 'advanced' },
+      { key: 'session_per_thread', labelKey: 'fields.sessionPerThread', type: 'boolean', group: 'advanced' },
     ],
   },
   dingtalk: {

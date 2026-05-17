@@ -238,6 +238,7 @@
     "sharedChannelSession": "Sesión de canal compartida",
     "guildId": "ID del servidor",
     "guildIdHint": "Para registrar comandos slash instantáneamente",
+    "sessionPerThread": "Sesión por hilo",
     "threadIsolation": "Aislamiento de hilos",
     "clientId": "Client ID (AppKey)",
     "clientSecret": "Client Secret (AppSecret)",

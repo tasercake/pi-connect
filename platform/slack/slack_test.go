@@ -196,3 +196,91 @@ func TestProcessSlackFileShares_EmptyMimeBecomesOctetStream(t *testing.T) {
 		t.Fatalf("got %+v", docs)
 	}
 }
+
+func TestSlackSessionKeyBuilders(t *testing.T) {
+	tests := []struct {
+		name   string
+		share  bool
+		thread bool
+		want   string
+	}{
+		{"user scoped", false, false, "slack:u:C123:U456"},
+		{"channel shared", true, false, "slack:c:C123"},
+		{"user thread scoped", false, true, "slack:ut:C123:U456:1700000000.000100"},
+		{"channel thread scoped", true, true, "slack:t:C123:1700000000.000100"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := slackEventSessionKey("C123", "U456", "1700000000.000100", tt.share, tt.thread)
+			if got != tt.want {
+				t.Fatalf("slackEventSessionKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRootThreadTimestamp(t *testing.T) {
+	if got := rootThreadTimestamp("1700000000.000001", "1700000000.000002"); got != "1700000000.000002" {
+		t.Fatalf("rootThreadTimestamp with thread_ts = %q", got)
+	}
+	if got := rootThreadTimestamp("1700000000.000001", ""); got != "1700000000.000001" {
+		t.Fatalf("rootThreadTimestamp without thread_ts = %q", got)
+	}
+}
+
+func TestSlackSlashCommandSessionKeyIgnoresThreadMode(t *testing.T) {
+	shared := (&Platform{shareSessionInChannel: true, sessionPerThread: true}).slashCommandSessionKey("C123", "U456")
+	if shared != "slack:c:C123" {
+		t.Fatalf("shared slash key = %q", shared)
+	}
+	userScoped := (&Platform{shareSessionInChannel: false, sessionPerThread: true}).slashCommandSessionKey("C123", "U456")
+	if userScoped != "slack:u:C123:U456" {
+		t.Fatalf("user-scoped slash key = %q", userScoped)
+	}
+}
+
+func TestReconstructReplyCtxTypedSessionKeys(t *testing.T) {
+	p := &Platform{}
+	tests := []struct {
+		key      string
+		channel  string
+		threadTS string
+	}{
+		{"slack:c:C123", "C123", ""},
+		{"slack:u:C123:U456", "C123", ""},
+		{"slack:t:C123:1700000000.000100", "C123", "1700000000.000100"},
+		{"slack:ut:C123:U456:1700000000.000100", "C123", "1700000000.000100"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got, err := p.ReconstructReplyCtx(tt.key)
+			if err != nil {
+				t.Fatalf("ReconstructReplyCtx() error = %v", err)
+			}
+			ctx := got.(replyContext)
+			if ctx.channel != tt.channel || ctx.timestamp != tt.threadTS {
+				t.Fatalf("ctx = %+v, want channel=%q thread=%q", ctx, tt.channel, tt.threadTS)
+			}
+		})
+	}
+}
+
+func TestReconstructReplyCtxRejectsUntypedAndMalformedSessionKeys(t *testing.T) {
+	p := &Platform{}
+	keys := []string{
+		"slack:C123",
+		"slack:C123:U456",
+		"slack:u:C123",
+		"slack:c:C123:extra",
+		"slack:t:C123",
+		"slack:ut:C123:U456",
+		"telegram:C123:U456",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			if _, err := p.ReconstructReplyCtx(key); err == nil {
+				t.Fatalf("ReconstructReplyCtx(%q) succeeded, want error", key)
+			}
+		})
+	}
+}

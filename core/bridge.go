@@ -462,6 +462,13 @@ func bridgeTransportChatID(sessionKey string) (string, error) {
 	if len(parts) < 2 || parts[1] == "" {
 		return "", fmt.Errorf("bridge: invalid session key %q", sessionKey)
 	}
+	if parts[0] == "slack" {
+		chatID := extractChannelID(sessionKey)
+		if chatID == "" {
+			return "", fmt.Errorf("bridge: invalid slack session key %q", sessionKey)
+		}
+		return chatID, nil
+	}
 	return parts[1], nil
 }
 

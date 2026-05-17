@@ -238,6 +238,7 @@
     "sharedChannelSession": "Shared channel session",
     "guildId": "Guild ID",
     "guildIdHint": "For instant slash command registration",
+    "sessionPerThread": "Session per thread",
     "threadIsolation": "Thread isolation",
     "clientId": "Client ID (AppKey)",
     "clientSecret": "Client Secret (AppSecret)",

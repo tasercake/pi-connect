@@ -24,9 +24,9 @@ Go to [Slack API](https://api.slack.com/apps) and sign in with your Slack accoun
 2. Select "From scratch"
 3. Fill in the app details:
 
-| Field | Suggested Value |
-|-------|----------------|
-| App Name | `cc-connect` |
+| Field                       | Suggested Value       |
+| --------------------------- | --------------------- |
+| App Name                    | `cc-connect`          |
 | Development Slack Workspace | Select your workspace |
 
 4. Click "Create App"
@@ -44,10 +44,10 @@ In the left sidebar, click "App Home".
 1. Click "Edit" to configure the bot display name
 2. Fill in:
 
-| Field | Suggested Value |
-|-------|----------------|
-| Display Name (Bot Name) | `cc-connect` |
-| Default Username | `cc_connect` |
+| Field                   | Suggested Value |
+| ----------------------- | --------------- |
+| Display Name (Bot Name) | `cc-connect`    |
+| Default Username        | `cc_connect`    |
 
 ### 2.3 Always Show Bot Online
 
@@ -65,16 +65,16 @@ In the left sidebar, click "OAuth & Permissions".
 
 Under "Scopes" → "Bot Token Scopes", add:
 
-| Scope | Purpose |
-|-------|---------|
-| `app_mentions:read` | Read @mention messages |
-| `chat:write` | Send messages |
-| `im:history` | Read DM history |
-| `im:read` | Read DM list |
-| `im:write` | Send DMs |
-| `channels:history` | Read channel messages (optional) |
-| `groups:history` | Read private channel messages (optional) |
-| `users:read` | Get user info |
+| Scope               | Purpose                                  |
+| ------------------- | ---------------------------------------- |
+| `app_mentions:read` | Read @mention messages                   |
+| `chat:write`        | Send messages                            |
+| `im:history`        | Read DM history                          |
+| `im:read`           | Read DM list                             |
+| `im:write`          | Send DMs                                 |
+| `channels:history`  | Read channel messages (optional)         |
+| `groups:history`    | Read private channel messages (optional) |
+| `users:read`        | Get user info                            |
 
 ---
 
@@ -119,10 +119,10 @@ In the left sidebar, click "Event Subscriptions".
 
 Under "Subscribe to bot events", add:
 
-| Event | Purpose |
-|-------|---------|
+| Event         | Purpose                              |
+| ------------- | ------------------------------------ |
 | `app_mention` | Triggered when the bot is @mentioned |
-| `message.im` | Triggered when a DM is received |
+| `message.im`  | Triggered when a DM is received      |
 
 ### 5.4 Save Changes
 
@@ -173,12 +173,27 @@ type = "slack"
 [projects.platforms.options]
 bot_token = "xoxb-xxxxxxx..."
 app_token = "xapp-xxxxxxx..."
+share_session_in_channel = false
+session_per_thread = false
 ```
+
+### Session key formats
+
+Slack uses explicit typed session keys only:
+
+| `share_session_in_channel` | `session_per_thread` | Session key                             |
+| -------------------------- | -------------------- | --------------------------------------- |
+| `false`                    | `false`              | `slack:u:<channel>:<user>`              |
+| `true`                     | `false`              | `slack:c:<channel>`                     |
+| `false`                    | `true`               | `slack:ut:<channel>:<user>:<thread_ts>` |
+| `true`                     | `true`               | `slack:t:<channel>:<thread_ts>`         |
+
+When `session_per_thread = true`, Slack events use `thread_ts` when present, otherwise the message `ts` as the root thread timestamp. Slash commands use non-thread `slack:c` / `slack:u` keys because Slack slash command payloads do not include `thread_ts`.
 
 ### Token Reference
 
-| Token | Prefix | Purpose |
-|-------|--------|---------|
+| Token     | Prefix  | Purpose                |
+| --------- | ------- | ---------------------- |
 | Bot Token | `xoxb-` | Bot API authentication |
 | App Token | `xapp-` | Socket Mode connection |
 
@@ -258,15 +273,15 @@ cc-connect: Here's the project structure...
 
 ## Socket Mode vs Webhook
 
-| Feature | Socket Mode | Webhook |
-|---------|-------------|---------|
-| Public IP | ❌ Not needed | ✅ Required |
-| Domain | ❌ Not needed | ✅ Required |
-| HTTPS cert | ❌ Not needed | ✅ Required |
-| Reverse proxy | ❌ Not needed | ✅ Required |
-| Connection | WebSocket | HTTP callback |
-| Complexity | Simple | More complex |
-| Best for | Local dev, private network | Production |
+| Feature       | Socket Mode                | Webhook       |
+| ------------- | -------------------------- | ------------- |
+| Public IP     | ❌ Not needed              | ✅ Required   |
+| Domain        | ❌ Not needed              | ✅ Required   |
+| HTTPS cert    | ❌ Not needed              | ✅ Required   |
+| Reverse proxy | ❌ Not needed              | ✅ Required   |
+| Connection    | WebSocket                  | HTTP callback |
+| Complexity    | Simple                     | More complex  |
+| Best for      | Local dev, private network | Production    |
 
 ---
 
@@ -275,6 +290,7 @@ cc-connect: Here's the project structure...
 ### Q: Socket Mode connection fails?
 
 Check the following:
+
 1. Is the App Token correct? (starts with `xapp-`)
 2. Does the App Token have `connections:write` scope?
 3. Is Socket Mode enabled in the app settings?
@@ -282,6 +298,7 @@ Check the following:
 ### Q: Bot doesn't respond to messages?
 
 Check the following:
+
 1. Is the Bot Token correct? (starts with `xoxb-`)
 2. Are event subscriptions configured correctly?
 3. Are the required scopes added?
@@ -300,6 +317,7 @@ Make sure you've subscribed to the `message.im` event.
 ### Q: Bot doesn't respond in channels?
 
 Make sure:
+
 1. You've subscribed to the `app_mention` event
 2. The bot has been added to the channel
 3. You @mentioned the bot in your message

@@ -780,7 +780,7 @@ func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testi
 	}
 	normalizedWsDir := normalizeWorkspacePath(wsDir)
 	channelID := "C123"
-	rawKey := "slack:" + channelID + ":U1"
+	rawKey := "slack:u:" + channelID + ":U1"
 	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
 
 	iKey := normalizedWsDir + ":" + rawKey
@@ -816,13 +816,13 @@ func TestEngineSendToSessionWithAttachments_WorkspacePrefixedSessionKey(t *testi
 	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	prefixed := "/tmp/myproject:slack:C123:U1"
+	prefixed := "/tmp/myproject:slack:u:C123:U1"
 	err := e.SendToSessionWithAttachments(prefixed, "delivery ready", nil, nil)
 	if err != nil {
 		t.Fatalf("SendToSessionWithAttachments returned error: %v", err)
 	}
-	if p.reconstructKey != "slack:C123:U1" {
-		t.Fatalf("ReconstructReplyCtx key = %q, want slack:C123:U1", p.reconstructKey)
+	if p.reconstructKey != "slack:u:C123:U1" {
+		t.Fatalf("ReconstructReplyCtx key = %q, want slack:u:C123:U1", p.reconstructKey)
 	}
 	if got := p.getSent(); len(got) != 1 || got[0] != "delivery ready" {
 		t.Fatalf("sent text = %#v, want one message", got)
@@ -2468,7 +2468,7 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 	}
 	ws.sessions = NewSessionManager("")
 
-	msg := &Message{SessionKey: "slack:" + channelID + ":U1", ReplyCtx: "ctx"}
+	msg := &Message{SessionKey: "slack:u:" + channelID + ":U1", ReplyCtx: "ctx"}
 	e.cmdList(p, msg, nil)
 
 	if len(p.sent) == 0 {
@@ -2493,7 +2493,7 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	channelID := "C123"
 	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
 
-	sessionKey := "slack:" + channelID + ":U1"
+	sessionKey := "slack:u:" + channelID + ":U1"
 	// interactiveKeyForSessionKey resolves symlinks, so use the normalized path
 	interactiveKey := normalizeWorkspacePath(wsDir) + ":" + sessionKey
 
@@ -2628,7 +2628,7 @@ func TestInteractiveKeyForSessionKey_PrefersCurrentBindingOverStaleState(t *test
 	e.SetMultiWorkspace(t.TempDir(), bindingPath)
 
 	channelID := "C1"
-	sessionKey := "slack:" + channelID + ":U1"
+	sessionKey := "slack:u:" + channelID + ":U1"
 	e.workspaceBindings.Bind("project:test", "slack:"+channelID, "chan", wsBound)
 
 	// Stale state from before rebinding is still in the map.
@@ -2655,15 +2655,15 @@ func TestFindInteractiveKeyForSession(t *testing.T) {
 		expected string
 	}{
 		{"empty-query", []string{}, "", ""},
-		{"no-matches", []string{"/ws:slack:C1:U1"}, "discord:T1", ""},
-		{"exact-match", []string{"slack:C1:U1"}, "slack:C1:U1", "slack:C1:U1"},
+		{"no-matches", []string{"/ws:slack:u:C1:U1"}, "discord:T1", ""},
+		{"exact-match", []string{"slack:u:C1:U1"}, "slack:u:C1:U1", "slack:u:C1:U1"},
 		{"suffix-match", []string{"/ws:discord:T1"}, "discord:T1", "/ws:discord:T1"},
-		{"first-of-multiple", []string{"/wsA:discord:T1", "/wsB:slack:C1:U1"}, "slack:C1:U1", "/wsB:slack:C1:U1"},
+		{"first-of-multiple", []string{"/wsA:discord:T1", "/wsB:slack:u:C1:U1"}, "slack:u:C1:U1", "/wsB:slack:u:C1:U1"},
 		// Precedence: exact key beats suffix-matched workspace-prefixed key.
 		// Without this, map iteration order would be visible to callers, making
 		// /stop and pending-permission routing non-deterministic when both
 		// raw and workspace-prefixed states coexist.
-		{"exact-beats-prefixed", []string{"slack:C1:U1", "/ws:slack:C1:U1"}, "slack:C1:U1", "slack:C1:U1"},
+		{"exact-beats-prefixed", []string{"slack:u:C1:U1", "/ws:slack:u:C1:U1"}, "slack:u:C1:U1", "slack:u:C1:U1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -8253,7 +8253,7 @@ func TestBuildSenderPrompt_NameWithSpaces(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:C012:U999", "")
+	result := e.buildSenderPrompt("hi", "U999", "Jim Tang", "slack", "slack:u:C012:U999", "")
 	expected := "[cc-connect sender_id=U999 sender_name=\"Jim Tang\" platform=slack chat_id=C012]\nhi"
 	if result != expected {
 		t.Fatalf("got %q, want %q", result, expected)
@@ -8272,6 +8272,11 @@ func TestExtractChannelID(t *testing.T) {
 		{"a:bb:c:d", "bb"},
 		{"dingtalk:g:cidXXX:staff1", "cidXXX"},
 		{"dingtalk:d:cidYYY:staff2", "cidYYY"},
+		{"slack:c:C123", "C123"},
+		{"slack:u:C123:U456", "C123"},
+		{"slack:t:C123:1700000000.000100", "C123"},
+		{"slack:ut:C123:U456:1700000000.000100", "C123"},
+		{"slack:C123:U456", ""},
 	}
 	for _, tt := range tests {
 		got := extractChannelID(tt.key)
@@ -8292,7 +8297,7 @@ func TestBuildSenderPrompt_DifferentPlatforms(t *testing.T) {
 	}{
 		{"telegram", "telegram:group99:alice", "group99"},
 		{"discord", "discord:server1:bob", "server1"},
-		{"slack", "slack:C012345:carol", "C012345"},
+		{"slack", "slack:u:C012345:carol", "C012345"},
 	}
 	for _, tc := range platforms {
 		result := e.buildSenderPrompt("msg", "uid", "TestUser", tc.platform, tc.sessionKey, "")
@@ -8309,7 +8314,7 @@ func TestBuildSenderPrompt_SanitizesSpecialChars(t *testing.T) {
 	e := newTestEngine()
 	e.SetInjectSender(true)
 
-	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:C1:U1", "")
+	result := e.buildSenderPrompt("hi", "U1", "Evil\"Name\nInject", "slack", "slack:u:C1:U1", "")
 	if strings.Contains(result, `"Name`) || strings.Contains(result, "\n"+`Inject`) {
 		t.Fatalf("quotes/newlines should be sanitized, got %q", result)
 	}
@@ -10739,7 +10744,7 @@ func TestExecuteCronJob_WorkspacePrefixedSessionKey(t *testing.T) {
 
 	// Simulate a session key that was stored with a workspace prefix
 	// (as happens in multi-workspace mode).
-	prefixedKey := "/home/user/workspace/myproject:slack:C123:U456"
+	prefixedKey := "/home/user/workspace/myproject:slack:u:C123:U456"
 	job := &CronJob{
 		ID:          "job-ws",
 		SessionKey:  prefixedKey,
@@ -10782,6 +10787,16 @@ func TestExtractSessionKeyParts(t *testing.T) {
 		{"empty string", "", "", "", "", ""},
 		{"just platform colon user", "line::user1", "line", "", "", "user1"},
 		{"four-segment with type tag", "dingtalk:g:cidXXX:staff1", "dingtalk", "cidXXX", "dingtalk:cidXXX", "staff1"},
+		{"slack channel shared", "slack:c:C123", "slack", "C123", "slack:C123", ""},
+		{"slack user scoped", "slack:u:C123:U456", "slack", "C123", "slack:C123", "U456"},
+		{"slack thread shared", "slack:t:C123:1700000000.000100", "slack", "C123", "slack:C123", ""},
+		{"slack user thread scoped", "slack:ut:C123:U456:1700000000.000100", "slack", "C123", "slack:C123", "U456"},
+		{"slack old untyped channel only", "slack:C123", "slack", "", "", ""},
+		{"slack old untyped user scoped", "slack:C123:U456", "slack", "", "", ""},
+		{"slack rejects non-matrix g tag", "slack:g:C123:U456", "slack", "", "", ""},
+		{"slack rejects non-matrix d tag", "slack:d:C123:U456", "slack", "", "", ""},
+		{"slack rejects empty user", "slack:u:C123:", "slack", "", "", ""},
+		{"slack rejects empty ut user", "slack:ut:C123::1700000000.000100", "slack", "", "", ""},
 	}
 
 	for _, tt := range tests {
@@ -10809,9 +10824,54 @@ func TestExtractSessionKeyParts(t *testing.T) {
 	}
 }
 
+func TestSlackTypedSessionKeysInRelayAndBridgeHelpers(t *testing.T) {
+	valid := []struct {
+		key  string
+		chat string
+	}{
+		{"slack:c:C123", "C123"},
+		{"slack:u:C123:U456", "C123"},
+		{"slack:t:C123:1700000000.000100", "C123"},
+		{"slack:ut:C123:U456:1700000000.000100", "C123"},
+	}
+	for _, tt := range valid {
+		platform, chatID, err := parseSessionKeyParts(tt.key)
+		if err != nil {
+			t.Fatalf("parseSessionKeyParts(%q) error = %v", tt.key, err)
+		}
+		if platform != "slack" || chatID != tt.chat {
+			t.Fatalf("parseSessionKeyParts(%q) = (%q, %q), want (slack, %q)", tt.key, platform, chatID, tt.chat)
+		}
+		bridgeChatID, err := bridgeTransportChatID(tt.key)
+		if err != nil {
+			t.Fatalf("bridgeTransportChatID(%q) error = %v", tt.key, err)
+		}
+		if bridgeChatID != tt.chat {
+			t.Fatalf("bridgeTransportChatID(%q) = %q, want %q", tt.key, bridgeChatID, tt.chat)
+		}
+	}
+
+	invalid := []string{
+		"slack:C123",
+		"slack:C123:U456",
+		"slack:g:C123:U456",
+		"slack:d:C123:U456",
+		"slack:u:C123:",
+		"slack:ut:C123::1700000000.000100",
+	}
+	for _, key := range invalid {
+		if _, _, err := parseSessionKeyParts(key); err == nil {
+			t.Fatalf("parseSessionKeyParts(%q) succeeded, want error", key)
+		}
+		if _, err := bridgeTransportChatID(key); err == nil {
+			t.Fatalf("bridgeTransportChatID(%q) succeeded, want error", key)
+		}
+	}
+}
+
 func TestSetObserveConfig(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
-	e.SetObserveConfig("/tmp/test-project", "slack:C123:U456")
+	e.SetObserveConfig("/tmp/test-project", "slack:u:C123:U456")
 	if !e.observeEnabled {
 		t.Fatal("observe should be enabled")
 	}
@@ -10823,7 +10883,7 @@ func TestSetObserveConfig(t *testing.T) {
 func TestObserveStartsOnlyWithSlack(t *testing.T) {
 	stub := &stubPlatformWithObserve{stubPlatform: stubPlatform{n: "slack"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
+	e.SetObserveConfig("/tmp/fake-project", "slack:u:C123:U456")
 
 	target := e.findObserverTarget()
 	if target == nil {
@@ -10834,7 +10894,7 @@ func TestObserveStartsOnlyWithSlack(t *testing.T) {
 func TestObserveNoTargetWithoutSlack(t *testing.T) {
 	stub := &stubPlatform{n: "telegram"}
 	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:C123:U456")
+	e.SetObserveConfig("/tmp/fake-project", "slack:u:C123:U456")
 
 	target := e.findObserverTarget()
 	if target != nil {
@@ -10871,9 +10931,9 @@ func (p *stubStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any
 // stubStreamingCard is a minimal StreamingCard for tests.
 type stubStreamingCard struct{}
 
-func (c *stubStreamingCard) Update(_ context.Context, _ string) error { return nil }
+func (c *stubStreamingCard) Update(_ context.Context, _ string) error   { return nil }
 func (c *stubStreamingCard) Finalize(_ context.Context, _ string) error { return nil }
-func (c *stubStreamingCard) Failed() bool                                { return false }
+func (c *stubStreamingCard) Failed() bool                               { return false }
 
 func TestHandleMessage_InstantReply_SendsConfirmationWhenEnabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}

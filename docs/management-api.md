@@ -1142,7 +1142,7 @@ Examples:
 
 - `telegram:123456789:123456789` — Telegram user 123456789 in chat 123456789
 - `feishu:ou_xxx:chat_yyy` — Feishu user in chat
-- `slack:C01234:U05678` — Slack channel and user
+- `slack:u:C01234:U05678` — Slack channel and user
 - `discord:123456789:987654321` — Discord guild and user
 
 For multi-workspace mode, the format may include a workspace prefix:

@@ -238,6 +238,7 @@
     "sharedChannelSession": "共享頻道工作階段",
     "guildId": "伺服器 ID",
     "guildIdHint": "用於即時註冊斜線命令",
+    "sessionPerThread": "按討論串隔離會話",
     "threadIsolation": "討論串隔離",
     "clientId": "Client ID (AppKey)",
     "clientSecret": "Client Secret (AppSecret)",

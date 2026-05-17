@@ -238,6 +238,7 @@
     "sharedChannelSession": "共享频道会话",
     "guildId": "服务器 ID",
     "guildIdHint": "用于即时注册斜杠命令",
+    "sessionPerThread": "按线程隔离会话",
     "threadIsolation": "帖子隔离",
     "clientId": "Client ID (AppKey)",
     "clientSecret": "Client Secret (AppSecret)",

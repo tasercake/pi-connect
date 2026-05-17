@@ -1114,7 +1114,7 @@ GET /api/v1/status?token=mgmt-secret
 
 - `telegram:123456789:123456789` — Telegram 用户 123456789，会话 123456789
 - `feishu:ou_xxx:chat_yyy` — 飞书用户与会话
-- `slack:C01234:U05678` — Slack 频道与用户
+- `slack:u:C01234:U05678` — Slack 频道与用户
 - `discord:123456789:987654321` — Discord 服务器与用户
 
 多工作区模式下，格式可能包含工作区前缀：

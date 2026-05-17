@@ -34,6 +34,7 @@ type Platform struct {
 	appToken              string
 	allowFrom             string
 	shareSessionInChannel bool
+	sessionPerThread      bool
 	client                *slack.Client
 	socket                *socketmode.Client
 	handler               core.MessageHandler
@@ -49,6 +50,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("slack", allowFrom)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	sessionPerThread, _ := opts["session_per_thread"].(bool)
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
@@ -57,6 +59,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:              appToken,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
+		sessionPerThread:      sessionPerThread,
 		channelNameCache:      make(map[string]string),
 	}, nil
 }
@@ -134,12 +137,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
-				}
+				sessionKey := p.eventSessionKey(ev.Channel, ev.User, ev.TimeStamp, ev.ThreadTimeStamp)
 
 				var shareFiles []slackevents.File
 				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
@@ -153,13 +151,14 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName:  p.resolveChannelNameForMsg(ev.Channel),
-					Content:   content,
-					Images:    images,
-					Files:     docFiles,
-					Audio:     audio,
-					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ChatName:   p.resolveChannelNameForMsg(ev.Channel),
+					ChannelKey: ev.Channel,
+					Content:    content,
+					Images:     images,
+					Files:      docFiles,
+					Audio:      audio,
+					MessageID:  ev.TimeStamp,
+					ReplyCtx:   replyContext{channel: ev.Channel, timestamp: rootThreadTimestamp(ev.TimeStamp, ev.ThreadTimeStamp)},
 				}
 				p.handler(p, msg)
 
@@ -200,12 +199,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
-				}
+				sessionKey := p.eventSessionKey(ev.Channel, ev.User, ev.TimeStamp, ev.ThreadTimeStamp)
 				ts := ev.TimeStamp
 
 				images, audio, docFiles := p.processSlackFileShares(ev.Files)
@@ -217,8 +211,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				msg := &core.Message{
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
-					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
+					ChatName:   p.resolveChannelNameForMsg(ev.Channel),
+					ChannelKey: ev.Channel,
+					Content:    ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev)},
 				}
@@ -249,12 +244,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			content += " " + cmd.Text
 		}
 
-		var sessionKey string
-		if p.shareSessionInChannel {
-			sessionKey = fmt.Sprintf("slack:%s", cmd.ChannelID)
-		} else {
-			sessionKey = fmt.Sprintf("slack:%s:%s", cmd.ChannelID, cmd.UserID)
-		}
+		sessionKey := p.slashCommandSessionKey(cmd.ChannelID, cmd.UserID)
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
@@ -272,6 +262,70 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 	case socketmode.EventTypeConnectionError:
 		slog.Error("slack: connection error")
 	}
+}
+
+func (p *Platform) eventSessionKey(channel, user, ts, threadTS string) string {
+	return slackEventSessionKey(channel, user, rootThreadTimestamp(ts, threadTS), p.shareSessionInChannel, p.sessionPerThread)
+}
+
+func (p *Platform) slashCommandSessionKey(channel, user string) string {
+	return slackSlashCommandSessionKey(channel, user, p.shareSessionInChannel)
+}
+
+func slackEventSessionKey(channel, user, rootThreadTS string, shareSessionInChannel, sessionPerThread bool) string {
+	if sessionPerThread {
+		if shareSessionInChannel {
+			return fmt.Sprintf("slack:t:%s:%s", channel, rootThreadTS)
+		}
+		return fmt.Sprintf("slack:ut:%s:%s:%s", channel, user, rootThreadTS)
+	}
+	return slackSlashCommandSessionKey(channel, user, shareSessionInChannel)
+}
+
+func slackSlashCommandSessionKey(channel, user string, shareSessionInChannel bool) string {
+	if shareSessionInChannel {
+		return fmt.Sprintf("slack:c:%s", channel)
+	}
+	return fmt.Sprintf("slack:u:%s:%s", channel, user)
+}
+
+func rootThreadTimestamp(ts, threadTS string) string {
+	if threadTS != "" {
+		return threadTS
+	}
+	return ts
+}
+
+type slackSessionKeyParts struct {
+	channel  string
+	user     string
+	threadTS string
+}
+
+func parseSlackSessionKey(sessionKey string) (slackSessionKeyParts, error) {
+	parts := strings.Split(sessionKey, ":")
+	if len(parts) < 3 || parts[0] != "slack" {
+		return slackSessionKeyParts{}, fmt.Errorf("slack: invalid session key %q", sessionKey)
+	}
+	switch parts[1] {
+	case "c":
+		if len(parts) == 3 && parts[2] != "" {
+			return slackSessionKeyParts{channel: parts[2]}, nil
+		}
+	case "u":
+		if len(parts) == 4 && parts[2] != "" && parts[3] != "" {
+			return slackSessionKeyParts{channel: parts[2], user: parts[3]}, nil
+		}
+	case "t":
+		if len(parts) == 4 && parts[2] != "" && parts[3] != "" {
+			return slackSessionKeyParts{channel: parts[2], threadTS: parts[3]}, nil
+		}
+	case "ut":
+		if len(parts) == 5 && parts[2] != "" && parts[3] != "" && parts[4] != "" {
+			return slackSessionKeyParts{channel: parts[2], user: parts[3], threadTS: parts[4]}, nil
+		}
+	}
+	return slackSessionKeyParts{}, fmt.Errorf("slack: invalid session key %q", sessionKey)
 }
 
 func stripAppMentionText(text string) string {
@@ -365,7 +419,6 @@ func slackFileDisplayName(f slackevents.File) string {
 	}
 	return f.Title
 }
-
 
 // assistantOrThreadTS returns the thread_ts to use for the bot's reply.
 //
@@ -538,12 +591,11 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// slack:{channel}:{user}
-	parts := strings.SplitN(sessionKey, ":", 3)
-	if len(parts) < 2 || parts[0] != "slack" {
-		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
+	parts, err := parseSlackSessionKey(sessionKey)
+	if err != nil {
+		return nil, err
 	}
-	return replyContext{channel: parts[1]}, nil
+	return replyContext{channel: parts.channel, timestamp: parts.threadTS}, nil
 }
 
 func (p *Platform) resolveUserName(userID string) string {

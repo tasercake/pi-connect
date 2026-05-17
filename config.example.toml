@@ -1007,8 +1007,8 @@ app_secret = "your-feishu-app-secret"
 # Slack (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://api.slack.com/apps / 创建应用
 # 2. Enable Socket Mode (Settings > Socket Mode) / 开启 Socket Mode
-# 3. Subscribe to bot events: message.channels, message.im
-#    订阅事件：message.channels, message.im
+# 3. Subscribe to bot events: app_mention, message.im
+#    订阅事件：app_mention, message.im
 # 4. Install app to workspace, copy Bot Token (xoxb-...) and App Token (xapp-...)
 #    安装应用到工作区，复制 Bot Token 和 App Token
 # Connection: Socket Mode WebSocket (no public URL needed) / 无需公网 IP
@@ -1021,6 +1021,8 @@ app_secret = "your-feishu-app-secret"
 # app_token = "xapp-your-app-level-token"
 # allow_from = "*"  # Allowed Slack user IDs / 允许的 Slack 用户 ID
 # share_session_in_channel = false  # If true, all users in a channel share one agent session / 频道共享会话
+# session_per_thread = false  # If true, Slack sessions are scoped per thread (thread_ts when present, otherwise message ts)
+#                             # 设为 true 时，Slack 会话按线程隔离（优先 thread_ts，否则使用消息 ts）
 
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
