@@ -265,6 +265,21 @@ func TestReconstructReplyCtxTypedSessionKeys(t *testing.T) {
 	}
 }
 
+func TestSlackReactionTimestampPrefersUserMessage(t *testing.T) {
+	got := slackReactionTimestamp(replyContext{
+		timestamp:         "1700000000.000100",
+		reactionTimestamp: "1700000001.000200",
+	})
+	if got != "1700000001.000200" {
+		t.Fatalf("slackReactionTimestamp() = %q, want user reply timestamp", got)
+	}
+
+	got = slackReactionTimestamp(replyContext{timestamp: "1700000000.000100"})
+	if got != "1700000000.000100" {
+		t.Fatalf("slackReactionTimestamp() fallback = %q", got)
+	}
+}
+
 func TestReconstructReplyCtxRejectsUntypedAndMalformedSessionKeys(t *testing.T) {
 	p := &Platform{}
 	keys := []string{

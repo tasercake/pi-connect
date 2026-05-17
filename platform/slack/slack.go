@@ -25,8 +25,9 @@ func init() {
 }
 
 type replyContext struct {
-	channel   string
-	timestamp string // thread_ts for threading replies
+	channel           string
+	timestamp         string // thread_ts/root ts for threading replies
+	reactionTimestamp string // exact user message ts for typing/done reactions
 }
 
 type Platform struct {
@@ -158,7 +159,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:      docFiles,
 					Audio:      audio,
 					MessageID:  ev.TimeStamp,
-					ReplyCtx:   replyContext{channel: ev.Channel, timestamp: rootThreadTimestamp(ev.TimeStamp, ev.ThreadTimeStamp)},
+					ReplyCtx:   replyContext{channel: ev.Channel, timestamp: rootThreadTimestamp(ev.TimeStamp, ev.ThreadTimeStamp), reactionTimestamp: ev.TimeStamp},
 				}
 				p.handler(p, msg)
 
@@ -215,7 +216,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					ChannelKey: ev.Channel,
 					Content:    ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev)},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev), reactionTimestamp: ev.TimeStamp},
 				}
 				p.handler(p, msg)
 			}
@@ -662,6 +663,13 @@ func (p *Platform) FormattingInstructions() string {
 - Do NOT use ## headings — Slack does not render them. Use *bold text* on its own line instead.`
 }
 
+func slackReactionTimestamp(rc replyContext) string {
+	if rc.reactionTimestamp != "" {
+		return rc.reactionTimestamp
+	}
+	return rc.timestamp
+}
+
 // StartTyping adds emoji reactions to the user's message as a heartbeat
 // indicator so the user knows the bot is still working.
 //
@@ -673,11 +681,15 @@ func (p *Platform) FormattingInstructions() string {
 // All reactions are removed when the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok {
+		return func() {}
+	}
+	reactionTS := slackReactionTimestamp(rc)
+	if rc.channel == "" || reactionTS == "" {
 		return func() {}
 	}
 
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: reactionTS}
 	var mu sync.Mutex
 	var added []string
 
