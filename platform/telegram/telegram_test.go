@@ -212,6 +212,12 @@ func (b *stubTelegramBot) SetMessageReaction(_ context.Context, _ *tgbot.SetMess
 	return true, nil
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -846,6 +852,70 @@ func TestIsDirectedAtBot(t *testing.T) {
 			got := p.isDirectedAtBot(tt.msg)
 			if got != tt.want {
 				t.Fatalf("isDirectedAtBot() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleMessageVoiceAudioPreservesCaptionContent(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*models.Message)
+	}{
+		{
+			name: "voice",
+			set: func(msg *models.Message) {
+				msg.Voice = &models.Voice{FileID: "voice-file", Duration: 3, MimeType: "audio/ogg"}
+			},
+		},
+		{
+			name: "audio",
+			set: func(msg *models.Message) {
+				msg.Audio = &models.Audio{FileID: "audio-file", Duration: 4, MimeType: "audio/mpeg"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handled := make(chan *core.Message, 1)
+			p := &Platform{
+				token: "token",
+				httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       http.NoBody,
+						Header:     make(http.Header),
+					}, nil
+				})},
+			}
+			p.handler = func(_ core.Platform, msg *core.Message) {
+				handled <- msg
+			}
+			p.bot = newStubTelegramBot()
+			p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+			msg := &models.Message{
+				ID:      10,
+				Caption: "please transcribe @mybot",
+				Date:    int(time.Now().Unix()),
+				From:    &models.User{ID: 7, Username: "alice"},
+				Chat:    models.Chat{ID: 100, Type: models.ChatTypePrivate},
+			}
+			tt.set(msg)
+
+			p.handleMessage(context.Background(), msg)
+
+			select {
+			case got := <-handled:
+				if got.Content != "please transcribe" {
+					t.Fatalf("Content = %q, want %q", got.Content, "please transcribe")
+				}
+				if got.Audio == nil {
+					t.Fatal("Audio is nil")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("message not handled")
 			}
 		})
 	}

@@ -402,6 +402,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		p.dispatchMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
+			Content:    stripBotMention(msg.Caption, botName),
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
 			Audio: &core.AudioAttachment{
@@ -432,6 +433,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		p.dispatchMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
+			Content:    stripBotMention(msg.Caption, botName),
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
 			Audio: &core.AudioAttachment{

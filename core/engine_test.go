@@ -35,6 +35,14 @@ func (s *stubAgentSession) CurrentSessionID() string                            
 func (s *stubAgentSession) Alive() bool                                                  { return true }
 func (s *stubAgentSession) Close() error                                                 { return nil }
 
+type fakeSpeechToText struct {
+	text string
+}
+
+func (f fakeSpeechToText) Transcribe(_ context.Context, _ []byte, _ string, _ string) (string, error) {
+	return f.text, nil
+}
+
 type recordingAgentSession struct {
 	stubAgentSession
 	lastID     string
@@ -172,6 +180,59 @@ type resultAgentSession struct {
 	result      string
 	sendOnce    sync.Once
 	sentPrompts []string
+}
+
+type recordingSendAgentSession struct {
+	events chan Event
+	done   chan struct{}
+	once   sync.Once
+
+	mu     sync.Mutex
+	prompt string
+	images []ImageAttachment
+	files  []FileAttachment
+}
+
+func newRecordingSendAgentSession() *recordingSendAgentSession {
+	return &recordingSendAgentSession{
+		events: make(chan Event, 1),
+		done:   make(chan struct{}),
+	}
+}
+
+func (s *recordingSendAgentSession) Send(prompt string, images []ImageAttachment, files []FileAttachment) error {
+	s.mu.Lock()
+	s.prompt = prompt
+	s.images = append([]ImageAttachment(nil), images...)
+	s.files = append([]FileAttachment(nil), files...)
+	s.mu.Unlock()
+
+	s.once.Do(func() {
+		close(s.done)
+		s.events <- Event{Type: EventResult, Content: "ok", Done: true}
+	})
+	return nil
+}
+
+func (s *recordingSendAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *recordingSendAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *recordingSendAgentSession) CurrentSessionID() string                             { return "recording-session" }
+func (s *recordingSendAgentSession) Alive() bool                                          { return true }
+func (s *recordingSendAgentSession) Close() error                                         { return nil }
+
+func (s *recordingSendAgentSession) waitForSend(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for AgentSession.Send")
+	}
+}
+
+func (s *recordingSendAgentSession) sent() (string, []ImageAttachment, []FileAttachment) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prompt, append([]ImageAttachment(nil), s.images...), append([]FileAttachment(nil), s.files...)
 }
 
 func newResultAgentSession(result string) *resultAgentSession {
@@ -2730,6 +2791,147 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+func TestHandleMessage_SpeechDisabledAudioOnlyForwardsFileAttachment(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	session := newRecordingSendAgentSession()
+	agent := &resultAgent{session: session}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetSpeechConfig(SpeechCfg{Enabled: false})
+
+	audioData := []byte("fake-ogg-audio")
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Audio: &AudioAttachment{
+			MimeType: "audio/ogg",
+			Data:     audioData,
+			Format:   "ogg",
+			Duration: 3,
+		},
+		ReplyCtx: "ctx",
+	}
+
+	e.handleMessage(p, msg)
+	select {
+	case <-session.done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("AgentSession.Send was not called; platform replies = %v", p.getSent())
+	}
+
+	prompt, images, files := session.sent()
+	if prompt != "Please analyze the attached file(s)." {
+		t.Fatalf("Send prompt = %q, want default file prompt", prompt)
+	}
+	if len(images) != 0 {
+		t.Fatalf("Send images len = %d, want 0", len(images))
+	}
+	if len(files) != 1 {
+		t.Fatalf("Send files len = %d, want 1", len(files))
+	}
+	if files[0].MimeType != "audio/ogg" {
+		t.Fatalf("Send file MIME = %q, want audio/ogg", files[0].MimeType)
+	}
+	if string(files[0].Data) != string(audioData) {
+		t.Fatalf("Send file data = %q, want %q", string(files[0].Data), string(audioData))
+	}
+
+	voiceNotEnabled := e.i18n.T(MsgVoiceNotEnabled)
+	for _, sent := range p.getSent() {
+		if sent == voiceNotEnabled {
+			t.Fatalf("unexpected VoiceNotEnabled reply: %v", p.getSent())
+		}
+	}
+}
+
+func TestHandleMessage_SpeechDisabledAudioWithContentPreservesPromptAndForwardsFileAttachment(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	session := newRecordingSendAgentSession()
+	agent := &resultAgent{session: session}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetSpeechConfig(SpeechCfg{Enabled: false})
+
+	audioData := []byte("fake-mp3-audio")
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "please summarize this audio",
+		Audio: &AudioAttachment{
+			MimeType: "audio/mpeg",
+			Data:     audioData,
+			Format:   "mp3",
+			Duration: 5,
+		},
+		ReplyCtx: "ctx",
+	}
+
+	e.handleMessage(p, msg)
+	session.waitForSend(t)
+
+	prompt, images, files := session.sent()
+	if prompt != "please summarize this audio" {
+		t.Fatalf("Send prompt = %q, want caption/content preserved", prompt)
+	}
+	if len(images) != 0 {
+		t.Fatalf("Send images len = %d, want 0", len(images))
+	}
+	if len(files) != 1 {
+		t.Fatalf("Send files len = %d, want 1", len(files))
+	}
+	if files[0].MimeType != "audio/mpeg" {
+		t.Fatalf("Send file MIME = %q, want audio/mpeg", files[0].MimeType)
+	}
+	if string(files[0].Data) != string(audioData) {
+		t.Fatalf("Send file data = %q, want %q", string(files[0].Data), string(audioData))
+	}
+
+	voiceNotEnabled := e.i18n.T(MsgVoiceNotEnabled)
+	for _, sent := range p.getSent() {
+		if sent == voiceNotEnabled {
+			t.Fatalf("unexpected VoiceNotEnabled reply: %v", p.getSent())
+		}
+	}
+}
+
+func TestHandleMessage_SpeechEnabledWithSTTKeepsTranscriptionPath(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	session := newRecordingSendAgentSession()
+	agent := &resultAgent{session: session}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetSpeechConfig(SpeechCfg{Enabled: true, STT: fakeSpeechToText{text: "transcribed text"}})
+
+	msg := &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "u1",
+		UserName:   "user",
+		Audio: &AudioAttachment{
+			MimeType: "audio/mpeg",
+			Data:     []byte("fake-mp3-audio"),
+			Format:   "mp3",
+			Duration: 5,
+		},
+		ReplyCtx: "ctx",
+	}
+
+	e.handleMessage(p, msg)
+	session.waitForSend(t)
+
+	prompt, images, files := session.sent()
+	if prompt != "transcribed text" {
+		t.Fatalf("Send prompt = %q, want transcribed text", prompt)
+	}
+	if len(images) != 0 {
+		t.Fatalf("Send images len = %d, want 0", len(images))
+	}
+	if len(files) != 0 {
+		t.Fatalf("Send files len = %d, want 0", len(files))
 	}
 }
 

@@ -126,6 +126,43 @@ type AudioAttachment struct {
 	Duration int    // duration in seconds (if known)
 }
 
+// AudioAsFileAttachment converts audio into a regular file attachment so it can
+// be forwarded to agents that support file inputs.
+func AudioAsFileAttachment(audio *AudioAttachment, messageID string) FileAttachment {
+	if audio == nil {
+		return FileAttachment{}
+	}
+	return FileAttachment{
+		MimeType: audio.MimeType,
+		Data:     audio.Data,
+		FileName: audioFileName(audio, messageID),
+	}
+}
+
+func audioFileName(audio *AudioAttachment, messageID string) string {
+	ext := strings.Trim(strings.ToLower(strings.TrimSpace(audio.Format)), ".")
+	if ext == "" {
+		switch strings.ToLower(strings.TrimSpace(audio.MimeType)) {
+		case "audio/mpeg", "audio/mp3":
+			ext = "mp3"
+		case "audio/mp4", "audio/x-m4a":
+			ext = "m4a"
+		case "audio/wav", "audio/x-wav":
+			ext = "wav"
+		case "audio/amr":
+			ext = "amr"
+		default:
+			ext = "ogg"
+		}
+	}
+	id := strings.TrimSpace(messageID)
+	id = strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_").Replace(id)
+	if id == "" {
+		return "audio." + ext
+	}
+	return "audio_" + id + "." + ext
+}
+
 // LocationAttachment represents a geographical location sent by the user.
 type LocationAttachment struct {
 	Latitude             float64 // latitude coordinate

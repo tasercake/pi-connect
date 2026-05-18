@@ -1885,28 +1885,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.handleVoiceMessage(p, msg)
 			return
 		}
-		// Fallback: use platform-provided recognition text if available
-		if msg.Content == "" {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgVoiceNotEnabled))
-			return
+		msg.Files = append(msg.Files, AudioAsFileAttachment(msg.Audio, msg.MessageID))
+		msg.Audio = nil
+		if strings.TrimSpace(msg.Content) == "" {
+			msg.Content = "Please analyze the attached file(s)."
 		}
-		// Use platform recognition with a hint, then continue processing
-		slog.Info("using platform-provided voice recognition",
-			"platform", msg.Platform, "content_len", len(msg.Content))
-		if msg.FromVoice {
-			// Use platform name as parameter for the message
-			// Capitalize first letter for better presentation
-			if platformName := msg.Platform; len(platformName) > 0 {
-				// Safe capitalization that handles multi-word names
-				r := []rune(platformName)
-				if len(r) > 0 {
-					r[0] = []rune(strings.ToUpper(string(r[0])))[0]
-				}
-				platformName = string(r)
-				e.send(p, msg.ReplyCtx, e.i18n.Tf(MsgVoiceUsingPlatformRecognition, platformName))
-			}
-		}
-		// Continue processing with the platform-provided text content
 	}
 
 	content := strings.TrimSpace(msg.Content)
