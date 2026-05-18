@@ -283,48 +283,58 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		s.streamMu.Lock()
 		s.isStreaming = false
 		s.streamMu.Unlock()
+		s.rpcHandleAgentEnd(raw)
 	case "extension_error":
 		errMsg, _ := raw["error"].(string)
 		extPath, _ := raw["extensionPath"].(string)
 		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("extension %s: %s", filepath.Base(extPath), errMsg)})
 	case "turn_end":
-		s.rpcHandleTurnEnd(raw)
+		// A single prompt can produce multiple turns (assistant -> tools -> assistant).
+		// Do not mark the cc-connect turn complete until agent_end, otherwise the
+		// foreground handler sends an early "(empty response)" and the remaining
+		// assistant text is relayed later by the unsolicited reader.
 	}
 }
 
-// rpcHandleTurnEnd emits EventResult{Done: true} so the engine flushes the
-// buffered text-delta segments to the platform and marks the turn complete.
-// Required for RPC mode because the pi process is persistent across turns —
-// the readLoop's terminal EventResult only fires on session close, never per
-// turn. Without this, text replies never reach the user and the typing
-// indicator stays on forever.
-func (s *piRPCSession) rpcHandleTurnEnd(raw map[string]any) {
+// rpcHandleAgentEnd emits EventResult{Done: true} once the whole agent run is
+// complete. RPC mode keeps the pi process alive, so the readLoop's terminal
+// EventResult only fires on session close, never per prompt.
+func (s *piRPCSession) rpcHandleAgentEnd(raw map[string]any) {
 	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
-	if msg, ok := raw["message"].(map[string]any); ok && msg != nil {
-		if content, ok := msg["content"].([]any); ok {
-			var b strings.Builder
-			for _, c := range content {
-				item, _ := c.(map[string]any)
-				if item == nil {
-					continue
-				}
-				if t, _ := item["type"].(string); t != "text" {
-					continue
-				}
-				if text, ok := item["text"].(string); ok {
-					b.WriteString(text)
+	if messages, ok := raw["messages"].([]any); ok {
+		var b strings.Builder
+		for _, m := range messages {
+			msg, _ := m.(map[string]any)
+			if msg == nil {
+				continue
+			}
+			if role, _ := msg["role"].(string); role != "assistant" {
+				continue
+			}
+			if content, ok := msg["content"].([]any); ok {
+				for _, c := range content {
+					item, _ := c.(map[string]any)
+					if item == nil {
+						continue
+					}
+					if t, _ := item["type"].(string); t != "text" {
+						continue
+					}
+					if text, ok := item["text"].(string); ok {
+						b.WriteString(text)
+					}
 				}
 			}
-			evt.Content = b.String()
+			if usage, ok := msg["usage"].(map[string]any); ok {
+				if v, ok := usage["input"].(float64); ok {
+					evt.InputTokens += int(v)
+				}
+				if v, ok := usage["output"].(float64); ok {
+					evt.OutputTokens += int(v)
+				}
+			}
 		}
-		if usage, ok := msg["usage"].(map[string]any); ok {
-			if v, ok := usage["input"].(float64); ok {
-				evt.InputTokens = int(v)
-			}
-			if v, ok := usage["output"].(float64); ok {
-				evt.OutputTokens = int(v)
-			}
-		}
+		evt.Content = b.String()
 	}
 	s.tryEmit(evt)
 }
