@@ -444,6 +444,19 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// ContextCompressionSupporter is an optional interface for agents whose running
+// sessions can compact context through a session-native control channel instead
+// of a prompt/slash command.
+type ContextCompressionSupporter interface {
+	SupportsContextCompression() bool
+}
+
+// ContextCompactingSession is an optional interface for running sessions that
+// can compact their current conversation through a native/session-specific API.
+type ContextCompactingSession interface {
+	CompactContext() error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.

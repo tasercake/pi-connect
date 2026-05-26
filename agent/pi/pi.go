@@ -87,6 +87,8 @@ func (a *Agent) Name() string           { return "pi" }
 func (a *Agent) CLIBinaryName() string  { return "pi" }
 func (a *Agent) CLIDisplayName() string { return "Pi" }
 
+func (a *Agent) SupportsContextCompression() bool { return true }
+
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

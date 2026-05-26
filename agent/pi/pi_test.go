@@ -1137,6 +1137,168 @@ func TestPiSession_Close(t *testing.T) {
 	}
 }
 
+func TestPiAgentSupportsContextCompression(t *testing.T) {
+	agent, err := New(map[string]any{"cmd": "echo"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	supporter, ok := agent.(core.ContextCompressionSupporter)
+	if !ok {
+		t.Fatal("Pi agent should implement ContextCompressionSupporter")
+	}
+	if !supporter.SupportsContextCompression() {
+		t.Fatal("SupportsContextCompression() = false, want true")
+	}
+}
+
+func writeFakePiRPC(t *testing.T, dir string) (string, string, string) {
+	t.Helper()
+	argsPath := filepath.Join(dir, "args.txt")
+	cmdPath := filepath.Join(dir, "cmd.json")
+	scriptPath := filepath.Join(dir, "fake-pi-rpc.sh")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "` + argsPath + `"
+IFS= read -r line
+printf '%s\n' "$line" > "` + cmdPath + `"
+id=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+printf '{"id":"%s","type":"response","command":"compact","success":true}\n' "$id"
+sleep 5
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake rpc script: %v", err)
+	}
+	return scriptPath, argsPath, cmdPath
+}
+
+func readRecordedRPCCommand(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded command: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(data), &got); err != nil {
+		t.Fatalf("unmarshal recorded command %q: %v", string(data), err)
+	}
+	return got
+}
+
+func TestPiRPCSessionCompactContextSendsCompactCommand(t *testing.T) {
+	tmp := t.TempDir()
+	fake, _, cmdPath := writeFakePiRPC(t, tmp)
+	s, err := newPiRPCSession(context.Background(), fake, tmp, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiRPCSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err != nil {
+		t.Fatalf("CompactContext() error = %v", err)
+	}
+	got := readRecordedRPCCommand(t, cmdPath)
+	if got["type"] != "compact" {
+		t.Fatalf("RPC command type = %v, want compact; full command=%v", got["type"], got)
+	}
+	if _, ok := got["message"]; ok {
+		t.Fatalf("compact RPC should not include prompt message: %v", got)
+	}
+}
+
+func TestPiSessionCompactContextUsesRPCResume(t *testing.T) {
+	tmp := t.TempDir()
+	fake, argsPath, cmdPath := writeFakePiRPC(t, tmp)
+	s, err := newPiSession(context.Background(), fake, tmp, "", "default", "", "json-sess-123", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err != nil {
+		t.Fatalf("CompactContext() error = %v", err)
+	}
+	got := readRecordedRPCCommand(t, cmdPath)
+	if got["type"] != "compact" {
+		t.Fatalf("RPC command type = %v, want compact; full command=%v", got["type"], got)
+	}
+	argsBytes, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	args := string(argsBytes)
+	if !strings.Contains(args, "--mode\nrpc") || !strings.Contains(args, "--session\njson-sess-123") {
+		t.Fatalf("transient RPC args = %q, want rpc mode resumed session", args)
+	}
+}
+
+func TestPiSessionCompactContextRequiresKnownSession(t *testing.T) {
+	s, err := newPiSession(context.Background(), "echo", t.TempDir(), "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("CompactContext() error = %v, want missing session id error", err)
+	}
+}
+
+func TestPiSessionCompactionEvents(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "compaction_start"})
+	s.handleEvent(map[string]any{"type": "compaction_end"})
+	s.handleEvent(map[string]any{"type": "compaction_end", "errorMessage": "boom"})
+	evts := drainEvents(s)
+
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventThinking || !strings.Contains(evts[0].Content, "started") {
+		t.Fatalf("start event = %+v", evts[0])
+	}
+	if evts[1].Type != core.EventThinking || !strings.Contains(evts[1].Content, "completed") {
+		t.Fatalf("end event = %+v", evts[1])
+	}
+	if evts[2].Type != core.EventError || evts[2].Error == nil || !strings.Contains(evts[2].Error.Error(), "boom") {
+		t.Fatalf("error event = %+v", evts[2])
+	}
+}
+
+func TestPiRPCSessionCompactionEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &piRPCSession{events: make(chan core.Event, 64), ctx: ctx, cancel: cancel}
+	s.alive.Store(true)
+
+	s.handleAgentEvent(map[string]any{"type": "compaction_start"})
+	s.handleAgentEvent(map[string]any{"type": "compaction_end"})
+	s.handleAgentEvent(map[string]any{"type": "compaction_end", "errorMessage": "boom"})
+
+	var evts []core.Event
+	for {
+		select {
+		case ev := <-s.events:
+			evts = append(evts, ev)
+		default:
+			goto done
+		}
+	}
+done:
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventThinking || !strings.Contains(evts[0].Content, "started") {
+		t.Fatalf("start event = %+v", evts[0])
+	}
+	if evts[1].Type != core.EventThinking || !strings.Contains(evts[1].Content, "completed") {
+		t.Fatalf("end event = %+v", evts[1])
+	}
+	if evts[2].Type != core.EventError || evts[2].Error == nil || !strings.Contains(evts[2].Error.Error(), "boom") {
+		t.Fatalf("error event = %+v", evts[2])
+	}
+}
+
 // ── Full event stream simulation ─────────────────────────────
 
 func TestHandleEvent_FullConversation(t *testing.T) {
