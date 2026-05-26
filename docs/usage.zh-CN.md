@@ -709,14 +709,14 @@ Pi 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执�
 ```
 /bind              查看绑定
 /bind pi   添加 pi 项目
-/bind gemini       添加 gemini 项目
+/bind pi           添加 pi 项目
 /bind -pi  移除 pi
 ```
 
 ### 机器人间通信
 
 ```bash
-cc-connect relay send --to gemini "你觉得这个架构怎么样？"
+cc-connect relay send --to pi "你觉得这个架构怎么样？"
 ```
 
 ---
@@ -920,7 +920,7 @@ WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Age
 name = "my-project"
 
 [projects.agent]
-type = "pi"  # 或 pi, pi, gemini, pi, pi, pi
+type = "pi"  # pi 是受支持的代理类型
 
 [projects.agent.options]
 work_dir = "/path/to/project"

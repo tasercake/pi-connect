@@ -797,14 +797,14 @@ Cross-platform bot communication in group chats.
 ```
 /bind              Show bindings
 /bind pi   Add pi project
-/bind gemini       Add gemini project
+/bind pi           Add pi project
 /bind -pi  Remove pi
 ```
 
 ### Bot-to-Bot Communication
 
 ```bash
-cc-connect relay send --to gemini "What do you think about this architecture?"
+cc-connect relay send --to pi "What do you think about this architecture?"
 ```
 
 ---
@@ -1008,7 +1008,7 @@ See [config.example.toml](../config.example.toml) for full examples.
 name = "my-project"
 
 [projects.agent]
-type = "pi"  # or pi, pi, gemini, pi, pi, pi
+type = "pi"  # pi is the supported agent type
 
 [projects.agent.options]
 work_dir = "/path/to/project"

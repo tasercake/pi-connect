@@ -122,8 +122,8 @@ func TestResolveAutoCompress(t *testing.T) {
 			wantEnable: false,
 		},
 		{
-			name:       "non pi omitted disabled",
-			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "claudecode"}},
+			name:       "pi explicit false disables without removed agent",
+			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{Enabled: boolPtr(false)}},
 			wantEnable: false,
 		},
 		{

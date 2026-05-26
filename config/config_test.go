@@ -2495,7 +2495,7 @@ func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
 
-	err := AddPlatformToProject("sigma", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "/sigma", "gemini")
+	err := AddPlatformToProject("sigma", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "/sigma", "pi")
 	if err != nil {
 		t.Fatalf("AddPlatformToProject: %v", err)
 	}
@@ -2507,7 +2507,7 @@ func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	if proj.Name != "sigma" {
 		t.Fatalf("name = %q", proj.Name)
 	}
-	if proj.Agent.Type != "gemini" {
+	if proj.Agent.Type != "pi" {
 		t.Fatalf("agent type = %q, want pi", proj.Agent.Type)
 	}
 	if stringMapValue(proj.Agent.Options, "work_dir") != "/sigma" {
