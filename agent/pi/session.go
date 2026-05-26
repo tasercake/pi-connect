@@ -342,7 +342,55 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 	case "assistant":
 		// Check for errors
 		if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+			var diagDetails []string
+			isTransportFailure := false
+
+			if stopReason, ok := msg["stopReason"].(string); ok && stopReason != "" {
+				diagDetails = append(diagDetails, fmt.Sprintf("stopReason=%s", stopReason))
+			}
+
+			if det, ok := msg["details"].(map[string]any); ok {
+				if phase, ok := det["phase"].(string); ok && phase != "" {
+					diagDetails = append(diagDetails, fmt.Sprintf("phase=%s", phase))
+				}
+				if bytes, ok := det["requestBytes"].(float64); ok && bytes != 0 {
+					diagDetails = append(diagDetails, fmt.Sprintf("bytes=%.0f", bytes))
+				}
+			}
+
+			if diagAny, ok := msg["diagnostics"]; ok {
+				switch d := diagAny.(type) {
+				case map[string]any:
+					if dType, ok := d["type"].(string); ok && dType != "" {
+						diagDetails = append(diagDetails, fmt.Sprintf("diag=%s", dType))
+						if dType == "provider_transport_failure" {
+							isTransportFailure = true
+						}
+					}
+				case []any:
+					for _, item := range d {
+						if diag, ok := item.(map[string]any); ok {
+							if dType, ok := diag["type"].(string); ok && dType != "" {
+								diagDetails = append(diagDetails, fmt.Sprintf("diag=%s", dType))
+								if dType == "provider_transport_failure" {
+									isTransportFailure = true
+								}
+							}
+						}
+					}
+				}
+			}
+
+			fullErr := errMsg
+			if len(diagDetails) > 0 {
+				fullErr = fmt.Sprintf("%s [%s]", errMsg, strings.Join(diagDetails, ", "))
+			}
+
+			if strings.Contains(errMsg, "WebSocket closed 1000") && isTransportFailure {
+				fullErr = "transient provider transport failure: " + fullErr + ". Please try again."
+			}
+
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", fullErr)}
 			select {
 			case s.events <- evt:
 			case <-s.ctx.Done():
