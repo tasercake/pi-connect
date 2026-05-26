@@ -81,6 +81,11 @@ type piRPCSession struct {
 	// thinking accumulation buffer.
 	thinkingBuf strings.Builder
 
+	usageMu                   sync.Mutex
+	contextUsage              *core.ContextUsage
+	pendingContextOverflowErr string
+	recoveredAfterOverflow    bool
+
 	wg sync.WaitGroup
 }
 
@@ -229,8 +234,17 @@ func (s *piRPCSession) readLoop() {
 	if err := scanner.Err(); err != nil {
 		slog.Debug("piRPCSession: stdout scanner closed", "error", err)
 	}
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
+	}
 	// Emit final EventResult when readLoop returns.
-	s.tryEmit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+	usage := s.GetContextUsage()
+	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
+	if usage != nil {
+		evt.InputTokens = usage.UsedTokens
+		evt.OutputTokens = usage.OutputTokens
+	}
+	s.tryEmit(evt)
 }
 
 func (s *piRPCSession) dispatchLine(line []byte) {
@@ -269,6 +283,7 @@ func (s *piRPCSession) dispatchLine(line []byte) {
 // handleAgentEvent reuses the JSON-mode event semantics. It's intentionally a
 // thin wrapper around the existing piSession event handlers so we don't drift.
 func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
+	s.updateUsageFromEvent(raw)
 	eventType, _ := raw["type"].(string)
 	switch eventType {
 	case "message_update":
@@ -323,6 +338,7 @@ func (s *piRPCSession) rpcHandleCompactionEvent(eventType string, raw map[string
 // EventResult only fires on session close, never per prompt.
 func (s *piRPCSession) rpcHandleAgentEnd(raw map[string]any) {
 	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
+	sawSuccessfulAssistant := false
 	if messages, ok := raw["messages"].([]any); ok {
 		var b strings.Builder
 		for _, m := range messages {
@@ -332,6 +348,19 @@ func (s *piRPCSession) rpcHandleAgentEnd(raw map[string]any) {
 			}
 			if role, _ := msg["role"].(string); role != "assistant" {
 				continue
+			}
+			s.recordUsageFromMessage(msg)
+			if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+				if isRecoverablePiOverflow(errMsg) {
+					s.storePendingOverflowError(errMsg)
+					continue
+				}
+				s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
+				continue
+			}
+			if assistantMessageSucceeded(msg) {
+				sawSuccessfulAssistant = true
+				s.clearPendingOverflowError()
 			}
 			if content, ok := msg["content"].([]any); ok {
 				for _, c := range content {
@@ -347,16 +376,16 @@ func (s *piRPCSession) rpcHandleAgentEnd(raw map[string]any) {
 					}
 				}
 			}
-			if usage, ok := msg["usage"].(map[string]any); ok {
-				if v, ok := usage["input"].(float64); ok {
-					evt.InputTokens += int(v)
-				}
-				if v, ok := usage["output"].(float64); ok {
-					evt.OutputTokens += int(v)
-				}
-			}
 		}
 		evt.Content = b.String()
+	}
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" && !sawSuccessfulAssistant {
+		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
+		return
+	}
+	if usage := s.GetContextUsage(); usage != nil {
+		evt.InputTokens = usage.UsedTokens
+		evt.OutputTokens = usage.OutputTokens
 	}
 	s.tryEmit(evt)
 }
@@ -435,10 +464,73 @@ func (s *piRPCSession) rpcHandleMessageEnd(raw map[string]any) {
 		}
 		s.tryEmit(core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncStr(output, 500)})
 	case "assistant":
+		s.recordUsageFromMessage(msg)
 		if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+			if isRecoverablePiOverflow(errMsg) {
+				s.storePendingOverflowError(errMsg)
+				return
+			}
 			s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
+			return
+		}
+		if assistantMessageSucceeded(msg) {
+			s.clearPendingOverflowError()
 		}
 	}
+}
+
+func (s *piRPCSession) updateUsageFromEvent(raw map[string]any) {
+	if msg, _ := raw["message"].(map[string]any); msg != nil {
+		s.recordUsageFromMessage(msg)
+	}
+	if messages, _ := raw["messages"].([]any); messages != nil {
+		for _, item := range messages {
+			if msg, _ := item.(map[string]any); msg != nil {
+				s.recordUsageFromMessage(msg)
+			}
+		}
+	}
+}
+
+func (s *piRPCSession) recordUsageFromMessage(msg map[string]any) {
+	u, ok := parsePiUsage(msg["usage"])
+	if !ok {
+		return
+	}
+	s.usageMu.Lock()
+	s.contextUsage = u.contextUsage()
+	s.usageMu.Unlock()
+}
+
+func (s *piRPCSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	return cloneContextUsage(s.contextUsage)
+}
+
+func (s *piRPCSession) storePendingOverflowError(errMsg string) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	s.pendingContextOverflowErr = errMsg
+	s.recoveredAfterOverflow = false
+}
+
+func (s *piRPCSession) clearPendingOverflowError() {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.pendingContextOverflowErr != "" {
+		s.pendingContextOverflowErr = ""
+		s.recoveredAfterOverflow = true
+	}
+}
+
+func (s *piRPCSession) pendingOverflowErrorForEOF() string {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.recoveredAfterOverflow {
+		return ""
+	}
+	return s.pendingContextOverflowErr
 }
 
 func (s *piRPCSession) handleResponse(line []byte) {
@@ -689,6 +781,13 @@ func (s *piRPCSession) cancelPending(err error) {
 }
 
 func (s *piRPCSession) tryEmit(evt core.Event) {
+	if s.ctx == nil {
+		select {
+		case s.events <- evt:
+		default:
+		}
+		return
+	}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():

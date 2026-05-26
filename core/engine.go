@@ -4018,11 +4018,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			baseResponse := cleanResponse
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
+			if usage := replyFooterSessionContextUsage(state.agentSession); usage != nil && usage.UsedTokens > contextEstimate {
+				contextEstimate = usage.UsedTokens
+			}
+			if event.InputTokens >= 100 && event.InputTokens > contextEstimate {
+				contextEstimate = event.InputTokens
+			}
 
 			// Evaluate auto-compress trigger (token estimate on user+assistant text,
 			// including this turn's assistant reply before it is appended to history).
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
 				estimate := contextEstimate
+				if usage := replyFooterSessionContextUsage(state.agentSession); usage != nil && usage.UsedTokens > estimate {
+					estimate = usage.UsedTokens
+				}
+				if event.InputTokens >= 100 && event.InputTokens > estimate {
+					estimate = event.InputTokens
+				}
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt

@@ -50,6 +50,11 @@ type piSession struct {
 	emittedTextDelta bool            // true after a non-empty text_delta was emitted this turn
 	inputTokens      int
 	outputTokens     int
+
+	usageMu                   sync.Mutex
+	contextUsage              *core.ContextUsage
+	pendingContextOverflowErr string
+	recoveredAfterOverflow    bool
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -233,6 +238,12 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	// heartbeat can arrive after the final result for this turn.
 	stopHeartbeat()
 
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		s.emitTerminalError(fmt.Errorf("%s", errMsg))
+		s.resetResponseState()
+		return
+	}
+
 	// Assistant-level Pi JSON errors are terminal for this adapter. The engine
 	// has already received EventError and will not keep consuming this channel
 	// when eventsNeedResync=true, so do not enqueue a synthetic final result that
@@ -315,6 +326,7 @@ func (s *piSession) startJSONHeartbeat() func() {
 //	message_end       — complete message
 //	custom_message    — visible extension message (e.g. subagent completion)
 func (s *piSession) handleEvent(raw map[string]any) {
+	s.updateUsageFromEvent(raw)
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {
@@ -326,6 +338,9 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	case "message_update":
 		s.handleMessageUpdate(raw)
+
+	case "message":
+		s.handleMessageRecord(raw)
 
 	case "message_end":
 		s.handleMessageEnd(raw)
@@ -513,6 +528,10 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 	case "assistant":
 		// Check for errors
 		if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+			if isRecoverablePiOverflow(errMsg) {
+				s.storePendingOverflowError(errMsg)
+				return
+			}
 			var diagDetails []string
 			isTransportFailure := false
 
@@ -565,12 +584,19 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 			return
 		}
 		s.captureFinalAssistantMessage(msg)
+		if assistantMessageSucceeded(msg) {
+			s.clearPendingOverflowError()
+		}
 	}
 }
 
 func (s *piSession) handleTurnEnd(raw map[string]any) {
 	if msg, ok := raw["message"].(map[string]any); ok && msg != nil {
+		s.recordUsageFromMessage(msg)
 		s.captureFinalAssistantMessage(msg)
+		if assistantMessageSucceeded(msg) {
+			s.clearPendingOverflowError()
+		}
 	}
 	slog.Debug("piSession: lifecycle event", "type", "turn_end")
 }
@@ -583,6 +609,7 @@ func (s *piSession) resetResponseState() {
 }
 
 func (s *piSession) captureFinalAssistantMessage(msg map[string]any) {
+	s.recordUsageFromMessage(msg)
 	if !isFinalAssistantMessage(msg) {
 		return
 	}
@@ -590,13 +617,6 @@ func (s *piSession) captureFinalAssistantMessage(msg map[string]any) {
 	if text != "" {
 		s.finalTextBuf.Reset()
 		s.finalTextBuf.WriteString(text)
-	}
-	input, output := extractUsage(msg)
-	if input > 0 {
-		s.inputTokens = input
-	}
-	if output > 0 {
-		s.outputTokens = output
 	}
 }
 
@@ -657,19 +677,86 @@ func hasFinalAnswerSignature(msg map[string]any) bool {
 	return false
 }
 
-func extractUsage(msg map[string]any) (int, int) {
-	usage, _ := msg["usage"].(map[string]any)
-	if usage == nil {
-		return 0, 0
+func (s *piSession) updateUsageFromEvent(raw map[string]any) {
+	if msg, _ := raw["message"].(map[string]any); msg != nil {
+		s.recordUsageFromMessage(msg)
 	}
-	var input, output int
-	if v, ok := usage["input"].(float64); ok {
-		input = int(v)
+	if messages, _ := raw["messages"].([]any); messages != nil {
+		for _, item := range messages {
+			if msg, _ := item.(map[string]any); msg != nil {
+				s.recordUsageFromMessage(msg)
+			}
+		}
 	}
-	if v, ok := usage["output"].(float64); ok {
-		output = int(v)
+}
+
+func (s *piSession) recordUsageFromMessage(msg map[string]any) {
+	u, ok := parsePiUsage(msg)
+	if !ok {
+		return
 	}
-	return input, output
+	cu := u.contextUsage()
+	if cu == nil {
+		return
+	}
+	s.usageMu.Lock()
+	s.contextUsage = cu
+	s.usageMu.Unlock()
+	s.inputTokens = cu.UsedTokens
+	s.outputTokens = cu.OutputTokens
+}
+
+func (s *piSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	return cloneContextUsage(s.contextUsage)
+}
+
+func (s *piSession) handleMessageRecord(raw map[string]any) {
+	msg, _ := raw["message"].(map[string]any)
+	if msg == nil {
+		return
+	}
+	role, _ := msg["role"].(string)
+	if role != "assistant" {
+		return
+	}
+	if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+		if isRecoverablePiOverflow(errMsg) {
+			s.storePendingOverflowError(errMsg)
+			return
+		}
+		s.emitTerminalError(fmt.Errorf("%s", errMsg))
+		return
+	}
+	if assistantMessageSucceeded(msg) {
+		s.clearPendingOverflowError()
+	}
+}
+
+func (s *piSession) storePendingOverflowError(errMsg string) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	s.pendingContextOverflowErr = errMsg
+	s.recoveredAfterOverflow = false
+}
+
+func (s *piSession) clearPendingOverflowError() {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.pendingContextOverflowErr != "" {
+		s.pendingContextOverflowErr = ""
+		s.recoveredAfterOverflow = true
+	}
+}
+
+func (s *piSession) pendingOverflowErrorForEOF() string {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.recoveredAfterOverflow {
+		return ""
+	}
+	return s.pendingContextOverflowErr
 }
 
 // extractToolInput pulls a concise summary from a tool call content item.

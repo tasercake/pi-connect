@@ -83,9 +83,10 @@ func normalizeMode(raw string) string {
 	}
 }
 
-func (a *Agent) Name() string           { return "pi" }
-func (a *Agent) CLIBinaryName() string  { return "pi" }
-func (a *Agent) CLIDisplayName() string { return "Pi" }
+func (a *Agent) Name() string            { return "pi" }
+func (a *Agent) CLIBinaryName() string   { return "pi" }
+func (a *Agent) CLIDisplayName() string  { return "Pi" }
+func (a *Agent) CompressCommand() string { return "/compact" }
 
 func (a *Agent) SupportsContextCompression() bool { return true }
 

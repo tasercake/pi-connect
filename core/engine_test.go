@@ -7635,7 +7635,34 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 
 	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
 
-	// The auto-compress should send /compact to the agent session.
+	waitForCompressSend(t, sess)
+}
+
+func TestAutoCompress_UsesRuntimeContextUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("auto-compress-runtime")
+	sess.contextUsage = &ContextUsage{UsedTokens: 250000, InputTokens: 10, CachedInputTokens: 249000, OutputTokens: 1000}
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 200000, 0)
+
+	key := "test:user-runtime"
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "tiny")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	sess.events <- Event{Type: EventResult, Content: "ok", Done: true}
+
+	waitForCompressSend(t, sess)
+}
+
+func waitForCompressSend(t *testing.T, sess *queuingAgentSession) {
+	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
 		sess.sendMu.Lock()

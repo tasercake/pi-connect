@@ -152,6 +152,13 @@ func TestAgent_NameAndDisplay(t *testing.T) {
 	}
 }
 
+func TestAgent_CompressCommand(t *testing.T) {
+	a := &Agent{}
+	if got := a.CompressCommand(); got != "/compact" {
+		t.Fatalf("CompressCommand() = %q, want /compact", got)
+	}
+}
+
 func TestAgent_ModelGetSet(t *testing.T) {
 	a := &Agent{}
 	if a.GetModel() != "" {
@@ -1121,8 +1128,8 @@ func TestHandleMessageEnd_AssistantFinalTextFallback(t *testing.T) {
 	if got := s.finalTextBuf.String(); got != "real final answer with suffix" {
 		t.Fatalf("finalTextBuf = %q", got)
 	}
-	if s.inputTokens != 123 || s.outputTokens != 45 {
-		t.Fatalf("usage = %d/%d, want 123/45", s.inputTokens, s.outputTokens)
+	if s.inputTokens != 168 || s.outputTokens != 45 {
+		t.Fatalf("usage = %d/%d, want 168/45", s.inputTokens, s.outputTokens)
 	}
 }
 
@@ -1909,5 +1916,134 @@ func runReadLoopEvents(t *testing.T, events ...map[string]any) []core.Event {
 		case <-timeout:
 			t.Fatal("timeout waiting for events")
 		}
+	}
+}
+
+func TestPiIssue5ContextUsageFromMessageEvent(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message",
+		"message": map[string]any{
+			"role": "assistant",
+			"usage": map[string]any{
+				"input":       float64(4724),
+				"output":      float64(40),
+				"cacheRead":   float64(267776),
+				"cacheWrite":  float64(0),
+				"totalTokens": float64(272540),
+			},
+		},
+	})
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil")
+	}
+	if usage.UsedTokens != 272540 || usage.TotalTokens != 272540 || usage.CachedInputTokens != 267776 || usage.OutputTokens != 40 {
+		t.Fatalf("usage = %+v, want total/cache/output from Pi event", usage)
+	}
+	usage.UsedTokens = 1
+	if got := s.GetContextUsage().UsedTokens; got != 272540 {
+		t.Fatalf("GetContextUsage returned shared pointer; got UsedTokens %d", got)
+	}
+}
+
+func TestPiIssue5ContextUsageFallbackWithoutTotalTokens(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"usage": map[string]any{
+				"input":      float64(1000),
+				"output":     float64(50),
+				"cacheRead":  float64(5000),
+				"cacheWrite": float64(25),
+			},
+		},
+	})
+
+	usage := s.GetContextUsage()
+	if usage == nil || usage.UsedTokens != 6075 {
+		t.Fatalf("usage = %+v, want fallback 6075", usage)
+	}
+}
+
+func TestPiIssue5MessageRecordOverflowErrorSuppressed(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"}})
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("overflow should be pending, got %+v", evts)
+	}
+	if errMsg := s.pendingOverflowErrorForEOF(); !strings.Contains(errMsg, "context_length_exceeded") {
+		t.Fatalf("pending overflow = %q", errMsg)
+	}
+
+	s.handleEvent(map[string]any{"type": "message", "message": map[string]any{"role": "assistant"}})
+	if errMsg := s.pendingOverflowErrorForEOF(); !strings.Contains(errMsg, "context_length_exceeded") {
+		t.Fatalf("empty assistant bookkeeping should not clear pending overflow, got %q", errMsg)
+	}
+
+	s.handleEvent(map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "recovered"}}}})
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		t.Fatalf("successful assistant message should clear pending overflow, got %q", errMsg)
+	}
+}
+
+func TestPiIssue5RPCOverflowOnlyAgentEndEmitsError(t *testing.T) {
+	s := &piRPCSession{events: make(chan core.Event, 8)}
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"}}})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventError || evts[0].Error == nil {
+		t.Fatalf("events = %+v, want one EventError", evts)
+	}
+}
+
+func TestPiIssue5RPCOverflowThenSuccessAgentEndClearsError(t *testing.T) {
+	s := &piRPCSession{events: make(chan core.Event, 8)}
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"},
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "recovered"}}},
+	}})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].Content != "recovered" {
+		t.Fatalf("events = %+v, want recovered EventResult", evts)
+	}
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		t.Fatalf("pending overflow after recovery = %q", errMsg)
+	}
+}
+
+func TestPiIssue5RPCContextUsageFromAgentEnd(t *testing.T) {
+	s := &piRPCSession{events: make(chan core.Event, 8)}
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{map[string]any{
+		"role":    "assistant",
+		"content": []any{map[string]any{"type": "text", "text": "ok"}},
+		"usage": map[string]any{
+			"input":       float64(3041),
+			"output":      float64(126),
+			"cacheRead":   float64(269824),
+			"totalTokens": float64(272991),
+		},
+	}}})
+
+	usage := s.GetContextUsage()
+	if usage == nil || usage.UsedTokens != 272991 || usage.CachedInputTokens != 269824 {
+		t.Fatalf("usage = %+v, want Pi total/cache tokens", usage)
+	}
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].InputTokens != 272991 || evts[0].OutputTokens != 126 {
+		t.Fatalf("events = %+v, want final usage event", evts)
 	}
 }

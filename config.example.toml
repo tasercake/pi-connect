@@ -255,9 +255,13 @@ level = "info" # debug, info, warn, error
 # Automatically trigger /compress when estimated token usage exceeds threshold.
 # 当估算 token 超过阈值时自动触发 /compress。
 #
+# Pi projects default to enabled when this block is omitted (max_tokens = 200000).
+# Set enabled = false to opt out. Other agents default to disabled.
+# Pi 项目在省略此块时默认启用（max_tokens = 200000）。设置 enabled = false 可退出。
+#
 # [projects.auto_compress]
 # enabled = true
-# max_tokens = 12000     # estimated token threshold to trigger compression
+# max_tokens = 12000     # estimated token threshold to trigger compression (Pi omitted default: 200000)
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
 
 # [projects.observe]
