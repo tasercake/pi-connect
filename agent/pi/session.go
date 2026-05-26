@@ -217,6 +217,9 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	}
 
 	if err := scanner.Err(); err != nil {
+		if s.terminalError.Load() || !s.alive.Load() {
+			return
+		}
 		slog.Error("piSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
@@ -698,14 +701,34 @@ func extractToolInput(item map[string]any) string {
 func (s *piSession) emitTerminalError(err error) {
 	s.terminalError.Store(true)
 	s.alive.Store(false)
-	evt := core.Event{Type: core.EventError, Error: err}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
-	case <-time.After(100 * time.Millisecond):
-		slog.Warn("piSession: dropping terminal error because events channel is full", "error", err)
-	}
+	// Cancel first so the heartbeat goroutine stops competing for space while we
+	// make the terminal error observable to the engine.
 	s.cancel()
+
+	evt := core.Event{Type: core.EventError, Error: err}
+
+	// The terminal error must be observable by the engine: after EventError,
+	// core intentionally stops consuming this turn's event stream when the
+	// session is dead. If the bounded channel is already full, evict stale
+	// buffered events to make room rather than silently dropping the only terminal
+	// signal and leaving the foreground loop to wait for the idle timeout.
+	for i := 0; i <= cap(s.events); i++ {
+		select {
+		case s.events <- evt:
+			return
+		default:
+		}
+		select {
+		case dropped := <-s.events:
+			slog.Warn("piSession: evicting buffered event to deliver terminal error", "dropped_type", dropped.Type, "error", err)
+		default:
+		}
+	}
+
+	// This should be unreachable while readLoop owns the still-open events
+	// channel, but keep a non-blocking fallback so a terminal path never wedges
+	// stdout draining if future code adds another concurrent producer.
+	slog.Warn("piSession: terminal error could not be delivered after eviction", "error", err)
 }
 
 func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {

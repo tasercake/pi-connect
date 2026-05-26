@@ -1012,6 +1012,18 @@ func TestPiSessionTerminalErrorDoesNotBlockWhenEventsFull(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected terminal assistant error to cancel session context")
 	}
+
+	evts := drainEvents(s)
+	if len(evts) != cap(s.events) {
+		t.Fatalf("drained %d events, want channel to remain at capacity %d", len(evts), cap(s.events))
+	}
+	last := evts[len(evts)-1]
+	if last.Type != core.EventError {
+		t.Fatalf("last event type = %s, want terminal %s; events=%v", last.Type, core.EventError, evts)
+	}
+	if last.Error == nil || !strings.Contains(last.Error.Error(), "WebSocket closed 1006") {
+		t.Fatalf("terminal error = %v", last.Error)
+	}
 }
 
 func TestPiSessionReadLoopDoesNotEmitResultAfterTerminalError(t *testing.T) {
