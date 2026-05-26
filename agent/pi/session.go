@@ -38,6 +38,11 @@ type piSession struct {
 	alive     atomic.Bool
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
+
+	finalTextBuf     strings.Builder // complete final assistant text from message_end/turn_end
+	emittedTextDelta bool            // true after a non-empty text_delta was emitted this turn
+	inputTokens      int
+	outputTokens     int
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -64,6 +69,8 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 }
 
 func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	s.resetResponseState()
+
 	// Clean up attachments from previous turns.
 	cleanAttachments(s.workDir)
 
@@ -192,7 +199,17 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 
 	// Emit EventResult when the process finishes.
 	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	evt := core.Event{
+		Type:         core.EventResult,
+		SessionID:    sid,
+		Done:         true,
+		InputTokens:  s.inputTokens,
+		OutputTokens: s.outputTokens,
+	}
+	if !s.emittedTextDelta {
+		evt.Content = s.finalTextBuf.String()
+	}
+	s.resetResponseState()
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -223,7 +240,10 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_end":
 		s.handleMessageEnd(raw)
 
-	case "agent_start", "agent_end", "turn_start", "turn_end", "message_start":
+	case "turn_end":
+		s.handleTurnEnd(raw)
+
+	case "agent_start", "agent_end", "turn_start", "message_start":
 		// Logged for debugging but no action needed.
 		slog.Debug("piSession: lifecycle event", "type", eventType)
 
@@ -245,6 +265,7 @@ func (s *piSession) handleMessageUpdate(raw map[string]any) {
 	case "text_delta":
 		delta, _ := ame["delta"].(string)
 		if delta != "" {
+			s.emittedTextDelta = true
 			evt := core.Event{Type: core.EventText, Content: delta}
 			select {
 			case s.events <- evt:
@@ -348,8 +369,114 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 			case <-s.ctx.Done():
 				return
 			}
+			return
+		}
+		s.captureFinalAssistantMessage(msg)
+	}
+}
+
+func (s *piSession) handleTurnEnd(raw map[string]any) {
+	if msg, ok := raw["message"].(map[string]any); ok && msg != nil {
+		s.captureFinalAssistantMessage(msg)
+	}
+	slog.Debug("piSession: lifecycle event", "type", "turn_end")
+}
+
+func (s *piSession) resetResponseState() {
+	s.finalTextBuf.Reset()
+	s.emittedTextDelta = false
+	s.inputTokens = 0
+	s.outputTokens = 0
+}
+
+func (s *piSession) captureFinalAssistantMessage(msg map[string]any) {
+	if !isFinalAssistantMessage(msg) {
+		return
+	}
+	text := extractTextContent(msg)
+	if text != "" {
+		s.finalTextBuf.Reset()
+		s.finalTextBuf.WriteString(text)
+	}
+	input, output := extractUsage(msg)
+	if input > 0 {
+		s.inputTokens = input
+	}
+	if output > 0 {
+		s.outputTokens = output
+	}
+}
+
+func isFinalAssistantMessage(msg map[string]any) bool {
+	role, _ := msg["role"].(string)
+	if role != "assistant" {
+		return false
+	}
+	if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+		return false
+	}
+	stopReason, _ := msg["stopReason"].(string)
+	if stopReason == "toolUse" {
+		return false
+	}
+	if stopReason == "stop" {
+		return true
+	}
+	return hasFinalAnswerSignature(msg)
+}
+
+func extractTextContent(msg map[string]any) string {
+	content, _ := msg["content"].([]any)
+	var b strings.Builder
+	for _, c := range content {
+		item, _ := c.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "text" {
+			continue
+		}
+		if text, ok := item["text"].(string); ok {
+			b.WriteString(text)
 		}
 	}
+	return b.String()
+}
+
+func hasFinalAnswerSignature(msg map[string]any) bool {
+	content, _ := msg["content"].([]any)
+	for _, c := range content {
+		item, _ := c.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "text" {
+			continue
+		}
+		sig, _ := item["textSignature"].(map[string]any)
+		if sig == nil {
+			continue
+		}
+		if phase, _ := sig["phase"].(string); phase == "final_answer" {
+			return true
+		}
+	}
+	return false
+}
+
+func extractUsage(msg map[string]any) (int, int) {
+	usage, _ := msg["usage"].(map[string]any)
+	if usage == nil {
+		return 0, 0
+	}
+	var input, output int
+	if v, ok := usage["input"].(float64); ok {
+		input = int(v)
+	}
+	if v, ok := usage["output"].(float64); ok {
+		output = int(v)
+	}
+	return input, output
 }
 
 // extractToolInput pulls a concise summary from a tool call content item.
