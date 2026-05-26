@@ -151,6 +151,23 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 	return nil
 }
 
+func (s *piSession) CompactContext() error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	sid := s.CurrentSessionID()
+	if sid == "" {
+		return fmt.Errorf("piSession: cannot compact before session id is known")
+	}
+
+	rpc, err := newPiRPCSession(s.ctx, s.cmd, s.workDir, s.model, s.mode, s.thinking, sid, s.extraEnv)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rpc.Close() }()
+	return rpc.CompactContext()
+}
+
 func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
 	stopHeartbeat := s.startJSONHeartbeat()
@@ -299,6 +316,9 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "turn_end":
 		s.handleTurnEnd(raw)
 
+	case "compaction_start", "compaction_end":
+		s.handleCompactionEvent(eventType, raw)
+
 	case "agent_start", "agent_end", "turn_start", "message_start":
 		// Logged for debugging but no action needed.
 		slog.Debug("piSession: lifecycle event", "type", eventType)
@@ -335,6 +355,31 @@ func customMessageContent(raw map[string]any) string {
 		return ""
 	}
 	return content
+}
+
+func (s *piSession) handleCompactionEvent(eventType string, raw map[string]any) {
+	switch eventType {
+	case "compaction_start":
+		slog.Info("piSession: compaction started", "session_id", s.CurrentSessionID())
+		select {
+		case s.events <- core.Event{Type: core.EventThinking, Content: "Context compaction started"}:
+		case <-s.ctx.Done():
+		}
+	case "compaction_end":
+		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
+			slog.Warn("piSession: compaction failed", "session_id", s.CurrentSessionID(), "error", errMsg)
+			select {
+			case s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("context compaction failed: %s", errMsg)}:
+			case <-s.ctx.Done():
+			}
+			return
+		}
+		slog.Info("piSession: compaction completed", "session_id", s.CurrentSessionID())
+		select {
+		case s.events <- core.Event{Type: core.EventThinking, Content: "Context compaction completed"}:
+		case <-s.ctx.Done():
+		}
+	}
 }
 
 // handleMessageUpdate processes streaming deltas from pi's assistantMessageEvent.

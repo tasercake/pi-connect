@@ -297,6 +297,24 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		// Do not mark the cc-connect turn complete until agent_end, otherwise the
 		// foreground handler sends an early "(empty response)" and the remaining
 		// assistant text is relayed later by the unsolicited reader.
+	case "compaction_start", "compaction_end":
+		s.rpcHandleCompactionEvent(eventType, raw)
+	}
+}
+
+func (s *piRPCSession) rpcHandleCompactionEvent(eventType string, raw map[string]any) {
+	switch eventType {
+	case "compaction_start":
+		slog.Info("piRPCSession: compaction started", "session_id", s.CurrentSessionID())
+		s.tryEmit(core.Event{Type: core.EventThinking, Content: "Context compaction started"})
+	case "compaction_end":
+		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
+			slog.Warn("piRPCSession: compaction failed", "session_id", s.CurrentSessionID(), "error", errMsg)
+			s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("context compaction failed: %s", errMsg)})
+			return
+		}
+		slog.Info("piRPCSession: compaction completed", "session_id", s.CurrentSessionID())
+		s.tryEmit(core.Event{Type: core.EventThinking, Content: "Context compaction completed"})
 	}
 }
 
@@ -576,6 +594,23 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 	}
 	if !resp.success {
 		return fmt.Errorf("piRPCSession: pi rejected prompt: %s", resp.errMsg)
+	}
+	return nil
+}
+
+func (s *piRPCSession) CompactContext() error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	if err := s.startProcess(); err != nil {
+		return err
+	}
+	resp, err := s.call(map[string]any{"type": "compact"})
+	if err != nil {
+		return fmt.Errorf("piRPCSession: compact failed: %w", err)
+	}
+	if !resp.success {
+		return fmt.Errorf("piRPCSession: pi rejected compact: %s", resp.errMsg)
 	}
 	return nil
 }
