@@ -872,6 +872,161 @@ func TestHandleMessageEnd_AssistantNoError(t *testing.T) {
 	}
 }
 
+func TestHandleMessageEnd_AssistantFinalTextFallback(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "thinking", "thinking": "hidden"},
+				map[string]any{"type": "text", "text": "real final answer"},
+				map[string]any{"type": "text", "text": " with suffix"},
+			},
+			"usage": map[string]any{"input": float64(123), "output": float64(45)},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no immediate events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "real final answer with suffix" {
+		t.Fatalf("finalTextBuf = %q", got)
+	}
+	if s.inputTokens != 123 || s.outputTokens != 45 {
+		t.Fatalf("usage = %d/%d, want 123/45", s.inputTokens, s.outputTokens)
+	}
+}
+
+func TestHandleMessageEnd_AssistantFinalSignatureFallback(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          "signed final answer",
+					"textSignature": map[string]any{"phase": "final_answer"},
+				},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no immediate events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "signed final answer" {
+		t.Fatalf("finalTextBuf = %q", got)
+	}
+}
+
+func TestHandleMessageEnd_AssistantToolUseIgnored(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "toolUse",
+			"content": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          "not a final answer",
+					"textSignature": map[string]any{"phase": "final_answer"},
+				},
+				map[string]any{"type": "toolCall", "name": "bash"},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "" {
+		t.Fatalf("finalTextBuf = %q, want empty", got)
+	}
+}
+
+func TestHandleTurnEnd_AssistantErrorIgnored(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "400 model not supported",
+			"content": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          "not a successful final answer",
+					"textSignature": map[string]any{"phase": "final_answer"},
+				},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "" {
+		t.Fatalf("finalTextBuf = %q, want empty", got)
+	}
+}
+
+func TestHandleTurnEnd_AssistantFinalTextFallbackNoEvent(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "text", "text": "turn final answer"},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no immediate events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "turn final answer" {
+		t.Fatalf("finalTextBuf = %q", got)
+	}
+}
+
+func TestPiSession_ResponseStateResetsBetweenTurns(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.finalTextBuf.WriteString("stale final")
+	s.emittedTextDelta = true
+	s.inputTokens = 10
+	s.outputTokens = 20
+
+	s.resetResponseState()
+
+	if got := s.finalTextBuf.String(); got != "" {
+		t.Fatalf("finalTextBuf = %q, want empty", got)
+	}
+	if s.emittedTextDelta {
+		t.Fatal("emittedTextDelta = true, want false")
+	}
+	if s.inputTokens != 0 || s.outputTokens != 0 {
+		t.Fatalf("usage = %d/%d, want 0/0", s.inputTokens, s.outputTokens)
+	}
+}
+
 func TestHandleMessageEnd_NilMessage(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
@@ -1176,5 +1331,133 @@ loop:
 	}
 	if s.CurrentSessionID() != "echo-sess" {
 		t.Errorf("sessionID = %q, want echo-sess", s.CurrentSessionID())
+	}
+}
+
+func TestPiSession_ReadLoopUsesFinalTextOnlyResultContent(t *testing.T) {
+	sessionEvent := map[string]any{"type": "session", "id": "final-sess"}
+	finalEvent := map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "text", "text": "real final from message end"},
+			},
+		},
+	}
+
+	evts := runReadLoopEvents(t, sessionEvent, finalEvent)
+
+	var result *core.Event
+	for i := range evts {
+		if evts[i].Type == core.EventText {
+			t.Fatalf("unexpected text event: %+v", evts[i])
+		}
+		if evts[i].Type == core.EventResult {
+			result = &evts[i]
+		}
+	}
+	if result == nil {
+		t.Fatal("missing result event")
+	}
+	if result.Content != "real final from message end" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+}
+
+func TestPiSession_ReadLoopTextDeltaSuppressesDuplicateResultContent(t *testing.T) {
+	sessionEvent := map[string]any{"type": "session", "id": "delta-sess"}
+	textEvent := map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "real final from delta",
+		},
+	}
+	finalEvent := map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "text", "text": "real final from delta"},
+			},
+		},
+	}
+
+	evts := runReadLoopEvents(t, sessionEvent, textEvent, finalEvent)
+
+	var textCount int
+	var result *core.Event
+	for i := range evts {
+		switch evts[i].Type {
+		case core.EventText:
+			textCount++
+			if evts[i].Content != "real final from delta" {
+				t.Fatalf("text content = %q", evts[i].Content)
+			}
+		case core.EventResult:
+			result = &evts[i]
+		}
+	}
+	if textCount != 1 {
+		t.Fatalf("text event count = %d, want 1", textCount)
+	}
+	if result == nil {
+		t.Fatal("missing result event")
+	}
+	if result.Content != "" {
+		t.Fatalf("result content = %q, want empty to avoid duplicate", result.Content)
+	}
+}
+
+func runReadLoopEvents(t *testing.T, events ...map[string]any) []core.Event {
+	t.Helper()
+
+	var script strings.Builder
+	for _, event := range events {
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		script.WriteString("echo '")
+		script.WriteString(string(line))
+		script.WriteString("';")
+	}
+
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	cmd := exec.CommandContext(s.ctx, "sh", "-c", script.String())
+	cmd.Dir = "/tmp"
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(cmd, stdout, &stderrBuf)
+
+	var evts []core.Event
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			evts = append(evts, ev)
+			if ev.Type == core.EventResult {
+				return evts
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for events")
+		}
 	}
 }
