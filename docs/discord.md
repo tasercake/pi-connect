@@ -1,12 +1,12 @@
 # Discord Setup Guide
 
-This guide walks you through connecting **cc-connect** to Discord, so you can chat with your local Claude Code via a Discord bot.
+This guide walks you through connecting **cc-connect** to Discord, so you can chat with your local Pi via a Discord bot.
 
 ## Prerequisites
 
 - A Discord account
 - A machine that can run cc-connect (no public IP needed)
-- Claude Code installed and configured
+- Pi installed and configured
 
 > 💡 **Advantage**: Uses Gateway (WebSocket) — no public IP, no domain, no reverse proxy needed.
 
@@ -98,7 +98,7 @@ Add the token to your `config.toml`:
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -229,7 +229,7 @@ If you enable `progress_style = "card"`, Discord shows one editable progress emb
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                         │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► Your Project Code    │
+│   cc-connect ◄──► Pi ◄──► Your Project Code    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```

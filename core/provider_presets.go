@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	defaultPresetsURL         = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
-	fallbackPresetsURL        = "https://gitee.com/chenhg5/cc-connect/raw/main/provider-presets.json"
-	presetsCacheTTL           = 6 * time.Hour
-	presetsHTTPTimeout        = 15 * time.Second
+	defaultPresetsURL          = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
+	fallbackPresetsURL         = "https://gitee.com/chenhg5/cc-connect/raw/main/provider-presets.json"
+	presetsCacheTTL            = 6 * time.Hour
+	presetsHTTPTimeout         = 15 * time.Second
 	presetsFallbackHTTPTimeout = 10 * time.Second
 )
 
@@ -22,7 +22,7 @@ const (
 type ProviderPreset struct {
 	Name          string                       `json:"name"`
 	DisplayName   string                       `json:"display_name"`
-	Agents        map[string]PresetAgentConfig  `json:"agents"`               // per-agent-type configuration (keys: "claudecode", "codex", "gemini", "opencode", ...)
+	Agents        map[string]PresetAgentConfig `json:"agents"`
 	InviteURL     string                       `json:"invite_url,omitempty"`
 	Description   string                       `json:"description,omitempty"`
 	DescriptionZh string                       `json:"description_zh,omitempty"`
@@ -35,18 +35,9 @@ type ProviderPreset struct {
 
 // PresetAgentConfig holds per-agent-type settings within a provider preset.
 type PresetAgentConfig struct {
-	BaseURL     string            `json:"base_url"`
-	Model       string            `json:"model"`
-	Models      []string          `json:"models,omitempty"`
-	CodexConfig *PresetCodexConfig `json:"codex_config,omitempty"`
-}
-
-// PresetCodexConfig holds Codex-specific provider settings that get written
-// to Codex's config.toml as [model_providers.<name>].
-type PresetCodexConfig struct {
-	EnvKey      string            `json:"env_key,omitempty"`
-	WireAPI     string            `json:"wire_api,omitempty"`
-	HTTPHeaders map[string]string `json:"http_headers,omitempty"`
+	BaseURL string   `json:"base_url"`
+	Model   string   `json:"model"`
+	Models  []string `json:"models,omitempty"`
 }
 
 // SupportsAgent returns true if the preset supports the given agent type.

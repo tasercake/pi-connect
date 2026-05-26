@@ -1,12 +1,12 @@
 # 飞书 (Feishu/Lark) 接入指南
 
-本文档介绍如何将 **cc-connect** 接入飞书，让你可以通过飞书机器人远程调用 Claude Code。
+本文档介绍如何将 **cc-connect** 接入飞书，让你可以通过飞书机器人远程调用 Pi。
 
 ## 前置要求
 
 - 飞书账号（个人或企业均可）
 - 一台可运行 cc-connect 的设备（无需公网 IP）
-- Claude Code 已安装并配置完成
+- Pi 已安装并配置完成
 
 > 💡 **优势**：使用长连接模式，无需公网 IP、无需域名、无需反向代理（ngrok/frp）
 
@@ -64,7 +64,7 @@ cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 | 字段 | 填写建议 |
 |------|---------|
 | 应用名称 | `cc-connect` 或你喜欢的名称 |
-| 应用描述 | `Claude Code 远程助手` |
+| 应用描述 | `Pi 远程助手` |
 | 应用图标 | 上传一个喜欢的图标 |
 
 ---
@@ -95,7 +95,7 @@ App Secret: QhkMpxxxxxxxxxxxxxxxxxxxx
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -134,7 +134,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 配置项 | 建议值 |
 |-------|--------|
 | 机器人名称 | `cc-connect` |
-| 机器人描述 | `Claude Code 远程助手` |
+| 机器人描述 | `Pi 远程助手` |
 | 机器人头像 | 与应用图标一致 |
 
 ---
@@ -300,7 +300,7 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 ┌─────────────────────────────────────────────────────────────┐
 │                      你的本地环境                            │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► 你的项目代码         │
+│   cc-connect ◄──► Pi ◄──► 你的项目代码         │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```

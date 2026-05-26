@@ -6,7 +6,7 @@
 
 - 微博账号
 - 一台可运行 cc-connect 的设备（无需公网 IP）
-- AI 编程 Agent（Claude Code、Codex 等）已安装并配置完成
+- Pi 已安装并配置完成
 
 > 💡 **优势**：使用 WebSocket 长连接，无需公网 IP、无需域名、无需反向代理
 
@@ -37,7 +37,7 @@
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"

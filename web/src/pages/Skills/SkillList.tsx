@@ -160,7 +160,6 @@ function LocalSkills({
               <FolderOpen size={15} className="shrink-0" />
               <div className="min-w-0 flex-1">
                 <div className="truncate">{p.project}</div>
-                <div className="text-[11px] text-gray-400 dark:text-gray-500">{p.agent_type}</div>
               </div>
               <Badge variant="outline" className="text-[10px] shrink-0">{p.skills?.length || 0}</Badge>
             </button>
@@ -175,7 +174,6 @@ function LocalSkills({
               <h2 className="text-sm font-medium text-gray-900 dark:text-white">
                 {current.project}
               </h2>
-              <Badge variant="info">{current.agent_type}</Badge>
               <span className="text-xs text-gray-400">
                 {t('skills.skillCount', { count: current.skills?.length || 0 })}
               </span>

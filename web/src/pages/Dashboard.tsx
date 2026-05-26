@@ -103,7 +103,6 @@ export default function Dashboard() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">{p.name}</p>
-                    <p className="text-xs text-gray-400 font-mono">{p.agent_type}</p>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-1 mb-2">

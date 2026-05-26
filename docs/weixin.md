@@ -9,7 +9,7 @@
 ## 前置要求
 
 - 可运行 cc-connect 的环境（无需公网 IP；ilink 由云端提供）
-- 已安装并可正常使用的 Agent（如 Claude Code、Codex 等）
+- 已安装并可正常使用的 Pi
 - 使用 **微信（手机端）** 扫码完成 ilink 登录（或由运营商提供 Bearer Token）
 
 ---

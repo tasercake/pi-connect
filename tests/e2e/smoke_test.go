@@ -38,7 +38,7 @@ data_dir = "~/.cc-connect"
 name = "test-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [[projects.platforms]]
 type = "feishu"
@@ -58,7 +58,7 @@ level = "info"
 	assert.Equal(t, "~/.cc-connect", cfg.DataDir)
 	assert.Len(t, cfg.Projects, 1)
 	assert.Equal(t, "test-project", cfg.Projects[0].Name)
-	assert.Equal(t, "claudecode", cfg.Projects[0].Agent.Type)
+	assert.Equal(t, "pi", cfg.Projects[0].Agent.Type)
 
 	t.Log("Config loading: PASS")
 }
@@ -120,10 +120,7 @@ func TestSmoke_AllAgentsInit(t *testing.T) {
 func listRegisteredAgents() []string {
 	// This requires access to the internal registry
 	// We'll test via the factory pattern
-	agents := []string{
-		"claudecode", "codex", "cursor", "gemini",
-		"iflow", "opencode", "pi", "qoder",
-	}
+	agents := []string{"pi"}
 	return agents
 }
 
@@ -374,10 +371,10 @@ func TestSmoke_EventTypes(t *testing.T) {
 		{Type: core.EventResult, Content: "final result", Done: true},
 		{Type: core.EventError, Error: context.DeadlineExceeded, Done: true},
 		{
-			Type:       core.EventPermissionRequest,
-			ToolName:   "Bash",
-			ToolInput:  "rm -rf /",
-			RequestID:  "req-001",
+			Type:      core.EventPermissionRequest,
+			ToolName:  "Bash",
+			ToolInput: "rm -rf /",
+			RequestID: "req-001",
 		},
 	}
 
@@ -395,14 +392,14 @@ func TestSmoke_EventTypes(t *testing.T) {
 func TestSmoke_WorkspaceSwitch(t *testing.T) {
 	// Create simple workspace state maps to verify isolation concept
 	ws1 := map[string]string{
-		"id":       "workspace-1",
-		"session":  "session-A",
-		"agent":    "claudecode",
+		"id":      "workspace-1",
+		"session": "session-A",
+		"agent":   "pi",
 	}
 	ws2 := map[string]string{
-		"id":       "workspace-2",
-		"session":  "session-B",
-		"agent":    "gemini",
+		"id":      "workspace-2",
+		"session": "session-B",
+		"agent":   "pi",
 	}
 
 	assert.Equal(t, "workspace-1", ws1["id"])
@@ -559,4 +556,3 @@ func TestSmoke_WebhookCallback(t *testing.T) {
 
 	t.Log("Webhook callback: PASS")
 }
-

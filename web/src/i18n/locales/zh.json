@@ -36,8 +36,6 @@
     "detail": "详情",
     "noProjects": "尚未配置项目",
     "workDir": "工作目录",
-    "agentType": "Agent 类型",
-    "agentTypeChangeHint": "切换 Agent 类型需要重启，不兼容的服务商将被移除。",
     "agentMode": "权限模式",
     "agentSettings": "Agent 配置",
     "generalSettings": "通用设置",
@@ -220,7 +218,6 @@
     "addProject": "新增项目",
     "projectName": "项目名称",
     "workDir": "工作目录",
-    "agentType": "Agent 类型",
     "next": "下一步",
     "manualSetup": "手动配置",
     "manualHint": "{{platform}} 需要在 config.toml 中手动配置凭证，然后重启服务。",
@@ -338,7 +335,6 @@
     "title": "服务商管理",
     "subtitle": "管理全局共享的 API 服务商，可被所有项目引用",
     "add": "添加服务商",
-    "importCCSwitch": "从 CC-Switch 导入",
     "edit": "编辑服务商",
     "empty": "尚未配置服务商",
     "emptyHint": "添加全局服务商或从预设列表中导入。",
@@ -358,23 +354,9 @@
       "modelHint": "切换到该服务商时使用的模型。点击下方模型的 ✓ 可设为默认。",
       "models": "可用模型",
       "modelsHint": "用户可通过 /model 切换的模型列表。点击 ✓ 设为默认。",
-      "agentTypes": "适用 Agent 类型",
-      "agentTypesHint": "留空表示适用所有 Agent 类型",
       "thinkingDefault": "默认（自动）",
-      "perAgentHint": "不同 Agent 可能使用不同的 Base URL / 模型，可按 Agent 类型分别配置。",
       "defaultConfig": "默认",
-      "baseUrl": "Base URL",
-      "codexWireApi": "Wire API"
-    },
-    "ccSwitch": {
-      "title": "从 CC-Switch 导入",
-      "notFound": "未找到 CC-Switch 数据库，请确认已安装 CC-Switch。",
-      "empty": "CC-Switch 中没有已配置的服务商。",
-      "hint": "在 CC-Switch 中找到 {{count}} 个服务商，选择要导入的：",
-      "active": "当前",
-      "exists": "已存在",
-      "import": "导入 ({{count}})",
-      "result": "导入完成：成功 {{imported}} 个，跳过 {{skipped}} 个。"
+      "baseUrl": "Base URL"
     }
   },
   "skills": {

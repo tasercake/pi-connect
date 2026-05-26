@@ -124,7 +124,7 @@ When you need to communicate with another bot (e.g. ask another AI agent a quest
   cc-connect relay send --to <target_project> "<message>"
 
 IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
-Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
+Do NOT guess or modify the name — use it exactly as shown (e.g. "my-bot", not "mybot").
 
 This sends a message to the target bot and waits for its response (printed to stdout).
 The conversation is visible in the group chat and each bot maintains its own relay session.
@@ -271,7 +271,7 @@ type AsyncRecoverablePlatform interface {
 // MessageHandler is called by platforms when a new message arrives.
 type MessageHandler func(p Platform, msg *Message)
 
-// Agent abstracts an AI coding assistant (Claude Code, Cursor, Gemini CLI, etc.).
+// Agent abstracts an AI coding assistant (Pi).
 // All agents must support persistent bidirectional sessions via StartSession.
 type Agent interface {
 	Name() string
@@ -333,9 +333,6 @@ type ProviderConfig struct {
 	Models   []ModelOption     // pre-configured list of available models for this provider
 	Thinking string            // override thinking type sent to this provider ("disabled", "enabled", or "" for no rewrite)
 	Env      map[string]string // arbitrary extra env vars (e.g. CLAUDE_CODE_USE_BEDROCK=1)
-	// Codex-specific provider config (maps to Codex model_providers.<name>)
-	CodexWireAPI     string            // wire API format (e.g. "responses")
-	CodexHTTPHeaders map[string]string // custom HTTP headers
 }
 
 // ProviderSwitcher is an optional interface for agents that support multiple API providers.
@@ -351,7 +348,7 @@ type ProviderSwitcher interface {
 // The engine uses these paths for the /memory command.
 type MemoryFileProvider interface {
 	ProjectMemoryFile() string // project-level instruction file (e.g., <work_dir>/CLAUDE.md)
-	GlobalMemoryFile() string  // user-level instruction file (e.g., ~/.claude/CLAUDE.md)
+	GlobalMemoryFile() string  // user-level instruction file
 }
 
 // ModelSwitcher is an optional interface for agents that support runtime model switching.
@@ -376,7 +373,7 @@ type ReasoningEffortSwitcher interface {
 type ModelOption struct {
 	Name  string // model identifier passed to CLI
 	Desc  string // short description (display_name or empty)
-	Alias string // optional short alias for the /model command (e.g. "codex" for "gpt-5.3-codex")
+	Alias string // optional short alias for the /model command
 }
 
 // UsageReporter is an optional interface for agents that can report account or
@@ -465,14 +462,14 @@ type ContextCompactingSession interface {
 }
 
 // CommandProvider is an optional interface for agents that expose custom slash
-// commands via local files (e.g. .claude/commands/*.md). The engine scans the
+// commands via local files. The engine scans the
 // returned directories for *.md files and registers them as slash commands.
 type CommandProvider interface {
 	CommandDirs() []string
 }
 
 // SkillProvider is an optional interface for agents that expose skills via
-// local directories (e.g. .claude/skills/<name>/SKILL.md). Each subdirectory
+// local directories. Each subdirectory
 // containing a SKILL.md is treated as a skill. Skills are project-level and
 // agent-specific — they are NOT shared across different agent types.
 type SkillProvider interface {

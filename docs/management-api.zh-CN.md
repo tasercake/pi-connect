@@ -258,7 +258,7 @@ GET /api/v1/status?token=mgmt-secret
       {
         "name": "my-backend",
         "agent": {
-          "type": "claudecode",
+          "type": "pi",
           "providers": [
             {
               "name": "anthropic",
@@ -333,7 +333,7 @@ GET /api/v1/status?token=mgmt-secret
     "projects": [
       {
         "name": "my-backend",
-        "agent_type": "claudecode",
+        "agent_type": "pi",
         "platforms": ["feishu", "telegram"],
         "sessions_count": 3,
         "heartbeat_enabled": true
@@ -362,7 +362,7 @@ GET /api/v1/status?token=mgmt-secret
   "ok": true,
   "data": {
     "name": "my-backend",
-    "agent_type": "claudecode",
+    "agent_type": "pi",
     "platforms": [
       {
         "type": "feishu",
@@ -687,7 +687,7 @@ GET /api/v1/status?token=mgmt-secret
   "model": "claude-sonnet-4-20250514",
   "thinking": "disabled",
   "env": {
-    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "PI_ENV_EXAMPLE": "1",
     "AWS_PROFILE": "bedrock"
   }
 }

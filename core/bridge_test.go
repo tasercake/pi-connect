@@ -389,7 +389,7 @@ func TestBridge_ReplyRouting(t *testing.T) {
 
 func TestBridge_ReconstructReplyCtx_RequiresCapability(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
-	bp := bs.NewPlatform("advisor-gemini")
+	bp := bs.NewPlatform("advisor-pi")
 
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "bridge", []string{"text"})
@@ -402,7 +402,7 @@ func TestBridge_ReconstructReplyCtx_RequiresCapability(t *testing.T) {
 
 func TestBridge_ReconstructReplyCtx_UsesStructuredPayload(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
-	bp := bs.NewPlatform("advisor-gemini")
+	bp := bs.NewPlatform("advisor-pi")
 
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "bridge", []string{"text", "reconstruct_reply"})
@@ -433,8 +433,8 @@ func TestBridge_ReconstructReplyCtx_UsesStructuredPayload(t *testing.T) {
 	if payload.Version != 1 {
 		t.Fatalf("version = %d, want 1", payload.Version)
 	}
-	if payload.SenderProject != "advisor-gemini" {
-		t.Fatalf("sender_project = %q, want advisor-gemini", payload.SenderProject)
+	if payload.SenderProject != "advisor-pi" {
+		t.Fatalf("sender_project = %q, want advisor-pi", payload.SenderProject)
 	}
 	if payload.TransportChatID != "1491487450722341088" {
 		t.Fatalf("transport_chat_id = %q, want 1491487450722341088", payload.TransportChatID)

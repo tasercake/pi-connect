@@ -32,20 +32,6 @@ body:
       required: true
 
   - type: dropdown
-    id: agent
-    attributes:
-      label: Agent Type
-      description: Which AI agent are you using?
-      options:
-        - Claude Code
-        - Codex (OpenAI)
-        - Cursor Agent
-        - Gemini CLI
-        - Other
-    validations:
-      required: true
-
-  - type: dropdown
     id: platform
     attributes:
       label: Platform

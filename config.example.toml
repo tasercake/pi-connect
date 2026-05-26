@@ -54,21 +54,12 @@ level = "info" # debug, info, warn, error
 # [[providers]]
 # name = "anthropic"
 # api_key = "${ANTHROPIC_API_KEY}"
-# agent_types = ["claudecode"]   # only for Claude Code projects
 
 # [[providers]]
 # name = "minimaxi-claude"
 # api_key = "${MINIMAXI_API_KEY}"
 # base_url = "https://api.minimaxi.chat/v1"
-# agent_types = ["claudecode"]
-# model = "claude-sonnet-4-20250514"
-
-# [[providers]]
-# name = "minimaxi-codex"
-# api_key = "${MINIMAXI_API_KEY}"
-# base_url = "https://api.minimaxi.chat/v1"
-# agent_types = ["codex"]
-# model = "MiniMax-M2.7"
+# model = "your-model-name"
 
 # [[providers]]
 # name = "dashscope"
@@ -145,14 +136,13 @@ level = "info" # debug, info, warn, error
 # the supervisor user that runs cc-connect itself, so a misbehaving agent
 # cannot read files outside the target user's permission scope.
 #
-# Currently supported by: claudecode.
-# Other agents use the supervisor user until migrated in a follow-up PR.
+# Currently supported by: pi.
 #
 # Setup (one-time):
 #   1. Create the target Unix user and install their tooling:
 #        sudo useradd -m -s /bin/bash partseeker-coder
 #        sudo -iu partseeker-coder
-#        # install claude CLI, set up ~/.claude/settings.json, PGSSL certs,
+#        # install pi CLI and set up any credentials the agent needs.
 #        # ~/.pgpass, plugin state, anything the agent needs.
 #   2. Grant the supervisor user passwordless sudo to the target:
 #        # /etc/sudoers.d/cc-connect
@@ -256,17 +246,13 @@ level = "info" # debug, info, warn, error
 # 当估算 token 超过阈值时自动触发 /compress。
 #
 # Pi projects default to enabled when this block is omitted (max_tokens = 200000).
-# Set enabled = false to opt out. Other agents default to disabled.
+# Set enabled = false to opt out.
 # Pi 项目在省略此块时默认启用（max_tokens = 200000）。设置 enabled = false 可退出。
 #
 # [projects.auto_compress]
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression (Pi omitted default: 200000)
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
-
-# [projects.observe]
-# enabled = true                    # Forward native terminal sessions to Slack
-# channel = "C0AL13PN4BG"           # Slack channel ID to post observations to
 
 # =============================================================================
 # Cron Settings / 定时任务设置
@@ -551,7 +537,7 @@ level = "info" # debug, info, warn, error
 #   /commands         — list all custom commands
 #
 # In addition, cc-connect auto-discovers .md files from the agent's commands
-# directory (e.g. .claude/commands/*.md, .gemini/commands/*.md).
+# directory (for example, commands/*.md).
 # 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
 
 # =============================================================================
@@ -607,12 +593,12 @@ level = "info" # debug, info, warn, error
 # 使用 /workspace init <url> 克隆并绑定新仓库。
 #
 # [[projects]]
-# name = "claude-multi"
+# name = "pi-multi"
 # mode = "multi-workspace"
 # base_dir = "~/workspace"
 #
 # [projects.agent]
-# type = "claudecode"
+# type = "pi"
 #
 # [projects.agent.options]
 # mode = "yolo"  # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
@@ -631,8 +617,8 @@ level = "info" # debug, info, warn, error
 name = "my-backend"
 # show_context_indicator = false  # Hide the “[ctx: ~N%]” suffix on assistant replies (default: true / show)
 #                                   # 不在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
-# reply_footer = false             # Hide the Codex-like footer on assistant replies (default: true / show)
-#                                   # 不在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
+# reply_footer = false             # Hide the metadata footer on assistant replies (default: true / show)
+#                                   # 不在助手回复底部显示状态信息（默认 true 显示）
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
@@ -713,7 +699,7 @@ name = "my-backend"
 #   - continue unfinished work
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/backend"
@@ -746,39 +732,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # system_prompt = "You are a helpful AI assistant that specializes in Python development."
 
 # Optional: specify a model / 可选：指定模型
-# model = "claude-sonnet-4-20250514"
-
-# Optional: per-project environment variables injected into Claude Code sessions.
-# This allows different projects to use different model providers (Kimi, Mimo, DeepSeek, etc.)
-# without modifying global ~/.claude/settings.json.
-# 可选：为每个项目单独配置环境变量，注入到 Claude Code 会话中。
-# 这样不同项目可以使用不同的模型供应商，无需修改全局的 ~/.claude/settings.json。
-#
-# [projects.agent.options.env]
-# ANTHROPIC_BASE_URL = "https://api.kimi.com/coding"
-# ANTHROPIC_AUTH_TOKEN = "sk-kimi-xxx"
-# ANTHROPIC_MODEL = "K2.6"
-# ANTHROPIC_REASONING_MODEL = "K2.6"
-# ANTHROPIC_DEFAULT_HAIKU_MODEL = "K2.6"
-# ANTHROPIC_DEFAULT_SONNET_MODEL = "K2.6"
-# ANTHROPIC_DEFAULT_OPUS_MODEL = "K2.6"
-
-# Claude Code Router Integration / Claude Code Router 集成
-# Route Claude Code requests through Claude Code Router to use different model providers.
-# 通过 Claude Code Router 路由 Claude Code 请求，使用不同的模型提供商。
-# See: https://github.com/musistudio/claude-code-router
-#
-# router_url = "http://127.0.0.1:3456"  # Claude Code Router URL (default: http://127.0.0.1:3456)
-# router_api_key = "your-router-api-key" # Optional: API key if router requires authentication / 可选：如果 router 需要认证
-#
-# When router_url is set, cc-connect will automatically:
-# 设置 router_url 后，cc-connect 会自动：
-#   - Set ANTHROPIC_BASE_URL to router_url
-#   - Set NO_PROXY=127.0.0.1 to prevent proxy interference
-#   - Disable telemetry and cost warnings for cleaner integration
-#
-# Note: When using router, provider settings below are ignored as the router handles model selection.
-# 注意：使用 router 时，下方的 provider 设置将被忽略，因为 router 负责模型选择。
+# model = "your-model-name"
 
 # Active provider (matches a name in [[projects.agent.providers]] or provider_refs)
 # 当前激活的 provider（对应下方 providers 或 provider_refs 中的 name）
@@ -800,19 +754,19 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # name = "relay"
 # api_key = "sk-xxx"
 # base_url = "https://api.relay-service.com"
-# model = "claude-sonnet-4-20250514"
+# model = "your-model-name"
 # # Optional: pre-configure available models shown by /model command (alias - model)
 # # /model switch [alias] switches to the model; omit to auto-fetch from the API.
 # # 可选：预先配置 /model 命令显示的可用模型列表，格式为 alias - model
 # # 使用 /model switch [alias] 切换模型；留空则自动从 API 获取
 # [[projects.agent.providers.models]]
-# model = "claude-sonnet-4-20250514"
+# model = "your-model-name"
 # alias = "sonnet"
 # [[projects.agent.providers.models]]
-# model = "claude-opus-4-20250514"
+# model = "your-model-name"
 # alias = "opus"
 # [[projects.agent.providers.models]]
-# model = "claude-haiku-3-5-20241022"
+# model = "your-model-name"
 # alias = "haiku"
 #
 # # Third-party provider with thinking override / 第三方 Provider 并覆盖 thinking 参数
@@ -854,29 +808,6 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # 特殊环境（Bedrock、Vertex 等）使用 env 字段：
 # [[projects.agent.providers]]
 # name = "bedrock"
-# env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
-
-# Reference normalization and rendering / 本地引用标准化与展示优化
-# Disabled by default. When enabled, cc-connect can normalize Codex / Claude Code
-# local file references (paths, line refs, markdown file links) and re-render them
-# into a more readable platform-friendly form before sending to supported IMs.
-# 默认关闭。启用后，cc-connect 可对 Codex / Claude Code 的本地文件引用
-# （路径、行号引用、Markdown 文件链接）做标准化，并在发送到支持的平台前
-# 重新渲染为更易读的展示形式。
-#
-# Supported today / 当前已支持:
-#   normalize_agents: codex | claudecode | all
-#   render_platforms: feishu | weixin | all
-# Note: render depends on normalize. If normalize_agents is empty, render_platforms
-# alone has no effect.
-# 注意：render 依赖 normalize。若 normalize_agents 为空，仅设置 render_platforms 不生效。
-#
-# [projects.references]
-# normalize_agents = ["codex", "claudecode"]
-# render_platforms = ["feishu", "weixin"]
-# display_path = "dirname_basename" # absolute | relative | basename | dirname_basename | smart
-# marker_style = "emoji"            # none | ascii | emoji
-# enclosure_style = "code"          # none | bracket | angle | fullwidth | code
 
 # Feishu / Lark / 飞书
 # 1. Create an app at https://open.feishu.cn / 在 https://open.feishu.cn 创建应用
@@ -1140,7 +1071,7 @@ app_secret = "your-feishu-app-secret"
 #                          # 设为 true 发送 Markdown（仅企业微信应用内可渲染，个人微信显示"暂不支持"）
 # allow_from = "*"  # Allowed WeChat Work user IDs / 允许的企业微信用户 ID
 # Inbound (HTTP callback): text, image, voice, and file messages are passed to the agent.
-# 入站（HTTP 回调）：文本、图片、语音与文件会交给 Agent（如 Claude Code）处理。
+# 入站（HTTP 回调）：文本、图片、语音与文件会交给 Agent 处理。
 # WebSocket 智能机器人：文本、语音（转文字）、图片、文件、图文混排与引用中的图片/文件（URL+aeskey 下载解密）。
 # proxy = ""  # optional: forward proxy for API calls if your IP is dynamic
 #             # 可选：正向代理，用于 IP 不固定的场景
@@ -1176,7 +1107,7 @@ app_secret = "your-feishu-app-secret"
 #    Or: `cc-connect weixin bind --project <name> --token <bearer>` if you already have a token (e.g. from OpenClaw).
 # 2. Manual: set token below. Optional: base_url (default https://ilinkai.weixin.qq.com).
 # 3. allow_from: comma-separated Weixin user IDs (e.g. user@im.wechat) or "*".
-# State files (get_updates cursor + context_token cache) live under:
+# State files (get_updates offset + context_token cache) live under:
 #   <data_dir>/weixin/<project>/<account_id>/
 #
 # Inbound images / files / video / raw voice (SILK) are downloaded from Weixin CDN and AES-128-ECB decrypted
@@ -1198,504 +1129,3 @@ app_secret = "your-feishu-app-secret"
 # proxy = ""                                   # optional HTTP proxy / 可选代理
 # proxy_username = ""
 # proxy_password = ""
-
-# =============================================================================
-# Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: Cursor Agent CLI (`agent`) — install via Cursor IDE or `npm i -g @anthropic-ai/cursor-agent`
-# 需要安装：Cursor Agent CLI (`agent`) — 通过 Cursor IDE 或 npm 安装
-# Uses `agent --print --output-format stream-json` under the hood.
-# 底层使用 `agent --print --output-format stream-json` 命令。
-
-# [[projects]]
-# name = "my-cursor-project"
-#
-# [projects.agent]
-# type = "cursor"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "force"  # "default" | "force" (yolo) | "plan" | "ask"
-# cmd = "agent"   # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
-#
-# Mode options / 模式说明:
-# - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
-#              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
-#              注意：此模式下 Shell 工具仅允许安全命令（如 ls）
-# - "force":   Auto-approve all tool calls, full shell access (same as --force/--yolo)
-#              自动批准所有工具调用，完整 Shell 访问（等同 --force/--yolo）
-# - "plan":    Read-only analysis, no edits / 只读分析，不做修改
-# - "ask":     Q&A style, read-only / 问答风格，只读
-#
-# Optional: specify a model / 可选：指定模型
-# model = "claude-sonnet-4-20250514"
-#
-# [[projects.platforms]]
-# type = "feishu"
-#
-# [projects.platforms.options]
-# app_id = "your-feishu-app-id"
-# app_secret = "your-feishu-app-secret"
-
-# =============================================================================
-# Project 3: Using Gemini CLI / 项目 3：使用 Gemini CLI (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: npm install -g @google/gemini-cli
-# 需要安装：npm install -g @google/gemini-cli
-# Gemini CLI uses `gemini -p --output-format stream-json` under the hood.
-# Gemini CLI 底层使用 `gemini -p --output-format stream-json` 命令。
-#
-# Authentication / 认证方式:
-#   - Google Account login (free: 60 req/min, 1000 req/day) / Google 账号登录（免费额度）
-#   - GEMINI_API_KEY env var / 环境变量
-#   - Vertex AI (GOOGLE_API_KEY + GOOGLE_GENAI_USE_VERTEXAI=true)
-
-# [[projects]]
-# name = "my-gemini-project"
-#
-# [projects.agent]
-# type = "gemini"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "yolo"  # "default" | "auto_edit" | "yolo" | "plan"
-# cmd = "gemini" # CLI binary name (default: "gemini") / CLI 二进制名称（默认 "gemini"）
-# timeout_mins = 30  # 每次对话超时时间（分钟），0 表示不限制
-#
-# Mode options / 模式说明:
-# - "default":   Prompt for approval on each tool use / 每次工具调用都需要确认
-# - "auto_edit": Auto-approve edit tools, ask for others / 编辑工具自动通过，其他仍需确认
-# - "yolo":      Auto-approve all tool calls (-y flag) / 自动批准所有工具调用
-# - "plan":      Read-only plan mode, no execution / 只读规划模式，不做修改
-#
-# Optional: specify a model / 可选：指定模型
-# model = "gemini-2.5-flash"
-#
-# # Provider with API key / 使用 API Key 的 Provider
-# [[projects.agent.providers]]
-# name = "google"
-# api_key = "your-gemini-api-key"    # GEMINI_API_KEY
-#
-# # Vertex AI provider / Vertex AI 提供商
-# [[projects.agent.providers]]
-# name = "vertex"
-# env = { GOOGLE_API_KEY = "your-key", GOOGLE_GENAI_USE_VERTEXAI = "true" }
-#
-# [[projects.platforms]]
-# type = "feishu"
-#
-# [projects.platforms.options]
-# app_id = "your-feishu-app-id"
-# app_secret = "your-feishu-app-secret"
-
-# =============================================================================
-# Project 4: Using Codex agent / 项目 4：使用 Codex agent (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: npm install -g @openai/codex
-# 需要安装：npm install -g @openai/codex
-# Codex uses `codex exec --json` under the hood.
-# Codex 底层使用 `codex exec --json` 命令。
-
-# [[projects]]
-# name = "my-codex-project"
-#
-# [projects.agent]
-# type = "codex"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
-#
-# Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
-# - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
-# - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
-#
-# Optional: specify a model / 可选：指定模型
-# model = "o3"
-#
-# Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
-# reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
-#
-# # Active provider / 当前激活的 provider
-# # provider = "openai"
-#
-# [[projects.agent.providers]]
-# name = "openai"
-# api_key = "sk-xxx"
-#
-# [[projects.agent.providers]]
-# name = "custom"
-# api_key = "sk-xxx"
-# base_url = "https://custom-api.com/v1"
-# model = "gpt-4o"
-#
-# # MiniMax — OpenAI-compatible, works natively with Codex
-# # MiniMax — 兼容 OpenAI 接口，可直接用于 Codex
-# [[projects.agent.providers]]
-# name = "minimax"
-# api_key = "your-minimax-api-key"
-# base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.7"
-#
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# QQ (via NapCat / OneBot v11) (uncomment to enable / 取消注释以启用)
-# Requires a OneBot v11 implementation running alongside your QQ client:
-# 需要一个 OneBot v11 实现配合 QQ 客户端运行：
-#   - NapCat (recommended / 推荐): https://github.com/NapNeko/NapCatQQ
-#     - Docker: docker run -d --name napcat -e ACCOUNT=<QQ号> -p 3001:3001 -p 6099:6099 mlikiowa/napcat-docker:latest
-#     - Enable Forward WebSocket in NapCat WebUI (http://localhost:6099), default port 3001
-#       在 NapCat WebUI 中启用正向 WebSocket，默认端口 3001
-#   - LLOneBot: https://github.com/LLOneBot/LLOneBot (NTQQ plugin / NTQQ 插件)
-#
-# allow_from: comma-separated QQ user IDs that are allowed to interact, or "*" for all.
-#             允许交互的 QQ 号列表（逗号分隔），设为 "*" 允许所有人。
-# token: optional access_token for WebSocket authentication (must match NapCat config).
-#        可选的 WebSocket 鉴权 token（需与 NapCat 配置一致）。
-
-# [[projects.platforms]]
-# type = "qq"
-#
-# [projects.platforms.options]
-# ws_url = "ws://127.0.0.1:3001"  # NapCat Forward WebSocket URL
-# token = ""                       # optional: access_token / 可选鉴权 token
-# allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
-#                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
-# share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
-
-# QQ Bot (Official / 官方 QQ 机器人) (uncomment to enable / 取消注释以启用)
-# Uses the official QQ Bot Platform API — no third-party adapter needed.
-# 使用 QQ 官方机器人 API，无需第三方适配器。
-# 1. Register at https://q.qq.com → create bot → get AppID & AppSecret
-#    在 https://q.qq.com 注册 → 创建机器人 → 获取 AppID 和 AppSecret
-# 2. Connection: WebSocket (no public IP needed) / WebSocket 连接（无需公网 IP）
-# 3. In group chats, bot only receives messages when @mentioned
-#    群聊中，机器人仅在被 @ 时收到消息
-
-# [[projects.platforms]]
-# type = "qqbot"
-#
-# [projects.platforms.options]
-# app_id = ""           # Bot AppID / 机器人 AppID
-# app_secret = ""       # Bot AppSecret / 机器人 AppSecret
-# sandbox = false       # Use sandbox API endpoint / 使用沙箱环境
-# allow_from = "*"      # Allowed user openids, e.g. "OPEN_ID_1,OPEN_ID_2"; "*" = all
-#                       # 允许的用户 openid，如 "OPEN_ID_1,OPEN_ID_2"；"*" 表示所有
-# share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
-# markdown_support = false  # Enable Markdown messages (msg_type: 2). Requires bot permission. / 启用 Markdown 消息（msg_type: 2）。需要机器人具备该权限。
-
-# =============================================================================
-# Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: curl -fsSL https://qoder.com/install | bash
-# 需要安装：curl -fsSL https://qoder.com/install | bash
-# Qoder CLI uses `qodercli -p <prompt> -f stream-json` under the hood.
-# Qoder CLI 底层使用 `qodercli -p <prompt> -f stream-json` 命令。
-
-# [[projects]]
-# name = "my-qoder-project"
-#
-# [projects.agent]
-# type = "qoder"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "default"  # "default" | "yolo"
-#
-# Mode options / 模式说明:
-# - "default": Standard permissions / 标准权限模式
-# - "yolo":    Skip all permission checks (--dangerously-skip-permissions) / 跳过所有权限检查
-#
-# Optional: specify a model tier / 可选：指定模型级别
-# model = "auto"  # "auto" | "ultimate" | "performance" | "efficient" | "lite"
-#
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
-# 需要安装：OpenCode CLI
-# Uses `opencode run --format json` under the hood.
-# 底层使用 `opencode run --format json` 命令。
-
-# [[projects]]
-# name = "my-opencode-project"
-#
-# [projects.agent]
-# type = "opencode"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "default"  # "default" | "yolo"
-#
-# Mode options / 模式说明:
-# - "default": Standard mode / 标准模式
-# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
-#
-# Optional: specify a model (provider/model format) / 可选：指定模型
-# model = "anthropic/claude-sonnet-4-20250514"
-#
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project: Devin CLI (Cognition, https://cli.devin.ai/) / 使用 Devin CLI
-# =============================================================================
-# Devin speaks the Agent Client Protocol (ACP) over stdio via its `devin acp`
-# subcommand. cc-connect ships a first-class `type = "devin"` agent that pins
-# the command / args / display name so you don't have to.
-# Devin 通过 `devin acp` 子命令使用 ACP 协议与 cc-connect 通信。cc-connect 内置
-# `type = "devin"` 的一级支持：无需手动指定 command/args，默认值就能跑通。
-#
-# Prerequisites / 前置条件:
-#   1. Install Devin CLI per the official docs at https://cli.devin.ai/
-#      安装 Devin CLI，见官方文档 https://cli.devin.ai/
-#   2. Run `devin auth login` once — credentials are stored locally and the
-#      ACP subprocess reads them automatically. cc-connect never sees the token.
-#      运行一次 `devin auth login` 完成登录；ACP 子进程会自动读取本地凭证，
-#      cc-connect 全程不接触 token。
-#   3. Windsurf Enterprise users can alternatively inject WINDSURF_API_KEY
-#      via the agent env option (see below).
-#      Windsurf 企业版用户也可以通过下面的 env 注入 WINDSURF_API_KEY。
-
-# [[projects]]
-# name = "my-devin-project"
-#
-# [projects.agent]
-# type = "devin"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/your/code"
-# # Optional: override only if the `devin` binary is at a non-standard path.
-# # Always use an absolute path when running under launchd / systemd where
-# # $PATH is minimal (e.g. ~/.local/bin may not be included).
-# # command = "/Users/me/.local/bin/devin"
-# #
-# # Optional: initial permission mode applied to new sessions via
-# # session/set_mode. Valid ids: normal, ask, plan, accept-edits, bypass.
-# # 可选：新会话的初始权限模式。合法值：normal / ask / plan / accept-edits / bypass
-# # mode = "normal"
-# #
-# # Optional: Windsurf Enterprise API key (overrides `devin auth login`).
-# # 可选：Windsurf 企业版 API Key（优先级高于 `devin auth login` 的本地凭证）。
-# # [projects.agent.options.env]
-# # WINDSURF_API_KEY = "wk_xxx"
-
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
-# =============================================================================
-# Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).
-# See: https://agentclientprotocol.com/
-# 启动符合 ACP 的 Agent 进程，通过标准输入输出进行 JSON-RPC 通信。
-# Same agent type works for Cursor Agent CLI, OpenClaw bridge, GitHub Copilot CLI, etc.:
-# set command + args to match each tool's documented ACP entrypoint.
-# 同一 type=acp：通过 command/args 指向各工具文档中的 ACP 启动方式即可。
-# For Devin specifically, prefer the dedicated `type = "devin"` section above.
-# 针对 Devin 建议直接使用上面的 type = "devin"；下面的 type = "acp" 主要给其他
-# 通用 ACP 工具使用。
-
-# --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
-# [[projects]]
-# name = "cursor-acp"
-#
-# [projects.agent]
-# type = "acp"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# command = "agent"
-# args = ["acp"]
-# auth_method = "cursor_login"
-# display_name = "Cursor ACP"
-
-# --- Example: OpenClaw (Gateway-backed ACP bridge) ---
-# Docs: https://docs.openclaw.ai/cli/acp
-# Install the OpenClaw CLI, run a Gateway, then point cc-connect at `openclaw acp`.
-# [[projects]]
-# name = "openclaw-acp"
-#
-# [projects.agent]
-# type = "acp"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# command = "openclaw"
-# args = ["acp"]
-# # Remote gateway (use token-file on shared hosts — avoid --token in argv):
-# # args = ["acp", "--url", "wss://gateway-host:18789", "--token-file", "/path/to/gateway.token"]
-# # Optional: bind to an existing session key
-# # args = ["acp", "--session", "agent:main:main"]
-# display_name = "OpenClaw ACP"
-# # env = { OPENCLAW_GATEWAY_TOKEN = "..." }
-
-# --- Example: Trae CLI ACP (https://www.trae.ai/) ---
-# [[projects]]
-# name = "trae-acp"
-#
-# [projects.agent]
-# type = "acp"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# command = "traecli"
-# args = ["acp", "serve"]
-# display_name = "Trae CLI ACP"
-
-# --- Example: COCO ACP ---
-# [[projects]]
-# name = "coco-acp"
-#
-# [projects.agent]
-# type = "acp"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# command = "coco"
-# args = ["acp", "serve"]
-# display_name = "COCO ACP"
-
-# --- Example: GitHub Copilot CLI (public preview) ---
-# Docs: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server
-# Requires Copilot CLI installed and authenticated; no auth_method for ACP subprocess.
-# [[projects]]
-# name = "copilot-acp"
-#
-# [projects.agent]
-# type = "acp"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# command = "copilot"
-# args = ["--acp", "--stdio"]
-# display_name = "Copilot ACP"
-# # command = "/absolute/path/to/copilot"   # if not on PATH (see COPILOT_CLI_PATH in GitHub docs)
-
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: npm install -g @iflow-ai/iflow-cli
-# 需要安装：npm install -g @iflow-ai/iflow-cli
-# Uses `iflow -i` in interactive mode with session resume (`-r`) and execution info output (`-o`).
-# 底层使用 `iflow -i` 交互模式，结合 `-r` 会话续聊和 `-o` 执行信息输出。
-
-# [[projects]]
-# name = "my-iflow-project"
-#
-# [projects.agent]
-# type = "iflow"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "default"  # "default" | "auto-edit" | "plan" | "yolo"
-# cmd = "iflow"     # CLI binary name (default: "iflow") / CLI 二进制名称（默认 "iflow"）
-#
-# Mode options / 模式说明:
-# - "default":   Manual approval mode / 手动审批模式
-# - "auto-edit": Auto-edit mode / 自动编辑模式
-# - "plan":      Read-only planning mode / 只读规划模式
-# - "yolo":      Auto-approve all tool calls / 自动批准所有工具调用
-#
-# Optional: specify a model / 可选：指定模型
-# model = "Qwen3-Coder"
-#
-# # Active provider / 当前激活的 provider
-# # provider = "iflow-openai-compatible"
-#
-# [[projects.agent.providers]]
-# name = "iflow-openai-compatible"
-# api_key = "sk-xxx"
-# base_url = "https://api.example.com/v1"
-# model = "Qwen3-Coder"
-# env = { IFLOW_selectedAuthType = "openai-compatible" }
-#
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project: Using Kimi CLI / 项目：使用 Kimi CLI (uncomment to enable / 取消注释以启用)
-# =============================================================================
-# Requires: pip install kimi-cli
-# 需要安装：pip install kimi-cli
-# Kimi CLI uses `kimi --print --output-format stream-json` under the hood.
-# Kimi CLI 底层使用 `kimi --print --output-format stream-json` 命令。
-#
-# Authentication / 认证方式:
-#   - Kimi account login (kimi login) / Kimi 账号登录
-#   - MOONSHOT_API_KEY env var / 环境变量
-
-# [[projects]]
-# name = "my-kimi-project"
-#
-# [projects.agent]
-# type = "kimi"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/project"
-# mode = "default"  # "default" | "yolo" | "plan" | "quiet"
-# cmd = "kimi"      # CLI binary name (default: "kimi") / CLI 二进制名称（默认 "kimi"）
-# timeout_mins = 30  # 每次对话超时时间（分钟），0 表示不限制
-#
-# Mode options / 模式说明:
-# - "default": Standard print mode / 标准打印模式
-# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
-# - "plan":    Read-only plan mode / 只读规划模式
-# - "quiet":   Quiet mode (final message only) / 静默模式（仅最终消息）
-#
-# Optional: specify a model / 可选：指定模型
-# model = "kimi-k2-0711-preview"
-#
-# [[projects.platforms]]
-# type = "telegram"
-#
-# [projects.platforms.options]
-# token = "your-telegram-bot-token"
-
-# =============================================================================
-# Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
-# =============================================================================
-
-# [[projects]]
-# name = "my-frontend"
-#
-# [projects.agent]
-# type = "claudecode"
-#
-# [projects.agent.options]
-# work_dir = "/path/to/frontend"
-# mode = "auto"
-# mode = "bypassPermissions"
-#
-# [[projects.platforms]]
-# type = "discord"
-#
-# [projects.platforms.options]
-# token = "your-discord-bot-token"

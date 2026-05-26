@@ -795,52 +795,6 @@ func TestMgmt_RemoveGlobalProvider_PurgesFromEngines(t *testing.T) {
 	}
 }
 
-func TestResolveGlobalProviderForAgent(t *testing.T) {
-	g := GlobalProviderInfo{
-		Name:    "relay",
-		APIKey:  "sk-123",
-		BaseURL: "https://api.example.com/anthropic",
-		Model:   "claude-sonnet-4",
-		Endpoints: map[string]string{
-			"codex": "https://api.example.com/v1",
-		},
-		AgentModels: map[string]string{
-			"codex": "gpt-5.3-codex",
-		},
-		AgentModelLists: map[string][]GlobalModelEntry{
-			"codex": {{Model: "gpt-5.3-codex"}, {Model: "gpt-5.4"}},
-		},
-		Models: []struct {
-			Model string `json:"model"`
-			Alias string `json:"alias,omitempty"`
-		}{{Model: "claude-sonnet-4"}, {Model: "claude-opus-4"}},
-	}
-
-	// claudecode: should use top-level values
-	cc := resolveGlobalProviderForAgent(g, "claudecode")
-	if cc.BaseURL != "https://api.example.com/anthropic" {
-		t.Errorf("claudecode BaseURL = %q", cc.BaseURL)
-	}
-	if cc.Model != "claude-sonnet-4" {
-		t.Errorf("claudecode Model = %q", cc.Model)
-	}
-	if len(cc.Models) != 2 || cc.Models[0].Name != "claude-sonnet-4" {
-		t.Errorf("claudecode Models = %v", cc.Models)
-	}
-
-	// codex: should use per-agent overrides
-	cx := resolveGlobalProviderForAgent(g, "codex")
-	if cx.BaseURL != "https://api.example.com/v1" {
-		t.Errorf("codex BaseURL = %q", cx.BaseURL)
-	}
-	if cx.Model != "gpt-5.3-codex" {
-		t.Errorf("codex Model = %q", cx.Model)
-	}
-	if len(cx.Models) != 2 || cx.Models[0].Name != "gpt-5.3-codex" {
-		t.Errorf("codex Models = %v", cx.Models)
-	}
-}
-
 func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	mgmt, ts, _ := testManagementServer(t, "tok")
 
@@ -1792,20 +1746,6 @@ func TestMgmt_ProjectPatch_InvalidJSON(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&r)
 	if r.OK {
 		t.Fatal("expected error for invalid JSON body")
-	}
-}
-
-func TestMgmt_ProjectPatch_UnknownAgentType(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	agentType := "totally-unknown-agent"
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
-		"agent_type": agentType,
-	})
-	if r.OK {
-		t.Fatal("expected error for unknown agent type")
-	}
-	if !strings.Contains(r.Error, "unknown agent type") {
-		t.Fatalf("error = %q", r.Error)
 	}
 }
 

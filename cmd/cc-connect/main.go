@@ -139,8 +139,6 @@ func main() {
 
 	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
-	observeFlag := flag.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
-	observeChannel := flag.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
 	forceFlag := flag.Bool("force", false, "kill any existing instance with the same config before starting")
 	flag.Usage = printUsage
 	flag.Parse()
@@ -317,42 +315,6 @@ func main() {
 				}
 			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
-		}
-
-		// Wire terminal observation (--observe / [projects.observe])
-		observeEnabled := *observeFlag
-		obsChan := *observeChannel
-		if proj.Observe != nil {
-			if !observeEnabled && proj.Observe.Enabled {
-				observeEnabled = true
-			}
-			if obsChan == "" && proj.Observe.Channel != "" {
-				obsChan = proj.Observe.Channel
-			}
-		}
-		if observeEnabled {
-			if obsChan == "" {
-				slog.Error("observe: channel is required (use --observe-channel or set channel in [projects.observe])")
-				os.Exit(1)
-			}
-			hasSlack := false
-			for _, p := range platforms {
-				if p.Name() == "slack" {
-					hasSlack = true
-					break
-				}
-			}
-			if !hasSlack {
-				slog.Warn("observe requires a Slack platform; ignoring")
-			} else {
-				projectDir := resolveClaudeProjectDir(workDir)
-				if projectDir == "" {
-					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
-				} else {
-					sessionKey := fmt.Sprintf("slack:c:%s", obsChan)
-					engine.SetObserveConfig(projectDir, sessionKey)
-				}
-			}
 		}
 
 		// Wire global custom commands
@@ -571,13 +533,13 @@ func main() {
 				} else {
 					slog.Warn("speech: qwen provider enabled but api_key is empty")
 				}
-			case "gemini":
+			case "gemini": // gemini stt
 				apiKey := cfg.Speech.Gemini.APIKey
 				model := cfg.Speech.Gemini.Model
 				if apiKey != "" {
 					speechCfg.STT = core.NewGeminiSTT(apiKey, model)
 				} else {
-					slog.Warn("speech: gemini provider enabled but api_key is empty")
+					slog.Warn("speech: gemini stt provider enabled but api_key is empty")
 				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
@@ -691,11 +653,6 @@ func main() {
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
 				Model: p.Model, Models: convertCoreModels(p.Models), Thinking: p.Thinking, Env: p.Env,
 			}
-			if p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0 {
-				cp.Codex = &config.CodexProviderConfig{
-					WireAPI: p.CodexWireAPI, HTTPHeaders: p.CodexHTTPHeaders,
-				}
-			}
 			return config.AddProviderToConfig(projName, cp)
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
@@ -712,12 +669,9 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			var result []core.ProviderConfig
+			result := make([]core.ProviderConfig, 0, len(globals))
 			for _, g := range globals {
-				if len(g.AgentTypes) > 0 && !containsString(g.AgentTypes, agentType) {
-					continue
-				}
-				result = append(result, configProviderToCore(g.ResolveForAgent(agentType)))
+				result = append(result, configProviderToCore(g))
 			}
 			return result, nil
 		})
@@ -1013,7 +967,6 @@ func main() {
 		if cfg.ProviderPresetsURL != "" {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
-		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
 		mgmtSrv.Start()
 	}
 
@@ -1211,23 +1164,6 @@ func applyProjectStateOverride(projectName string, agent core.Agent, configuredW
 	return override
 }
 
-// resolveClaudeProjectDir returns the Claude Code project directory for a given
-// work directory, or "" if it doesn't exist.
-func resolveClaudeProjectDir(workDir string) string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	// Claude Code encodes paths by replacing os.PathSeparator with "-"
-	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
-	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
-	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return ""
-	}
-	return dir
-}
-
 // resolveConfigPath determines which config file to use.
 // Priority: explicit flag → ./config.toml → ~/.cc-connect/config.toml
 func resolveConfigPath(explicit string) string {
@@ -1258,7 +1194,7 @@ level = "info"
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"   # "claudecode", "codex", "cursor", "gemini", "qoder", "opencode", or "iflow"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -1297,8 +1233,8 @@ func printUsage() {
 | (_| (_|_____|  (_| (_) | | | | | | |  __/ (__| |_
  \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s%s
 
-  Bridge your messaging platforms to local AI coding agents.
-  Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
+  Bridge your messaging platforms to Pi.
+  Supports: Pi
   Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
   GitHub:  https://github.com/chenhg5/cc-connect
@@ -1345,7 +1281,6 @@ Commands:
     add              Add a provider (--project, --name, --api-key, ...)
     list             List providers (--project)
     remove           Remove a provider (--project, --name)
-    import           Import providers from cc-switch
 
   feishu             Setup Feishu/Lark bot credentials
     setup            Smart setup (QR create or bind when --app is provided)
@@ -1565,10 +1500,6 @@ func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
 		Model: p.Model, Models: convertProviderModels(p.Models),
 		Thinking: p.Thinking, Env: p.Env,
 	}
-	if p.Codex != nil {
-		c.CodexWireAPI = p.Codex.WireAPI
-		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
-	}
 	return c
 }
 
@@ -1626,15 +1557,12 @@ func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
 
 func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
 	info := core.GlobalProviderInfo{
-		Name:        p.Name,
-		APIKey:      p.APIKey,
-		BaseURL:     p.BaseURL,
-		Model:       p.Model,
-		Thinking:    p.Thinking,
-		Env:         p.Env,
-		AgentTypes:  p.AgentTypes,
-		Endpoints:   p.Endpoints,
-		AgentModels: p.AgentModels,
+		Name:     p.Name,
+		APIKey:   p.APIKey,
+		BaseURL:  p.BaseURL,
+		Model:    p.Model,
+		Thinking: p.Thinking,
+		Env:      p.Env,
 	}
 	for _, m := range p.Models {
 		info.Models = append(info.Models, struct {
@@ -1642,55 +1570,20 @@ func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
 			Alias string `json:"alias,omitempty"`
 		}{Model: m.Model, Alias: m.Alias})
 	}
-	if len(p.AgentModelLists) > 0 {
-		info.AgentModelLists = make(map[string][]core.GlobalModelEntry, len(p.AgentModelLists))
-		for at, ml := range p.AgentModelLists {
-			entries := make([]core.GlobalModelEntry, len(ml))
-			for i, m := range ml {
-				entries[i] = core.GlobalModelEntry{Model: m.Model, Alias: m.Alias}
-			}
-			info.AgentModelLists[at] = entries
-		}
-	}
-	if p.Codex != nil {
-		info.Codex = &core.GlobalCodexConfig{
-			WireAPI:     p.Codex.WireAPI,
-			HTTPHeaders: p.Codex.HTTPHeaders,
-		}
-	}
 	return info
 }
 
 func globalProviderToConfig(info core.GlobalProviderInfo) config.ProviderConfig {
 	p := config.ProviderConfig{
-		Name:        info.Name,
-		APIKey:      info.APIKey,
-		BaseURL:     info.BaseURL,
-		Model:       info.Model,
-		Thinking:    info.Thinking,
-		Env:         info.Env,
-		AgentTypes:  info.AgentTypes,
-		Endpoints:   info.Endpoints,
-		AgentModels: info.AgentModels,
+		Name:     info.Name,
+		APIKey:   info.APIKey,
+		BaseURL:  info.BaseURL,
+		Model:    info.Model,
+		Thinking: info.Thinking,
+		Env:      info.Env,
 	}
 	for _, m := range info.Models {
 		p.Models = append(p.Models, config.ProviderModelConfig{Model: m.Model, Alias: m.Alias})
-	}
-	if len(info.AgentModelLists) > 0 {
-		p.AgentModelLists = make(map[string][]config.ProviderModelConfig, len(info.AgentModelLists))
-		for at, ml := range info.AgentModelLists {
-			entries := make([]config.ProviderModelConfig, len(ml))
-			for i, m := range ml {
-				entries[i] = config.ProviderModelConfig{Model: m.Model, Alias: m.Alias}
-			}
-			p.AgentModelLists[at] = entries
-		}
-	}
-	if info.Codex != nil {
-		p.Codex = &config.CodexProviderConfig{
-			WireAPI:     info.Codex.WireAPI,
-			HTTPHeaders: info.Codex.HTTPHeaders,
-		}
 	}
 	return p
 }

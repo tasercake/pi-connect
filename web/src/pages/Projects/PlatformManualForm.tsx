@@ -10,12 +10,11 @@ interface Props {
   platformType: string;
   projectName: string;
   workDir?: string;
-  agentType?: string;
   onComplete: () => void;
   onCancel: () => void;
 }
 
-export default function PlatformManualForm({ platformType, projectName, workDir, agentType, onComplete, onCancel }: Props) {
+export default function PlatformManualForm({ platformType, projectName, workDir, onComplete, onCancel }: Props) {
   const { t } = useTranslation();
   const meta = platformMeta[platformType];
   const [values, setValues] = useState<Record<string, any>>({});
@@ -51,7 +50,7 @@ export default function PlatformManualForm({ platformType, projectName, workDir,
           opts[f.key] = v;
         }
       }
-      await addPlatformToProject(projectName, { type: platformType, options: opts, work_dir: workDir, agent_type: agentType });
+      await addPlatformToProject(projectName, { type: platformType, options: opts, work_dir: workDir });
       onComplete();
     } catch (e: any) {
       setError(e?.message || String(e));

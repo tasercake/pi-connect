@@ -1529,49 +1529,9 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 }
 
-func TestProcessInteractiveEvents_FinalReplyUsesWorkspaceForReferenceRendering(t *testing.T) {
-	p := &stubPlatformEngine{n: "feishu"}
-	a := &namedStubModelModeAgent{name: "codex"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{"codex"},
-		RenderPlatforms: []string{"feishu"},
-		DisplayPath:     "relative",
-		MarkerStyle:     "emoji",
-		EnclosureStyle:  "code",
-	})
-
-	sessionKey := "feishu:user-relative"
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newControllableSession("s-relative")
-	state := &interactiveState{
-		agentSession: agentSession,
-		platform:     p,
-		replyCtx:     "ctx-relative",
-		workspaceDir: "/root/code",
-	}
-	e.interactiveStates[sessionKey] = state
-
-	agentSession.events <- Event{
-		Type:    EventResult,
-		Content: "/root/code/demo-repo/src/services/user_profile_service.ts:42",
-		Done:    true,
-	}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-relative", time.Now(), nil, nil, state.replyCtx)
-
-	sent := p.getSent()
-	if len(sent) != 1 {
-		t.Fatalf("sent = %#v, want one final reply", sent)
-	}
-	if got := sent[0]; got != "📄 `demo-repo/src/services/user_profile_service.ts:42`" {
-		t.Fatalf("final reply = %q, want workspace-relative rendered reference", got)
-	}
-}
-
 func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *testing.T) {
 	p := &stubPlatformEngine{n: "feishu"}
-	a := &namedStubModelModeAgent{name: "codex"}
+	a := &namedStubModelModeAgent{name: "pi"}
 	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
 	e.SetReferenceConfig(ReferenceRenderCfg{
 		NormalizeAgents: []string{},
@@ -2946,36 +2906,13 @@ func TestReplyWithCard_UsesCardSenderWhenSupported(t *testing.T) {
 	}
 }
 
-func TestReply_DoesNotTransformLocalReferencesWhenEnabled(t *testing.T) {
-	p := &stubPlatformEngine{n: "feishu"}
-	a := &namedStubModelModeAgent{name: "codex"}
-	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
-	e.SetBaseWorkDir("/root/code/demo")
-	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{"codex"},
-		RenderPlatforms: []string{"feishu"},
-		DisplayPath:     "relative",
-		MarkerStyle:     "emoji",
-		EnclosureStyle:  "code",
-	})
-
-	e.reply(p, "ctx", "See /root/code/demo/src/app.ts:42")
-
-	if len(p.sent) != 1 {
-		t.Fatalf("sent messages = %d, want 1", len(p.sent))
-	}
-	if got := p.sent[0]; got != "See /root/code/demo/src/app.ts:42" {
-		t.Fatalf("reply content = %q, want raw path", got)
-	}
-}
-
 func TestReplyWithCard_DoesNotTransformMarkdownOrFallback(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
-	a := &namedStubModelModeAgent{name: "codex"}
+	a := &namedStubModelModeAgent{name: "pi"}
 	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
 	e.SetBaseWorkDir("/root/code/demo")
 	e.SetReferenceConfig(ReferenceRenderCfg{
-		NormalizeAgents: []string{"codex"},
+		NormalizeAgents: []string{"pi"},
 		RenderPlatforms: []string{"feishu"},
 		DisplayPath:     "basename",
 		MarkerStyle:     "ascii",
@@ -3966,7 +3903,6 @@ func TestGetOrCreateWorkspaceAgent_InheritsSnapshotOptions(t *testing.T) {
 		opts: map[string]any{
 			"backend":          "app_server",
 			"app_server_url":   "ws://127.0.0.1:3846",
-			"codex_home":       "/tmp/codex-home",
 			"reasoning_effort": "high",
 			"mode":             "yolo",
 			"model":            "gpt-5.4",
@@ -3994,9 +3930,6 @@ func TestGetOrCreateWorkspaceAgent_InheritsSnapshotOptions(t *testing.T) {
 	}
 	if got := wsAgent.opts["app_server_url"]; got != "ws://127.0.0.1:3846" {
 		t.Fatalf("workspace app_server_url = %#v, want ws://127.0.0.1:3846", got)
-	}
-	if got := wsAgent.opts["codex_home"]; got != "/tmp/codex-home" {
-		t.Fatalf("workspace codex_home = %#v, want /tmp/codex-home", got)
 	}
 	if got := wsAgent.opts["reasoning_effort"]; got != "high" {
 		t.Fatalf("workspace reasoning_effort = %#v, want high", got)
@@ -4707,7 +4640,7 @@ func TestCmdUsage_Success(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubUsageAgent{
 		report: &UsageReport{
-			Provider: "codex",
+			Provider: "pi",
 			Email:    "dev@example.com",
 			Plan:     "team",
 			Buckets: []UsageBucket{
@@ -4938,7 +4871,7 @@ func TestCmdSkills_UsesTelegramSafeNamesOnTelegramPlatform(t *testing.T) {
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	temp := t.TempDir()
-	skillDir := temp + "/telegram-codex-bot"
+	skillDir := temp + "/telegram-pi-bot"
 	if err := os.Mkdir(skillDir, 0o755); err != nil {
 		t.Fatalf("mkdir skill dir: %v", err)
 	}
@@ -4952,10 +4885,10 @@ func TestCmdSkills_UsesTelegramSafeNamesOnTelegramPlatform(t *testing.T) {
 	if len(p.sent) != 1 {
 		t.Fatalf("sent messages = %d, want 1", len(p.sent))
 	}
-	if !strings.Contains(p.sent[0], "/telegram_codex_bot") {
+	if !strings.Contains(p.sent[0], "/telegram_pi_bot") {
 		t.Fatalf("skills text = %q, want Telegram-safe skill command", p.sent[0])
 	}
-	if strings.Contains(p.sent[0], "/telegram-codex-bot") {
+	if strings.Contains(p.sent[0], "/telegram-pi-bot") {
 		t.Fatalf("skills text = %q, should not show raw hyphenated command", p.sent[0])
 	}
 }
@@ -11322,47 +11255,6 @@ func TestSlackTypedSessionKeysInRelayAndBridgeHelpers(t *testing.T) {
 	}
 }
 
-func TestSetObserveConfig(t *testing.T) {
-	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
-	e.SetObserveConfig("/tmp/test-project", "slack:u:C123:U456")
-	if !e.observeEnabled {
-		t.Fatal("observe should be enabled")
-	}
-	if e.observeProjectDir != "/tmp/test-project" {
-		t.Fatalf("unexpected project dir: %s", e.observeProjectDir)
-	}
-}
-
-func TestObserveStartsOnlyWithSlack(t *testing.T) {
-	stub := &stubPlatformWithObserve{stubPlatform: stubPlatform{n: "slack"}}
-	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:u:C123:U456")
-
-	target := e.findObserverTarget()
-	if target == nil {
-		t.Fatal("expected to find observer target for Slack")
-	}
-}
-
-func TestObserveNoTargetWithoutSlack(t *testing.T) {
-	stub := &stubPlatform{n: "telegram"}
-	e := NewEngine("test", &stubAgent{}, []Platform{stub}, "", LangEnglish)
-	e.SetObserveConfig("/tmp/fake-project", "slack:u:C123:U456")
-
-	target := e.findObserverTarget()
-	if target != nil {
-		t.Fatal("expected no observer target without Slack")
-	}
-}
-
-type stubPlatformWithObserve struct {
-	stubPlatform
-}
-
-func (s *stubPlatformWithObserve) SendObservation(_ context.Context, _, _ string) error {
-	return nil
-}
-
 // --- Instant Reply tests ---
 
 // stubStreamingCardPlatform simulates a platform that supports StreamingCardPlatform
@@ -12203,7 +12095,7 @@ func TestCmdList_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
 	agentSessions := make([]AgentSessionInfo, 5)
 	for i := range agentSessions {
 		agentSessions[i] = AgentSessionInfo{
-			ID:           fmt.Sprintf("codex-thread-%d", i+1),
+			ID:           fmt.Sprintf("pi-thread-%d", i+1),
 			Summary:      fmt.Sprintf("Session %d summary", i+1),
 			MessageCount: (i + 1) * 2,
 			ModifiedAt:   base.Add(time.Duration(i) * time.Hour),
@@ -12224,7 +12116,7 @@ func TestCmdList_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
 			e.sessions.NewSession(userKey, fmt.Sprintf("session-%d", i+1))
 		}
 		s := e.sessions.GetOrCreateActive(userKey)
-		s.SetAgentSessionID(as.ID, "codex")
+		s.SetAgentSessionID(as.ID, "pi")
 		e.sessions.Save()
 	}
 
@@ -12264,14 +12156,14 @@ func TestCmdList_AllSessionsVisibleAfterResetAllSessions(t *testing.T) {
 
 	for _, as := range agentSessions[:3] {
 		s := e.sessions.NewSession(userKey, "")
-		s.SetAgentSessionID(as.ID, "codex")
+		s.SetAgentSessionID(as.ID, "pi")
 	}
 	e.sessions.Save()
 
 	e.resetAllSessions()
 
 	newS := e.sessions.NewSession(userKey, "fresh")
-	newS.SetAgentSessionID(agentSessions[3].ID, "codex")
+	newS.SetAgentSessionID(agentSessions[3].ID, "pi")
 	e.sessions.Save()
 
 	p.sent = nil
@@ -12308,12 +12200,12 @@ func TestCmdList_SessionVisibleDuringAgentProcessing(t *testing.T) {
 	userKey := "test:user1"
 
 	s1 := e.sessions.GetOrCreateActive(userKey)
-	s1.SetAgentSessionID("old-thread-1", "codex")
+	s1.SetAgentSessionID("old-thread-1", "pi")
 	e.sessions.Save()
 
 	s1.SetAgentSessionID("", "")
 	s2 := e.sessions.NewSession(userKey, "session-2")
-	s2.SetAgentSessionID("old-thread-2", "codex")
+	s2.SetAgentSessionID("old-thread-2", "pi")
 	e.sessions.Save()
 
 	s2.SetAgentSessionID("", "")
@@ -12362,7 +12254,7 @@ func TestRenderListCard_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
 			e.sessions.NewSession(userKey, fmt.Sprintf("s%d", i+1))
 		}
 		s := e.sessions.GetOrCreateActive(userKey)
-		s.SetAgentSessionID(as.ID, "codex")
+		s.SetAgentSessionID(as.ID, "pi")
 	}
 	e.sessions.Save()
 
@@ -12396,7 +12288,7 @@ func TestCmdList_ProviderSwitchThenNewDoesNotHideSessions(t *testing.T) {
 
 	for _, as := range allAgentSessions[:2] {
 		s := e.sessions.NewSession(userKey, "")
-		s.SetAgentSessionID(as.ID, "codex")
+		s.SetAgentSessionID(as.ID, "pi")
 	}
 	e.sessions.Save()
 
@@ -12408,7 +12300,7 @@ func TestCmdList_ProviderSwitchThenNewDoesNotHideSessions(t *testing.T) {
 			old.SetAgentSessionID("", "")
 		}
 		s := e.sessions.NewSession(userKey, "")
-		s.SetAgentSessionID(as.ID, "codex")
+		s.SetAgentSessionID(as.ID, "pi")
 	}
 	e.sessions.Save()
 
@@ -12430,7 +12322,7 @@ func TestCmdList_ProviderSwitchThenNewDoesNotHideSessions(t *testing.T) {
 // user-reported bug using data shaped exactly like the real qa-release project:
 //   - 15 internal sessions, 14 with lost AgentSessionIDs (old code damage)
 //   - 1 active session (s15) with a valid AgentSessionID
-//   - 37 codex sessions on disk
+//   - 37 pi sessions on disk
 //
 // Steps (matching user's exact reproduction):
 //  1. /list → must show all 37 sessions (legacy data, no filtering)
@@ -12459,7 +12351,7 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 			"s12": {"id":"s12","name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T14:07:59Z", "updated_at":"2026-04-18T14:18:49Z"},
 			"s13": {"id":"s13","name":"",           "agent_session_id":"", "history":null, "created_at":"2026-04-18T15:50:39Z", "updated_at":"2026-04-20T21:44:37Z"},
 			"s14": {"id":"s14","name":"今天",       "agent_session_id":"", "history":null, "created_at":"2026-04-20T21:44:58Z", "updated_at":"2026-04-20T21:44:58Z"},
-			"s15": {"id":"s15","name":"新的会话",   "agent_session_id":"019dab28-1a0f-7f60-87ed-b4fda306ebef", "agent_type":"codex", "history":null, "created_at":"2026-04-20T21:50:14Z", "updated_at":"2026-04-20T21:50:14Z"}
+			"s15": {"id":"s15","name":"新的会话",   "agent_session_id":"019dab28-1a0f-7f60-87ed-b4fda306ebef", "agent_type":"pi", "history":null, "created_at":"2026-04-20T21:50:14Z", "updated_at":"2026-04-20T21:50:14Z"}
 		},
 		"active_session": {"feishu:chat:user1":"s15"},
 		"user_sessions":  {"feishu:chat:user1":["s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","s12","s13","s14","s15"]},
@@ -12473,13 +12365,13 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 	agentSessions := make([]AgentSessionInfo, 37)
 	for i := range agentSessions {
 		agentSessions[i] = AgentSessionInfo{
-			ID:           fmt.Sprintf("codex-thread-%03d", i+1),
+			ID:           fmt.Sprintf("pi-thread-%03d", i+1),
 			Summary:      fmt.Sprintf("Codex session %d", i+1),
 			MessageCount: 3,
 			ModifiedAt:   base.Add(time.Duration(i) * 30 * time.Minute),
 		}
 	}
-	// s15's actual codex session is at index 36 (most recent)
+	// s15's actual pi session is at index 36 (most recent)
 	agentSessions[36].ID = "019dab28-1a0f-7f60-87ed-b4fda306ebef"
 	agentSessions[36].Summary = "陈奕迅最有名是那首歌"
 
@@ -12519,8 +12411,8 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 
 	// ── Step 4: agent replies → set SessionID → /list ──────────
 	newSession := e.sessions.GetOrCreateActive(userKey)
-	newThreadID := "codex-thread-new-038"
-	newSession.CompareAndSetAgentSessionID(newThreadID, "codex")
+	newThreadID := "pi-thread-new-038"
+	newSession.CompareAndSetAgentSessionID(newThreadID, "pi")
 	// Engine maps the pending name to the new agent session ID
 	pendingName := newSession.GetName()
 	if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -12577,11 +12469,11 @@ func TestCmdList_FilterExternalSessionsEnabled(t *testing.T) {
 	userKey := "test:user1"
 
 	s1 := e.sessions.GetOrCreateActive(userKey)
-	s1.SetAgentSessionID("tracked-1", "codex")
+	s1.SetAgentSessionID("tracked-1", "pi")
 	e.sessions.Save()
 	s1.SetAgentSessionID("", "")
 	s2 := e.sessions.NewSession(userKey, "session2")
-	s2.SetAgentSessionID("tracked-2", "codex")
+	s2.SetAgentSessionID("tracked-2", "pi")
 	e.sessions.Save()
 
 	p.sent = nil
@@ -12617,7 +12509,7 @@ func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
 	userKey := "test:user1"
 
 	s := e.sessions.GetOrCreateActive(userKey)
-	s.SetAgentSessionID("tracked-1", "codex")
+	s.SetAgentSessionID("tracked-1", "pi")
 	e.sessions.Save()
 
 	p.sent = nil
@@ -12660,11 +12552,11 @@ func setupFilterTestEngine(t *testing.T, filterEnabled bool) (*Engine, *stubPlat
 	userKey := "test:filter-user"
 
 	s1 := e.sessions.GetOrCreateActive(userKey)
-	s1.SetAgentSessionID("tracked-1", "codex")
+	s1.SetAgentSessionID("tracked-1", "pi")
 	e.sessions.Save()
 	s1.SetAgentSessionID("", "")
 	s2 := e.sessions.NewSession(userKey, "session2")
-	s2.SetAgentSessionID("tracked-2", "codex")
+	s2.SetAgentSessionID("tracked-2", "pi")
 	e.sessions.Save()
 
 	return e, p, userKey, agentSessions
@@ -12803,235 +12695,6 @@ func TestFilterExternalSessions_DynamicToggle(t *testing.T) {
 	count3 := strings.Count(p.sent[0], "msgs")
 	if count3 != len(agentSessions) {
 		t.Fatalf("after disabling filter: expected %d sessions, got %d", len(agentSessions), count3)
-	}
-}
-
-// codexLikeSession simulates real codex agent behavior:
-// - CurrentSessionID() returns "" until Send() is called
-// - Send() sets the thread ID and pushes an EventResult with the SessionID
-type codexLikeSession struct {
-	threadID  string
-	events    chan Event
-	alive     bool
-	hasSentID bool
-}
-
-func newCodexLikeSession(threadID string) *codexLikeSession {
-	return &codexLikeSession{
-		threadID: threadID,
-		events:   make(chan Event, 8),
-		alive:    true,
-	}
-}
-
-func (s *codexLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
-	s.hasSentID = true
-	s.events <- Event{Type: EventText, Content: "Agent reply to: " + prompt}
-	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
-	return nil
-}
-func (s *codexLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
-func (s *codexLikeSession) Events() <-chan Event                                 { return s.events }
-func (s *codexLikeSession) CurrentSessionID() string {
-	if s.hasSentID {
-		return s.threadID
-	}
-	return ""
-}
-func (s *codexLikeSession) Alive() bool  { return s.alive }
-func (s *codexLikeSession) Close() error { s.alive = false; return nil }
-
-// TestSessionName_CodexLikeFlow does an end-to-end test simulating real codex
-// behavior: CurrentSessionID()="" initially, thread ID only available after Send().
-// This is the exact bug: /new xxx → send message → agent replies with SessionID
-// in EventResult → name "xxx" must appear in /list.
-func TestSessionName_CodexLikeFlow(t *testing.T) {
-	sess := newCodexLikeSession("codex-thread-new-001")
-	listSessions := []AgentSessionInfo{
-		{ID: "codex-thread-old", Summary: "Old session", MessageCount: 5, ModifiedAt: time.Now().Add(-time.Hour)},
-	}
-	agent := &controllableAgent{
-		nextSession: sess,
-		listFn: func() ([]AgentSessionInfo, error) {
-			return listSessions, nil
-		},
-	}
-	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	userKey := "test:user1"
-
-	// Setup: create initial session with a known agent session ID
-	initial := e.sessions.GetOrCreateActive(userKey)
-	initial.SetAgentSessionID("codex-thread-old", "codex")
-	e.sessions.Save()
-
-	// Step 1: /new "我的新会话"
-	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"我的新会话"})
-
-	// Step 2: send a message (this triggers startOrResumeSession + processInteractiveEvents)
-	e.ReceiveMessage(p, &Message{
-		SessionKey: userKey,
-		Content:    "请帮我做个功能",
-		ReplyCtx:   "ctx2",
-	})
-
-	// Wait for the event loop to complete
-	time.Sleep(200 * time.Millisecond)
-
-	// Step 3: verify session name was mapped
-	newSession := e.sessions.GetOrCreateActive(userKey)
-	agentID := newSession.GetAgentSessionID()
-	if agentID != "codex-thread-new-001" {
-		t.Fatalf("AgentSessionID = %q, want %q", agentID, "codex-thread-new-001")
-	}
-
-	gotName := e.sessions.GetSessionName("codex-thread-new-001")
-	if gotName != "我的新会话" {
-		t.Fatalf("GetSessionName(%q) = %q, want %q", "codex-thread-new-001", gotName, "我的新会话")
-	}
-
-	// Step 4: verify /list displays the name
-	listSessions = append(listSessions, AgentSessionInfo{
-		ID:           "codex-thread-new-001",
-		Summary:      "请帮我做个功能",
-		MessageCount: 2,
-		ModifiedAt:   time.Now(),
-	})
-	p.sent = nil
-	e.cmdList(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, nil)
-	if len(p.sent) != 1 {
-		t.Fatalf("expected 1 reply, got %d", len(p.sent))
-	}
-	if !strings.Contains(p.sent[0], "我的新会话") {
-		t.Errorf("/list should show session name '我的新会话':\n%s", p.sent[0])
-	}
-}
-
-// claudeCodeLikeSession simulates claudecode/gemini/cursor behavior:
-// - CurrentSessionID() returns "" at creation
-// - Send() emits an early EventText with SessionID (system/init event)
-// - Then normal EventText without SessionID
-// - Finally EventResult with SessionID
-type claudeCodeLikeSession struct {
-	threadID  string
-	events    chan Event
-	alive     bool
-	hasSentID bool
-}
-
-func newClaudeCodeLikeSession(threadID string) *claudeCodeLikeSession {
-	return &claudeCodeLikeSession{
-		threadID: threadID,
-		events:   make(chan Event, 8),
-		alive:    true,
-	}
-}
-
-func (s *claudeCodeLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
-	s.hasSentID = true
-	// claudecode sends an early system event with SessionID (empty content)
-	s.events <- Event{Type: EventText, Content: "", SessionID: s.threadID}
-	// Normal streaming text (no SessionID)
-	s.events <- Event{Type: EventText, Content: "Reply to: " + prompt}
-	// Final result
-	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
-	return nil
-}
-func (s *claudeCodeLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
-func (s *claudeCodeLikeSession) Events() <-chan Event                                 { return s.events }
-func (s *claudeCodeLikeSession) CurrentSessionID() string {
-	if s.hasSentID {
-		return s.threadID
-	}
-	return ""
-}
-func (s *claudeCodeLikeSession) Alive() bool  { return s.alive }
-func (s *claudeCodeLikeSession) Close() error { s.alive = false; return nil }
-
-// TestSessionName_ClaudeCodeLikeFlow tests the claudecode/gemini/cursor pattern:
-// CurrentSessionID()="" initially, but an early EventText carries SessionID.
-func TestSessionName_ClaudeCodeLikeFlow(t *testing.T) {
-	sess := newClaudeCodeLikeSession("claude-session-001")
-	agent := &controllableAgent{nextSession: sess}
-	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	userKey := "test:user1"
-
-	initial := e.sessions.GetOrCreateActive(userKey)
-	initial.SetAgentSessionID("claude-session-old", "claudecode")
-	e.sessions.Save()
-
-	// /new with a custom name
-	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"Claude任务"})
-
-	// Send message
-	e.ReceiveMessage(p, &Message{
-		SessionKey: userKey,
-		Content:    "帮我重构代码",
-		ReplyCtx:   "ctx2",
-	})
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify session name mapped via EventText path
-	gotName := e.sessions.GetSessionName("claude-session-001")
-	if gotName != "Claude任务" {
-		t.Fatalf("GetSessionName(%q) = %q, want %q — claudecode-like EventText name mapping failed",
-			"claude-session-001", gotName, "Claude任务")
-	}
-}
-
-// acpLikeSession simulates ACP behavior:
-//   - CurrentSessionID() returns the thread ID immediately after creation
-//     (ACP does handshake before returning from StartSession)
-type acpLikeSession struct {
-	threadID string
-	events   chan Event
-	alive    bool
-}
-
-func newACPLikeSession(threadID string) *acpLikeSession {
-	return &acpLikeSession{
-		threadID: threadID,
-		events:   make(chan Event, 8),
-		alive:    true,
-	}
-}
-
-func (s *acpLikeSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
-	s.events <- Event{Type: EventText, Content: "Reply", SessionID: s.threadID}
-	s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "Done", Done: true}
-	return nil
-}
-func (s *acpLikeSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
-func (s *acpLikeSession) Events() <-chan Event                                 { return s.events }
-func (s *acpLikeSession) CurrentSessionID() string                             { return s.threadID }
-func (s *acpLikeSession) Alive() bool                                          { return s.alive }
-func (s *acpLikeSession) Close() error                                         { s.alive = false; return nil }
-
-// TestSessionName_ACPLikeFlow tests ACP pattern: CurrentSessionID() is non-empty
-// immediately at creation, so name mapping happens in startOrResumeSession.
-func TestSessionName_ACPLikeFlow(t *testing.T) {
-	sess := newACPLikeSession("acp-session-001")
-	agent := &controllableAgent{nextSession: sess}
-	p := &stubPlatformEngine{n: "plain"}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	userKey := "test:user1"
-
-	// /new with a custom name
-	e.cmdNew(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"ACP任务"})
-
-	// Send message — startOrResumeSession should map the name immediately
-	e.ReceiveMessage(p, &Message{
-		SessionKey: userKey,
-		Content:    "帮我部署",
-		ReplyCtx:   "ctx2",
-	})
-	time.Sleep(200 * time.Millisecond)
-
-	gotName := e.sessions.GetSessionName("acp-session-001")
-	if gotName != "ACP任务" {
-		t.Fatalf("GetSessionName(%q) = %q, want %q — ACP-like immediate ID name mapping failed",
-			"acp-session-001", gotName, "ACP任务")
 	}
 }
 

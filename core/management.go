@@ -130,33 +130,16 @@ func (m *ManagementServer) SetSaveGlobalSettings(fn func(map[string]any) error) 
 
 // GlobalProviderInfo is the wire type for global provider CRUD in the management API.
 type GlobalProviderInfo struct {
-	Name       string            `json:"name"`
-	APIKey     string            `json:"api_key,omitempty"`
-	BaseURL    string            `json:"base_url,omitempty"`
-	Model      string            `json:"model,omitempty"`
-	Thinking   string            `json:"thinking,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	AgentTypes []string          `json:"agent_types,omitempty"`
-	Models     []struct {
+	Name     string            `json:"name"`
+	APIKey   string            `json:"api_key,omitempty"`
+	BaseURL  string            `json:"base_url,omitempty"`
+	Model    string            `json:"model,omitempty"`
+	Thinking string            `json:"thinking,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	Models   []struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
-}
-
-// GlobalModelEntry is a model entry inside AgentModelLists.
-type GlobalModelEntry struct {
-	Model string `json:"model"`
-	Alias string `json:"alias,omitempty"`
-}
-
-// GlobalCodexConfig holds Codex-specific provider settings for the management API.
-type GlobalCodexConfig struct {
-	WireAPI     string            `json:"wire_api,omitempty"`
-	HTTPHeaders map[string]string `json:"http_headers,omitempty"`
 }
 
 func (m *ManagementServer) SetListGlobalProviders(fn func() ([]GlobalProviderInfo, error)) {
@@ -383,7 +366,7 @@ func (m *ManagementServer) handleAgents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	mgmtJSON(w, http.StatusOK, map[string]any{
-		"agents":    ListRegisteredAgents(),
+		"agents":    []string{"pi"},
 		"platforms": ListRegisteredPlatforms(),
 	})
 }
@@ -563,7 +546,7 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 
 		projects = append(projects, map[string]any{
 			"name":              name,
-			"agent_type":        e.agent.Name(),
+			"agent_type":        "pi",
 			"platforms":         platNames,
 			"sessions_count":    sessCount,
 			"heartbeat_enabled": hbEnabled,
@@ -654,7 +637,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 
 		data := map[string]any{
 			"name":                name,
-			"agent_type":          e.agent.Name(),
+			"agent_type":          "pi",
 			"platforms":           platInfos,
 			"sessions_count":      sessCount,
 			"active_session_keys": keys,
@@ -711,7 +694,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			DisabledCommands     []string          `json:"disabled_commands"`
 			WorkDir              *string           `json:"work_dir"`
 			Mode                 *string           `json:"mode"`
-			AgentType            *string           `json:"agent_type"`
 			ShowContextIndicator *bool             `json:"show_context_indicator"`
 			ReplyFooter          *bool             `json:"reply_footer"`
 			InjectSender         *bool             `json:"inject_sender"`
@@ -762,23 +744,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			e.SetInjectSender(*body.InjectSender)
 		}
 
-		restartRequired := false
-		if body.AgentType != nil && *body.AgentType != e.agent.Name() {
-			registered := ListRegisteredAgents()
-			found := false
-			for _, a := range registered {
-				if a == *body.AgentType {
-					found = true
-					break
-				}
-			}
-			if !found {
-				mgmtError(w, http.StatusBadRequest, fmt.Sprintf("unknown agent type %q", *body.AgentType))
-				return
-			}
-			restartRequired = true
-		}
-
 		if m.saveProjectSettings != nil {
 			patch := ProjectSettingsUpdate{
 				Language:             body.Language,
@@ -786,7 +751,6 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				DisabledCommands:     body.DisabledCommands,
 				WorkDir:              body.WorkDir,
 				Mode:                 body.Mode,
-				AgentType:            body.AgentType,
 				ShowContextIndicator: body.ShowContextIndicator,
 				ReplyFooter:          body.ReplyFooter,
 				InjectSender:         body.InjectSender,
@@ -797,11 +761,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		resp := map[string]any{"message": "settings updated"}
-		if restartRequired {
-			resp["restart_required"] = true
-		}
-		mgmtJSON(w, http.StatusOK, resp)
+		mgmtJSON(w, http.StatusOK, map[string]any{"message": "settings updated"})
 		return
 	}
 
@@ -942,7 +902,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 				"id":            s.ID,
 				"name":          s.Name,
 				"session_key":   idToKey[s.ID],
-				"agent_type":    s.AgentType,
+				"agent_type":    "pi",
 				"active":        activeIDs[s.ID],
 				"history_count": histCount,
 				"created_at":    s.CreatedAt,
@@ -1044,7 +1004,7 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			"name":             s.Name,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
-			"agent_type":       s.AgentType,
+			"agent_type":       "pi",
 			"active":           activeIDs[s.ID],
 			"live":             live,
 			"history_count":    len(s.History),
@@ -1834,11 +1794,6 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 				BaseURL: src.BaseURL,
 				Model:   src.Model,
 			}
-			if src.AppType == "claude" {
-				gp.AgentTypes = []string{"claudecode"}
-			} else if src.AppType == "codex" {
-				gp.AgentTypes = []string{"codex"}
-			}
 			if err := m.addGlobalProvider(gp); err != nil {
 				skipped = append(skipped, name)
 				continue
@@ -1855,27 +1810,15 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 	}
 }
 
-// resolveGlobalProviderForAgent creates a ProviderConfig from a GlobalProviderInfo,
-// applying per-agent-type overrides for base_url, model, and models.
+// resolveGlobalProviderForAgent creates a ProviderConfig from a GlobalProviderInfo.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
-	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
-		pc.BaseURL = ep
-	}
-	if am, ok := g.AgentModels[agentType]; ok && am != "" {
-		pc.Model = am
-	}
-	if aml, ok := g.AgentModelLists[agentType]; ok && len(aml) > 0 {
-		pc.Models = make([]ModelOption, len(aml))
-		for i, m := range aml {
-			pc.Models[i] = ModelOption{Name: m.Model, Alias: m.Alias}
-		}
-	} else if len(g.Models) > 0 {
+	if len(g.Models) > 0 {
 		pc.Models = make([]ModelOption, len(g.Models))
 		for i, m := range g.Models {
 			pc.Models[i] = ModelOption{Name: m.Model, Alias: m.Alias}
@@ -1923,7 +1866,7 @@ func (m *ManagementServer) handleSkills(w http.ResponseWriter, r *http.Request) 
 		}
 		result = append(result, projectSkills{
 			Project:   name,
-			AgentType: e.AgentTypeName(),
+			AgentType: "pi",
 			Dirs:      e.SkillDirs(),
 			Skills:    items,
 		})

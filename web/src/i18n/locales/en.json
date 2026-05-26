@@ -36,8 +36,6 @@
     "detail": "Details",
     "noProjects": "No projects configured",
     "workDir": "Working directory",
-    "agentType": "Agent type",
-    "agentTypeChangeHint": "Changing agent type requires restart. Incompatible providers will be removed.",
     "agentMode": "Permission mode",
     "agentSettings": "Agent",
     "generalSettings": "General",
@@ -220,7 +218,6 @@
     "addProject": "Add project",
     "projectName": "Project name",
     "workDir": "Working directory",
-    "agentType": "Agent type",
     "next": "Next",
     "manualSetup": "Manual setup",
     "manualHint": "For {{platform}}, please configure credentials in config.toml and restart the service.",
@@ -338,7 +335,6 @@
     "title": "Providers",
     "subtitle": "Manage shared API providers across all projects",
     "add": "Add Provider",
-    "importCCSwitch": "Import from CC-Switch",
     "edit": "Edit Provider",
     "empty": "No providers configured",
     "emptyHint": "Add a global provider or import from presets to get started.",
@@ -358,23 +354,9 @@
       "modelHint": "The model used when switching to this provider. Click ✓ on a model below to set it.",
       "models": "Available models",
       "modelsHint": "Models users can switch to via /model. Click ✓ to set as default.",
-      "agentTypes": "Agent types",
-      "agentTypesHint": "Leave empty for all agent types",
       "thinkingDefault": "Default (auto)",
-      "perAgentHint": "Different agents may use different Base URL / models. Configure per agent type below.",
       "defaultConfig": "Default",
-      "baseUrl": "Base URL",
-      "codexWireApi": "Wire API"
-    },
-    "ccSwitch": {
-      "title": "Import from CC-Switch",
-      "notFound": "CC-Switch database not found. Make sure CC-Switch is installed.",
-      "empty": "No providers configured in CC-Switch.",
-      "hint": "Found {{count}} providers in CC-Switch. Select which to import:",
-      "active": "active",
-      "exists": "exists",
-      "import": "Import ({{count}})",
-      "result": "Import complete: {{imported}} imported, {{skipped}} skipped."
+      "baseUrl": "Base URL"
     }
   },
   "skills": {

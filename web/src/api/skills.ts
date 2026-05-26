@@ -9,7 +9,6 @@ export interface SkillInfo {
 
 export interface ProjectSkills {
   project: string;
-  agent_type: string;
   dirs: string[];
   skills: SkillInfo[];
 }
@@ -34,7 +33,6 @@ export interface SkillPreset {
   version?: string;
   author?: string;
   url?: string;
-  agent_types?: string[];
   tags?: string[];
   featured?: boolean;
   source?: SkillSource;

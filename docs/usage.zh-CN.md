@@ -12,7 +12,7 @@ cc-connect 完整功能使用指南。
 - [引用查看（`/show`）](#引用查看show)
 - [飞书配置 CLI](#飞书配置-cli)
 - [微信个人号配置 CLI](#微信个人号配置-cli)
-- [Claude Code Router 集成](#claude-code-router-集成)
+- [Provider 路由集成](#provider-路由集成)
 - [语音消息（语音转文字）](#语音消息语音转文字)
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
@@ -43,7 +43,7 @@ cc-connect 完整功能使用指南。
 | `/dir [路径]` | 查看或切换 Agent 工作目录 |
 | `/show <引用>` | 按引用查看文件、目录或代码片段 |
 | `/allow <工具名>` | 预授权工具 |
-| `/reasoning [等级]` | 查看或切换推理强度（Codex）|
+| `/reasoning [等级]` | 查看或切换推理强度（Pi）|
 | `/mode [名称]` | 查看或切换权限模式 |
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
@@ -70,7 +70,7 @@ reset_on_idle_mins = 60
 
 所有 Agent 支持运行时切换权限模式，通过 `/mode` 命令。
 
-### Claude Code 模式
+### Pi 模式
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
@@ -80,7 +80,7 @@ reset_on_idle_mins = 60
 | 计划模式 | `plan` | 只规划不执行 |
 | YOLO | `bypassPermissions` / `yolo` | 全部自动通过 |
 
-### Codex 模式
+### Pi 模式
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
@@ -89,7 +89,7 @@ reset_on_idle_mins = 60
 | 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
 | YOLO | `yolo` | 跳过所有审批 |
 
-### Cursor Agent 模式
+### Pi 模式
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
@@ -98,7 +98,7 @@ reset_on_idle_mins = 60
 | 规划模式 | `plan` | 只读分析 |
 | 问答模式 | `ask` | 问答风格，只读 |
 
-### Gemini CLI 模式
+### Pi 模式
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
@@ -107,7 +107,7 @@ reset_on_idle_mins = 60
 | 全自动 | `yolo` | 自动批准所有 |
 | 规划模式 | `plan` | 只读规划 |
 
-### Qoder CLI / OpenCode / iFlow CLI
+### Pi
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
@@ -174,7 +174,7 @@ model = "MiniMax-M2.7"
 # Bedrock、Vertex 等
 [[projects.agent.providers]]
 name = "bedrock"
-env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+env = { PI_ENV_EXAMPLE = "1", AWS_PROFILE = "bedrock" }
 ```
 
 ### CLI 命令
@@ -201,11 +201,11 @@ cc-connect provider import --project my-backend  # 从 cc-switch 导入
 
 | Agent | api_key → | base_url → |
 |-------|-----------|------------|
-| Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| Gemini CLI | `GEMINI_API_KEY` | 使用 `env` 字段 |
-| OpenCode | `ANTHROPIC_API_KEY` | 使用 `env` 字段 |
-| iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+| Pi | `PI_API_KEY` | `PI_BASE_URL` |
+| Pi | `PI_API_KEY` | `PI_BASE_URL` |
+| Pi | `GEMINI_API_KEY` | 使用 `env` 字段 |
+| Pi | `PI_API_KEY` | 使用 `env` 字段 |
+| Pi | `PI_API_KEY` | `PI_BASE_URL` |
 
 ---
 
@@ -221,15 +221,15 @@ name = "openai"
 api_key = "sk-xxx"
 
 [[projects.agent.providers.models]]
-model = "gpt-5.3-codex"
-alias = "codex"
+model = "gpt-5.3-pi"
+alias = "pi"
 
 [[projects.agent.providers.models]]
 model = "gpt-5.4"
 alias = "gpt"
 
 [[projects.agent.providers.models]]
-model = "gpt-5.3-codex-spark"
+model = "gpt-5.3-pi-spark"
 alias = "spark"
 ```
 
@@ -302,7 +302,7 @@ enclosure_style = "code"
 
 - `normalize_agents`
   - 控制哪些 Agent 输出参与这套引用处理
-  - 当前初始支持：`codex`、`claudecode`、`all`
+  - 当前初始支持：`pi`、`pi`、`all`
 
 - `render_platforms`
   - 控制在哪些平台发送前应用展示重写
@@ -487,15 +487,15 @@ cc-connect weixin new --project my-project
 
 ---
 
-## Claude Code Router 集成
+## Provider 路由集成
 
-[Claude Code Router](https://github.com/musistudio/claude-code-router) 可将请求路由到不同模型提供商。
+[Provider router](https://github.com/chenhg5/cc-connect) 可将请求路由到不同模型提供商。
 
 ### 安装配置
 
-1. 安装：`npm install -g @musistudio/claude-code-router`
+1. 安装：`npm install -g provider-router`
 
-2. 配置 `~/.claude-code-router/config.json`：
+2. 配置 `~/.cc-connect/provider-router.json`：
 ```json
 {
   "APIKEY": "your-secret-key",
@@ -692,11 +692,11 @@ cc-connect cron del <job-id>
 
 可选：`--session-mode new-per-run` 每次触发使用新的 agent 会话（默认 `reuse` 与旧行为一致）。`--timeout-mins N` 设置单次调度最长等待分钟数（`0` 表示不限制；省略为 30 分钟）。
 
-### 自然语言（Claude Code）
+### 自然语言（Pi）
 
 > "每天早上6点帮我总结 GitHub trending"
 
-Claude Code 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执行一次 `/cron setup` 或 `/bind setup`，效果相同。
+Pi 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执行一次 `/cron setup` 或 `/bind setup`，效果相同。
 
 ---
 
@@ -708,9 +708,9 @@ Claude Code 会自动创建定时任务。对依赖记忆文件的其他 Agent�
 
 ```
 /bind              查看绑定
-/bind claudecode   添加 claudecode 项目
+/bind pi   添加 pi 项目
 /bind gemini       添加 gemini 项目
-/bind -claudecode  移除 claudecode
+/bind -pi  移除 pi
 ```
 
 ### 机器人间通信
@@ -750,7 +750,7 @@ mode = "multi-workspace"
 base_dir = "~/workspaces"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 ```
 
 ### 命令
@@ -920,7 +920,7 @@ WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Age
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow
+type = "pi"  # 或 pi, pi, gemini, pi, pi, pi
 
 [projects.agent.options]
 work_dir = "/path/to/project"

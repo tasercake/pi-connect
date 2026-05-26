@@ -282,7 +282,7 @@ func progressCardPayloadForTarget(p Platform, replyCtx any) bool {
 // SuppressStandaloneToolResultEvent is true when a platform opts into progress
 // styling (ProgressStyleProvider) but uses legacy mode. In that case tool_use
 // lines are still shown, but a separate chat message for EventToolResult is
-// skipped to avoid duplicate noise (e.g. Codex structured tool results on Feishu).
+// skipped to avoid duplicate noise.
 // Platforms without ProgressStyleProvider keep showing standalone tool results.
 func SuppressStandaloneToolResultEvent(p Platform) bool {
 	_, ok := p.(ProgressStyleProvider)
@@ -332,22 +332,6 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 
 func normalizeProgressAgentLabel(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "agent":
-		return "Agent"
-	case "codex":
-		return "Codex"
-	case "claudecode", "claude-code", "cc":
-		return "CC"
-	case "gemini":
-		return "Gemini"
-	case "cursor":
-		return "Cursor"
-	case "qoder":
-		return "Qoder"
-	case "iflow":
-		return "iFlow"
-	case "opencode":
-		return "OpenCode"
 	case "pi":
 		return "PI"
 	default:

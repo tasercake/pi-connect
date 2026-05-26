@@ -355,34 +355,34 @@ func TestSession_GetName(t *testing.T) {
 func TestSessionManager_InvalidateForAgent(t *testing.T) {
 	sm := NewSessionManager("")
 
-	// Create sessions with different agent types
+	// Create sessions with current, stale, and pre-migration agent types.
 	s1 := sm.NewSession("user1", "sess1")
-	s1.SetAgentSessionID("old-id-1", "opencode")
+	s1.SetAgentSessionID("old-id-1", "legacy")
 
 	s2 := sm.NewSession("user2", "sess2")
-	s2.SetAgentSessionID("old-id-2", "claudecode")
+	s2.SetAgentSessionID("old-id-2", "pi")
 
 	s3 := sm.NewSession("user3", "sess3")
 	s3.SetAgentSessionID("old-id-3", "") // pre-migration, no agent type
 
 	s4 := sm.NewSession("user4", "sess4") // no agent session ID at all
 
-	sm.InvalidateForAgent("claudecode")
+	sm.InvalidateForAgent("pi")
 
-	// s1: opencode → should be invalidated
+	// s1: stale agent type → should be invalidated
 	if got := s1.GetAgentSessionID(); got != "" {
-		t.Errorf("s1 (opencode) AgentSessionID = %q, want empty (should be invalidated)", got)
+		t.Errorf("s1 (stale agent) AgentSessionID = %q, want empty (should be invalidated)", got)
 	}
-	if s1.AgentType != "claudecode" {
-		t.Errorf("s1 AgentType = %q, want %q after invalidation", s1.AgentType, "claudecode")
+	if s1.AgentType != "pi" {
+		t.Errorf("s1 AgentType = %q, want %q after invalidation", s1.AgentType, "pi")
 	}
 
-	// s2: claudecode → should be untouched
+	// s2: pi → should be untouched
 	if got := s2.GetAgentSessionID(); got != "old-id-2" {
-		t.Errorf("s2 (claudecode) AgentSessionID = %q, want %q (should be preserved)", got, "old-id-2")
+		t.Errorf("s2 (pi) AgentSessionID = %q, want %q (should be preserved)", got, "old-id-2")
 	}
-	if s2.AgentType != "claudecode" {
-		t.Errorf("s2 AgentType = %q, want %q", s2.AgentType, "claudecode")
+	if s2.AgentType != "pi" {
+		t.Errorf("s2 AgentType = %q, want %q", s2.AgentType, "pi")
 	}
 
 	// s3: empty agent type → should be untouched (backward compat)
@@ -453,13 +453,13 @@ func TestSessionManager_DeleteByAgentSessionID(t *testing.T) {
 	sm := NewSessionManager("")
 
 	s1 := sm.NewSession("user1", "one")
-	s1.SetAgentSessionID("agent-1", "codex")
+	s1.SetAgentSessionID("agent-1", "pi")
 
 	s2 := sm.NewSession("user2", "two")
-	s2.SetAgentSessionID("agent-2", "codex")
+	s2.SetAgentSessionID("agent-2", "pi")
 
 	s3 := sm.NewSession("user3", "three")
-	s3.SetAgentSessionID("agent-1", "codex")
+	s3.SetAgentSessionID("agent-1", "pi")
 
 	if removed := sm.DeleteByAgentSessionID("agent-1"); removed != 2 {
 		t.Fatalf("removed = %d, want 2", removed)
@@ -616,7 +616,7 @@ func TestSwitchToAgentSession_ReusesExisting(t *testing.T) {
 
 func TestPastAgentSessionIDs_ClearPreservesHistory(t *testing.T) {
 	s := &Session{}
-	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("thread-1", "pi")
 	s.SetAgentSessionID("", "")
 
 	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
@@ -626,8 +626,8 @@ func TestPastAgentSessionIDs_ClearPreservesHistory(t *testing.T) {
 
 func TestPastAgentSessionIDs_ReplacePreservesHistory(t *testing.T) {
 	s := &Session{}
-	s.SetAgentSessionID("thread-1", "codex")
-	s.SetAgentSessionID("thread-2", "codex")
+	s.SetAgentSessionID("thread-1", "pi")
+	s.SetAgentSessionID("thread-2", "pi")
 
 	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
 		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
@@ -639,9 +639,9 @@ func TestPastAgentSessionIDs_ReplacePreservesHistory(t *testing.T) {
 
 func TestPastAgentSessionIDs_NoDuplicates(t *testing.T) {
 	s := &Session{}
-	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("thread-1", "pi")
 	s.SetAgentSessionID("", "")
-	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("thread-1", "pi")
 	s.SetAgentSessionID("", "")
 
 	if len(s.PastAgentSessionIDs) != 1 {
@@ -651,8 +651,8 @@ func TestPastAgentSessionIDs_NoDuplicates(t *testing.T) {
 
 func TestPastAgentSessionIDs_ContinueSentinelNotRecorded(t *testing.T) {
 	s := &Session{}
-	s.SetAgentSessionID(ContinueSession, "codex")
-	s.SetAgentSessionID("real-id", "codex")
+	s.SetAgentSessionID(ContinueSession, "pi")
+	s.SetAgentSessionID("real-id", "pi")
 	s.SetAgentSessionID("", "")
 
 	for _, past := range s.PastAgentSessionIDs {
@@ -667,8 +667,8 @@ func TestPastAgentSessionIDs_ContinueSentinelNotRecorded(t *testing.T) {
 
 func TestSetAgentInfo_PreservesHistory(t *testing.T) {
 	s := &Session{}
-	s.SetAgentInfo("thread-1", "codex", "session 1")
-	s.SetAgentInfo("thread-2", "codex", "session 2")
+	s.SetAgentInfo("thread-1", "pi", "session 1")
+	s.SetAgentInfo("thread-2", "pi", "session 2")
 
 	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
 		t.Fatalf("SetAgentInfo PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
@@ -678,11 +678,11 @@ func TestSetAgentInfo_PreservesHistory(t *testing.T) {
 func TestKnownAgentSessionIDs_IncludesPast(t *testing.T) {
 	sm := NewSessionManager("")
 	s1 := sm.NewSession("user1", "a")
-	s1.SetAgentSessionID("thread-aaa", "codex")
+	s1.SetAgentSessionID("thread-aaa", "pi")
 	s1.SetAgentSessionID("", "")
 
 	s2 := sm.NewSession("user1", "b")
-	s2.SetAgentSessionID("thread-bbb", "codex")
+	s2.SetAgentSessionID("thread-bbb", "pi")
 
 	known := sm.KnownAgentSessionIDs()
 	if _, ok := known["thread-aaa"]; !ok {
@@ -701,21 +701,21 @@ func TestKnownAgentSessionIDs_ReproducesNewCommandBug(t *testing.T) {
 	userKey := "user:test"
 
 	agentSessions := []AgentSessionInfo{
-		{ID: "codex-thread-1"},
-		{ID: "codex-thread-2"},
-		{ID: "codex-thread-3"},
+		{ID: "pi-thread-1"},
+		{ID: "pi-thread-2"},
+		{ID: "pi-thread-3"},
 	}
 
 	s1 := sm.GetOrCreateActive(userKey)
-	s1.SetAgentSessionID("codex-thread-1", "codex")
+	s1.SetAgentSessionID("pi-thread-1", "pi")
 
 	s1.SetAgentSessionID("", "")
 	s2 := sm.NewSession(userKey, "session 2")
-	s2.SetAgentSessionID("codex-thread-2", "codex")
+	s2.SetAgentSessionID("pi-thread-2", "pi")
 
 	s2.SetAgentSessionID("", "")
 	s3 := sm.NewSession(userKey, "session 3")
-	s3.SetAgentSessionID("codex-thread-3", "codex")
+	s3.SetAgentSessionID("pi-thread-3", "pi")
 
 	known := sm.KnownAgentSessionIDs()
 	filtered := filterOwnedSessions(agentSessions, known)
@@ -734,11 +734,11 @@ func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
 	userKey := "user:test"
 
 	s1 := sm.NewSession(userKey, "a")
-	s1.SetAgentSessionID("thread-1", "codex")
+	s1.SetAgentSessionID("thread-1", "pi")
 	s2 := sm.NewSession(userKey, "b")
-	s2.SetAgentSessionID("thread-2", "codex")
+	s2.SetAgentSessionID("thread-2", "pi")
 	s3 := sm.NewSession(userKey, "c")
-	s3.SetAgentSessionID("thread-3", "codex")
+	s3.SetAgentSessionID("thread-3", "pi")
 
 	for _, s := range sm.AllSessions() {
 		s.SetAgentSessionID("", "")
@@ -766,8 +766,8 @@ func TestPastAgentSessionIDs_Persistence(t *testing.T) {
 
 	sm1 := NewSessionManager(path)
 	s := sm1.NewSession("user1", "test")
-	s.SetAgentSessionID("thread-old", "codex")
-	s.SetAgentSessionID("thread-new", "codex")
+	s.SetAgentSessionID("thread-old", "pi")
+	s.SetAgentSessionID("thread-new", "pi")
 	sm1.Save()
 
 	sm2 := NewSessionManager(path)
@@ -791,7 +791,7 @@ func TestKnownAgentSessionIDs_LegacyDataDisablesFilter(t *testing.T) {
 		"sessions": {
 			"s1": {"id":"s1","name":"old","agent_session_id":"","history":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
 			"s2": {"id":"s2","name":"","agent_session_id":"","history":null,"created_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"},
-			"s3": {"id":"s3","name":"active","agent_session_id":"thread-3","agent_type":"codex","history":null,"created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-03T00:00:00Z"}
+			"s3": {"id":"s3","name":"active","agent_session_id":"thread-3","agent_type":"pi","history":null,"created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-03T00:00:00Z"}
 		},
 		"active_session": {"user1":"s3"},
 		"user_sessions": {"user1":["s1","s2","s3"]},
@@ -825,7 +825,7 @@ func TestKnownAgentSessionIDs_NewDataEnablesFilter(t *testing.T) {
 
 	sm1 := NewSessionManager(path)
 	s1 := sm1.NewSession("user1", "a")
-	s1.SetAgentSessionID("thread-1", "codex")
+	s1.SetAgentSessionID("thread-1", "pi")
 	sm1.NewSession("user1", "b")
 	sm1.Save()
 
@@ -860,7 +860,7 @@ func TestLegacyData_PartiallyMigratedData(t *testing.T) {
 		"sessions": {
 			"s1": {"id":"s1","name":"default","agent_session_id":"","history":null,"created_at":"2026-03-26T22:25:56Z","updated_at":"2026-03-26T22:25:56Z"},
 			"s2": {"id":"s2","name":"","agent_session_id":"","history":null,"created_at":"2026-04-18T09:02:57Z","updated_at":"2026-04-18T09:02:57Z"},
-			"s3": {"id":"s3","name":"active","agent_session_id":"thread-active","agent_type":"codex","past_agent_session_ids":["thread-old"],"history":null,"created_at":"2026-04-20T21:50:14Z","updated_at":"2026-04-20T21:50:14Z"}
+			"s3": {"id":"s3","name":"active","agent_session_id":"thread-active","agent_type":"pi","past_agent_session_ids":["thread-old"],"history":null,"created_at":"2026-04-20T21:50:14Z","updated_at":"2026-04-20T21:50:14Z"}
 		},
 		"active_session": {"user1":"s3"},
 		"user_sessions":  {"user1":["s1","s2","s3"]},
@@ -896,7 +896,7 @@ func TestLegacyData_ClearsAfterFirstNewCommand(t *testing.T) {
 
 	legacyJSON := `{
 		"sessions": {
-			"s1": {"id":"s1","name":"","agent_session_id":"thread-old","agent_type":"codex","history":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
+			"s1": {"id":"s1","name":"","agent_session_id":"thread-old","agent_type":"pi","history":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
 		},
 		"active_session": {"user1":"s1"},
 		"user_sessions": {"user1":["s1"]},
@@ -915,7 +915,7 @@ func TestLegacyData_ClearsAfterFirstNewCommand(t *testing.T) {
 	s1 := sm.GetOrCreateActive("user1")
 	s1.SetAgentSessionID("", "")
 	s2 := sm.NewSession("user1", "new")
-	s2.SetAgentSessionID("thread-new", "codex")
+	s2.SetAgentSessionID("thread-new", "pi")
 	sm.Save()
 
 	sm2 := NewSessionManager(path)

@@ -36,8 +36,6 @@
     "detail": "詳細",
     "noProjects": "プロジェクトが設定されていません",
     "workDir": "作業ディレクトリ",
-    "agentType": "エージェントタイプ",
-    "agentTypeChangeHint": "エージェントタイプの変更には再起動が必要です。互換性のないプロバイダーは削除されます。",
     "agentMode": "権限モード",
     "agentSettings": "エージェント",
     "generalSettings": "一般",
@@ -220,7 +218,6 @@
     "addProject": "プロジェクト追加",
     "projectName": "プロジェクト名",
     "workDir": "作業ディレクトリ",
-    "agentType": "エージェントの種類",
     "next": "次へ",
     "manualSetup": "手動設定",
     "manualHint": "{{platform}} は config.toml で認証情報を設定し、サービスを再起動してください。",
@@ -338,7 +335,6 @@
     "title": "プロバイダー管理",
     "subtitle": "全プロジェクトで共有できるグローバル API プロバイダーを管理",
     "add": "プロバイダーを追加",
-    "importCCSwitch": "CC-Switch からインポート",
     "edit": "プロバイダーを編集",
     "empty": "プロバイダーが設定されていません",
     "emptyHint": "グローバルプロバイダーを追加するか、プリセットからインポートしてください。",
@@ -358,23 +354,9 @@
       "modelHint": "このプロバイダーに切り替えた時に使用するモデル",
       "models": "利用可能なモデル",
       "modelsHint": "/model コマンドで切り替え可能なモデル一覧",
-      "agentTypes": "対応エージェント",
-      "agentTypesHint": "空の場合はすべてのエージェントに対応",
       "thinkingDefault": "デフォルト（自動）",
-      "perAgentHint": "エージェントごとに異なる Base URL やモデルを設定できます。",
       "defaultConfig": "デフォルト",
-      "baseUrl": "Base URL",
-      "codexWireApi": "Wire API"
-    },
-    "ccSwitch": {
-      "title": "CC-Switch からインポート",
-      "notFound": "CC-Switch データベースが見つかりません。CC-Switch がインストールされているか確認してください。",
-      "empty": "CC-Switch にプロバイダーが設定されていません。",
-      "hint": "CC-Switch で {{count}} 件のプロバイダーが見つかりました。インポートするものを選択：",
-      "active": "アクティブ",
-      "exists": "既存",
-      "import": "インポート ({{count}})",
-      "result": "インポート完了：{{imported}} 件成功、{{skipped}} 件スキップ。"
+      "baseUrl": "Base URL"
     }
   },
   "skills": {

@@ -7,7 +7,7 @@ cc-connect connects to QQ via the [OneBot v11](https://github.com/botuniverse/on
 ## 架构 / Architecture
 
 ```
-QQ Client ←→ NapCat (OneBot v11) ←WebSocket→ cc-connect ←→ Agent (Claude Code / etc.)
+QQ Client ←→ NapCat (OneBot v11) ←WebSocket→ cc-connect ←→ Pi
 ```
 
 ## 前置条件 / Prerequisites
