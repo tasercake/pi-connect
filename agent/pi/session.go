@@ -276,6 +276,7 @@ func (s *piSession) startJSONHeartbeat() func() {
 //	message_start     — beginning of user/assistant/toolResult message
 //	message_update    — streaming deltas (assistantMessageEvent sub-events)
 //	message_end       — complete message
+//	custom_message    — visible extension message (e.g. subagent completion)
 func (s *piSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
@@ -292,6 +293,9 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_end":
 		s.handleMessageEnd(raw)
 
+	case "custom_message":
+		s.handleCustomMessage(raw)
+
 	case "turn_end":
 		s.handleTurnEnd(raw)
 
@@ -302,6 +306,35 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	default:
 		slog.Debug("piSession: unhandled event", "type", eventType)
 	}
+}
+
+func (s *piSession) handleCustomMessage(raw map[string]any) {
+	content := customMessageContent(raw)
+	if content == "" {
+		return
+	}
+	// Subagent completion notifications are often unsolicited background
+	// messages. Emit a complete result so cc-connect's unsolicited reader sends
+	// the notification immediately instead of buffering text until a later turn.
+	evt := core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
+	}
+}
+
+func customMessageContent(raw map[string]any) string {
+	content, _ := raw["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	customType, _ := raw["customType"].(string)
+	display, _ := raw["display"].(bool)
+	if customType != "subagent-notify" || !display {
+		return ""
+	}
+	return content
 }
 
 // handleMessageUpdate processes streaming deltas from pi's assistantMessageEvent.

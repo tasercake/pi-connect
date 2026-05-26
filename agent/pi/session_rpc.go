@@ -275,6 +275,10 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		s.rpcHandleMessageUpdate(raw)
 	case "message_end":
 		s.rpcHandleMessageEnd(raw)
+	case "custom_message":
+		if content := customMessageContent(raw); content != "" {
+			s.tryEmit(core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()})
+		}
 	case "agent_start":
 		s.streamMu.Lock()
 		s.isStreaming = true
