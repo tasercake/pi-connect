@@ -3559,6 +3559,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventHeartbeat:
+			continue
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
 				break
@@ -4218,8 +4220,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
-				compressor, ok := e.agent.(ContextCompressor)
-				if ok && compressor.CompressCommand() != "" {
+				if sessionSupportsContextCompression(e.agent, state.agentSession) {
 					if pendingSend != nil {
 						if err := <-pendingSend; err != nil {
 							slog.Debug("async send error before compress", "error", err)
@@ -7986,9 +7987,31 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	return true
 }
 
+func agentSupportsContextCompression(agent Agent) bool {
+	if compressor, ok := agent.(ContextCompressor); ok && compressor.CompressCommand() != "" {
+		return true
+	}
+	if supporter, ok := agent.(ContextCompressionSupporter); ok && supporter.SupportsContextCompression() {
+		return true
+	}
+	return false
+}
+
+func sessionSupportsContextCompression(agent Agent, session AgentSession) bool {
+	if session == nil {
+		return false
+	}
+	if _, ok := session.(ContextCompactingSession); ok {
+		return true
+	}
+	if compressor, ok := agent.(ContextCompressor); ok && compressor.CompressCommand() != "" {
+		return true
+	}
+	return false
+}
+
 func (e *Engine) cmdCompress(p Platform, msg *Message) {
-	compressor, ok := e.agent.(ContextCompressor)
-	if !ok || compressor.CompressCommand() == "" {
+	if !agentSupportsContextCompression(e.agent) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
 		return
 	}
@@ -8000,6 +8023,10 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNoSession))
+		return
+	}
+	if !sessionSupportsContextCompression(e.agent, state.agentSession) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
 		return
 	}
 
@@ -8015,8 +8042,9 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 	go e.runCompress(state, session, sessions, iKey, p, msg.ReplyCtx, false)
 }
 
-// runCompress sends the agent's compress command and handles results.
-// If autoTriggered is true, suppress user-visible "compressing" and completion messages.
+// runCompress sends a native/session-specific compact request or the agent's
+// legacy compress command and handles results. If autoTriggered is true,
+// suppress user-visible completion/error messages.
 func (e *Engine) runCompress(state *interactiveState, session *Session, sessions *SessionManager, iKey string, p Platform, replyCtx any, auto bool) {
 	// session.Unlock() is called inside drainQueuedMessagesAfterCompress
 	// while holding state.mu to close the race window. Deferred fallback
@@ -8037,6 +8065,24 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.mu.Unlock()
 
 	drainEvents(state.agentSession.Events())
+
+	if compactor, ok := state.agentSession.(ContextCompactingSession); ok {
+		if err := compactor.CompactContext(); err != nil {
+			if !auto {
+				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			}
+			if !state.agentSession.Alive() {
+				e.cleanupInteractiveState(iKey)
+			}
+			return
+		}
+		drainEvents(state.agentSession.Events())
+		if !auto {
+			e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+		}
+		e.drainQueuedMessagesAfterCompress(state, session, sessions, iKey, &compressUnlocked)
+		return
+	}
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
@@ -8123,6 +8169,8 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		}
 
 		switch event.Type {
+		case EventHeartbeat:
+			continue
 		case EventText:
 			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)

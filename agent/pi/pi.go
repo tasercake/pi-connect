@@ -20,17 +20,17 @@ func init() {
 	core.RegisterAgent("pi", New)
 }
 
-// Agent drives the pi coding agent CLI. Default transport is `pi --mode json -p`
-// (one process per Send). Set transport="rpc" in options to use `pi --mode rpc`
-// as a persistent subprocess — required for extension commands like /goals,
-// /sisyphus, and any other slash command provided by an installed pi extension.
+// Agent drives the pi coding agent CLI. Default transport is `pi --mode rpc`
+// as a persistent subprocess so extension notifications can arrive after a
+// turn. Set transport="json" in options to use the legacy one-process-per-Send
+// `pi --mode json -p` transport.
 type Agent struct {
 	cmd        string // path to pi binary
 	workDir    string
 	model      string
 	mode       string // "default" | "yolo"
 	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
-	transport  string // "json" (default) | "rpc"
+	transport  string // "rpc" (default) | "json"
 	sessionEnv []string
 	mu         sync.Mutex
 }
@@ -67,10 +67,10 @@ func New(opts map[string]any) (core.Agent, error) {
 
 func normalizeTransport(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "rpc":
-		return "rpc"
-	default:
+	case "json":
 		return "json"
+	default:
+		return "rpc"
 	}
 }
 
@@ -86,6 +86,8 @@ func normalizeMode(raw string) string {
 func (a *Agent) Name() string           { return "pi" }
 func (a *Agent) CLIBinaryName() string  { return "pi" }
 func (a *Agent) CLIDisplayName() string { return "Pi" }
+
+func (a *Agent) SupportsContextCompression() bool { return true }
 
 func (a *Agent) SetModel(model string) {
 	a.mu.Lock()

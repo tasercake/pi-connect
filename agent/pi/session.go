@@ -20,6 +20,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+var piJSONHeartbeatInterval = time.Minute
+
 // piSession manages a multi-turn pi coding agent conversation.
 // Each Send() spawns `pi --mode json -p <prompt>`.
 // Subsequent turns use `--session <sessionID>` to resume.
@@ -38,6 +40,11 @@ type piSession struct {
 	alive     atomic.Bool
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
+
+	finalTextBuf     strings.Builder // complete final assistant text from message_end/turn_end
+	emittedTextDelta bool            // true after a non-empty text_delta was emitted this turn
+	inputTokens      int
+	outputTokens     int
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -64,6 +71,8 @@ func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resu
 }
 
 func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	s.resetResponseState()
+
 	// Clean up attachments from previous turns.
 	cleanAttachments(s.workDir)
 
@@ -142,8 +151,27 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 	return nil
 }
 
+func (s *piSession) CompactContext() error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	sid := s.CurrentSessionID()
+	if sid == "" {
+		return fmt.Errorf("piSession: cannot compact before session id is known")
+	}
+
+	rpc, err := newPiRPCSession(s.ctx, s.cmd, s.workDir, s.model, s.mode, s.thinking, sid, s.extraEnv)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rpc.Close() }()
+	return rpc.CompactContext()
+}
+
 func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
+	stopHeartbeat := s.startJSONHeartbeat()
+	defer stopHeartbeat()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
@@ -190,12 +218,70 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		}
 	}
 
+	// Stop synthetic liveness events before emitting EventResult, so no stale
+	// heartbeat can arrive after the final result for this turn.
+	stopHeartbeat()
+
 	// Emit EventResult when the process finishes.
 	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	evt := core.Event{
+		Type:         core.EventResult,
+		SessionID:    sid,
+		Done:         true,
+		InputTokens:  s.inputTokens,
+		OutputTokens: s.outputTokens,
+	}
+	if !s.emittedTextDelta {
+		evt.Content = s.finalTextBuf.String()
+	}
+	s.resetResponseState()
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
+	}
+}
+
+func (s *piSession) startJSONHeartbeat() func() {
+	interval := piJSONHeartbeatInterval
+	if interval <= 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				evt := core.Event{
+					Type:      core.EventHeartbeat,
+					Metadata:  map[string]any{"source": "pi_json_process_alive"},
+					Synthetic: true,
+				}
+				select {
+				case s.events <- evt:
+				case <-s.ctx.Done():
+					return
+				case <-done:
+					return
+				}
+			case <-s.ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
 	}
 }
 
@@ -207,6 +293,7 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 //	message_start     — beginning of user/assistant/toolResult message
 //	message_update    — streaming deltas (assistantMessageEvent sub-events)
 //	message_end       — complete message
+//	custom_message    — visible extension message (e.g. subagent completion)
 func (s *piSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
@@ -223,12 +310,75 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_end":
 		s.handleMessageEnd(raw)
 
-	case "agent_start", "agent_end", "turn_start", "turn_end", "message_start":
+	case "custom_message":
+		s.handleCustomMessage(raw)
+
+	case "turn_end":
+		s.handleTurnEnd(raw)
+
+	case "compaction_start", "compaction_end":
+		s.handleCompactionEvent(eventType, raw)
+
+	case "agent_start", "agent_end", "turn_start", "message_start":
 		// Logged for debugging but no action needed.
 		slog.Debug("piSession: lifecycle event", "type", eventType)
 
 	default:
 		slog.Debug("piSession: unhandled event", "type", eventType)
+	}
+}
+
+func (s *piSession) handleCustomMessage(raw map[string]any) {
+	content := customMessageContent(raw)
+	if content == "" {
+		return
+	}
+	// Subagent completion notifications are often unsolicited background
+	// messages. Emit a complete result so cc-connect's unsolicited reader sends
+	// the notification immediately instead of buffering text until a later turn.
+	evt := core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
+	}
+}
+
+func customMessageContent(raw map[string]any) string {
+	content, _ := raw["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	customType, _ := raw["customType"].(string)
+	display, _ := raw["display"].(bool)
+	if customType != "subagent-notify" || !display {
+		return ""
+	}
+	return content
+}
+
+func (s *piSession) handleCompactionEvent(eventType string, raw map[string]any) {
+	switch eventType {
+	case "compaction_start":
+		slog.Info("piSession: compaction started", "session_id", s.CurrentSessionID())
+		select {
+		case s.events <- core.Event{Type: core.EventThinking, Content: "Context compaction started"}:
+		case <-s.ctx.Done():
+		}
+	case "compaction_end":
+		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
+			slog.Warn("piSession: compaction failed", "session_id", s.CurrentSessionID(), "error", errMsg)
+			select {
+			case s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("context compaction failed: %s", errMsg)}:
+			case <-s.ctx.Done():
+			}
+			return
+		}
+		slog.Info("piSession: compaction completed", "session_id", s.CurrentSessionID())
+		select {
+		case s.events <- core.Event{Type: core.EventThinking, Content: "Context compaction completed"}:
+		case <-s.ctx.Done():
+		}
 	}
 }
 
@@ -245,6 +395,7 @@ func (s *piSession) handleMessageUpdate(raw map[string]any) {
 	case "text_delta":
 		delta, _ := ame["delta"].(string)
 		if delta != "" {
+			s.emittedTextDelta = true
 			evt := core.Event{Type: core.EventText, Content: delta}
 			select {
 			case s.events <- evt:
@@ -396,8 +547,114 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 			case <-s.ctx.Done():
 				return
 			}
+			return
+		}
+		s.captureFinalAssistantMessage(msg)
+	}
+}
+
+func (s *piSession) handleTurnEnd(raw map[string]any) {
+	if msg, ok := raw["message"].(map[string]any); ok && msg != nil {
+		s.captureFinalAssistantMessage(msg)
+	}
+	slog.Debug("piSession: lifecycle event", "type", "turn_end")
+}
+
+func (s *piSession) resetResponseState() {
+	s.finalTextBuf.Reset()
+	s.emittedTextDelta = false
+	s.inputTokens = 0
+	s.outputTokens = 0
+}
+
+func (s *piSession) captureFinalAssistantMessage(msg map[string]any) {
+	if !isFinalAssistantMessage(msg) {
+		return
+	}
+	text := extractTextContent(msg)
+	if text != "" {
+		s.finalTextBuf.Reset()
+		s.finalTextBuf.WriteString(text)
+	}
+	input, output := extractUsage(msg)
+	if input > 0 {
+		s.inputTokens = input
+	}
+	if output > 0 {
+		s.outputTokens = output
+	}
+}
+
+func isFinalAssistantMessage(msg map[string]any) bool {
+	role, _ := msg["role"].(string)
+	if role != "assistant" {
+		return false
+	}
+	if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+		return false
+	}
+	stopReason, _ := msg["stopReason"].(string)
+	if stopReason == "toolUse" {
+		return false
+	}
+	if stopReason == "stop" {
+		return true
+	}
+	return hasFinalAnswerSignature(msg)
+}
+
+func extractTextContent(msg map[string]any) string {
+	content, _ := msg["content"].([]any)
+	var b strings.Builder
+	for _, c := range content {
+		item, _ := c.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "text" {
+			continue
+		}
+		if text, ok := item["text"].(string); ok {
+			b.WriteString(text)
 		}
 	}
+	return b.String()
+}
+
+func hasFinalAnswerSignature(msg map[string]any) bool {
+	content, _ := msg["content"].([]any)
+	for _, c := range content {
+		item, _ := c.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if itemType, _ := item["type"].(string); itemType != "text" {
+			continue
+		}
+		sig, _ := item["textSignature"].(map[string]any)
+		if sig == nil {
+			continue
+		}
+		if phase, _ := sig["phase"].(string); phase == "final_answer" {
+			return true
+		}
+	}
+	return false
+}
+
+func extractUsage(msg map[string]any) (int, int) {
+	usage, _ := msg["usage"].(map[string]any)
+	if usage == nil {
+		return 0, 0
+	}
+	var input, output int
+	if v, ok := usage["input"].(float64); ok {
+		input = int(v)
+	}
+	if v, ok := usage["output"].(float64); ok {
+		output = int(v)
+	}
+	return input, output
 }
 
 // extractToolInput pulls a concise summary from a tool call content item.

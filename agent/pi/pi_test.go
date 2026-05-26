@@ -14,6 +14,29 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// ── normalizeTransport ───────────────────────────────────────
+
+func TestNormalizeTransport(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "rpc"},
+		{"rpc", "rpc"},
+		{"RPC", "rpc"},
+		{"  rpc  ", "rpc"},
+		{"json", "json"},
+		{"JSON", "json"},
+		{"  json  ", "json"},
+		{"unknown", "rpc"},
+	}
+	for _, tt := range tests {
+		if got := normalizeTransport(tt.in); got != tt.want {
+			t.Errorf("normalizeTransport(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 // ── normalizeMode ────────────────────────────────────────────
 
 func TestNormalizeMode(t *testing.T) {
@@ -60,14 +83,18 @@ func TestNew_DefaultValues(t *testing.T) {
 	if a.cmd != "echo" {
 		t.Errorf("cmd = %q, want \"echo\"", a.cmd)
 	}
+	if a.transport != "rpc" {
+		t.Errorf("transport = %q, want \"rpc\"", a.transport)
+	}
 }
 
 func TestNew_CustomOptions(t *testing.T) {
 	ag, err := New(map[string]any{
-		"cmd":      "echo",
-		"work_dir": "/tmp",
-		"model":    "qwen3.5-plus",
-		"mode":     "yolo",
+		"cmd":       "echo",
+		"work_dir":  "/tmp",
+		"model":     "qwen3.5-plus",
+		"mode":      "yolo",
+		"transport": "json",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -81,6 +108,9 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 	if a.mode != "yolo" {
 		t.Errorf("mode = %q", a.mode)
+	}
+	if a.transport != "json" {
+		t.Errorf("transport = %q", a.transport)
 	}
 }
 
@@ -218,7 +248,7 @@ func TestAgent_MemoryFiles(t *testing.T) {
 }
 
 func TestAgent_StartSession(t *testing.T) {
-	a := &Agent{cmd: "echo", workDir: "/tmp", model: "test-model", mode: "yolo"}
+	a := &Agent{cmd: "echo", workDir: "/tmp", model: "test-model", mode: "yolo", transport: "json"}
 	a.SetSessionEnv([]string{"TEST_VAR=1"})
 
 	sess, err := a.StartSession(context.Background(), "resume-123")
@@ -419,6 +449,83 @@ func drainEvents(s *piSession) []core.Event {
 	}
 }
 
+func newTestRPCSession() *piRPCSession {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &piRPCSession{
+		events:  make(chan core.Event, 64),
+		ctx:     ctx,
+		cancel:  cancel,
+		pending: make(map[string]chan rpcResponse),
+	}
+	s.alive.Store(true)
+	return s
+}
+
+func drainRPCEvents(s *piRPCSession) []core.Event {
+	var evts []core.Event
+	for {
+		select {
+		case e := <-s.events:
+			evts = append(evts, e)
+		default:
+			return evts
+		}
+	}
+}
+
+func TestHandleEvent_CustomMessageSubagentNotifyEmitsResult(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":       "custom_message",
+		"customType": "subagent-notify",
+		"display":    true,
+		"content":    "child done",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("events len = %d, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventResult || evts[0].Content != "child done" || !evts[0].Done {
+		t.Fatalf("event = %#v, want done EventResult child done", evts[0])
+	}
+}
+
+func TestHandleEvent_CustomMessageInvisibleOrEmptyEmitsNothing(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "subagent-notify", "display": false, "content": "hidden"})
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "other", "display": true, "content": "hidden"})
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "subagent-notify", "display": true, "content": ""})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("events len = %d, want 0", len(evts))
+	}
+}
+
+func TestRPCHandleAgentEvent_CustomMessageSubagentNotifyEmitsResult(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.cancel()
+
+	s.handleAgentEvent(map[string]any{
+		"type":       "custom_message",
+		"customType": "subagent-notify",
+		"display":    true,
+		"content":    "rpc child done",
+	})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("events len = %d, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventResult || evts[0].Content != "rpc child done" || !evts[0].Done {
+		t.Fatalf("event = %#v, want done EventResult rpc child done", evts[0])
+	}
+}
+
 func TestHandleEvent_Session(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
@@ -522,15 +629,15 @@ func TestHandleMessageUpdate_ThinkingAccumulation(t *testing.T) {
 
 	// Multiple thinking deltas should be accumulated.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "Let me "},
 	})
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "think about "},
 	})
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "this."},
 	})
 
@@ -542,7 +649,7 @@ func TestHandleMessageUpdate_ThinkingAccumulation(t *testing.T) {
 
 	// thinking_end triggers the accumulated event.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_end"},
 	})
 
@@ -564,7 +671,7 @@ func TestHandleMessageUpdate_ThinkingEndEmpty(t *testing.T) {
 
 	// thinking_end with no prior deltas should not emit.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_end"},
 	})
 
@@ -580,7 +687,7 @@ func TestHandleMessageUpdate_ThinkingDeltaEmpty(t *testing.T) {
 
 	// Empty deltas should not grow the buffer.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": ""},
 	})
 
@@ -871,6 +978,161 @@ func TestHandleMessageEnd_AssistantNoError(t *testing.T) {
 	}
 }
 
+func TestHandleMessageEnd_AssistantFinalTextFallback(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "thinking", "thinking": "hidden"},
+				map[string]any{"type": "text", "text": "real final answer"},
+				map[string]any{"type": "text", "text": " with suffix"},
+			},
+			"usage": map[string]any{"input": float64(123), "output": float64(45)},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no immediate events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "real final answer with suffix" {
+		t.Fatalf("finalTextBuf = %q", got)
+	}
+	if s.inputTokens != 123 || s.outputTokens != 45 {
+		t.Fatalf("usage = %d/%d, want 123/45", s.inputTokens, s.outputTokens)
+	}
+}
+
+func TestHandleMessageEnd_AssistantFinalSignatureFallback(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          "signed final answer",
+					"textSignature": map[string]any{"phase": "final_answer"},
+				},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no immediate events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "signed final answer" {
+		t.Fatalf("finalTextBuf = %q", got)
+	}
+}
+
+func TestHandleMessageEnd_AssistantToolUseIgnored(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "toolUse",
+			"content": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          "not a final answer",
+					"textSignature": map[string]any{"phase": "final_answer"},
+				},
+				map[string]any{"type": "toolCall", "name": "bash"},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "" {
+		t.Fatalf("finalTextBuf = %q, want empty", got)
+	}
+}
+
+func TestHandleTurnEnd_AssistantErrorIgnored(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "400 model not supported",
+			"content": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          "not a successful final answer",
+					"textSignature": map[string]any{"phase": "final_answer"},
+				},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "" {
+		t.Fatalf("finalTextBuf = %q, want empty", got)
+	}
+}
+
+func TestHandleTurnEnd_AssistantFinalTextFallbackNoEvent(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "turn_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "text", "text": "turn final answer"},
+			},
+		},
+	})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("expected no immediate events, got %d", len(evts))
+	}
+	if got := s.finalTextBuf.String(); got != "turn final answer" {
+		t.Fatalf("finalTextBuf = %q", got)
+	}
+}
+
+func TestPiSession_ResponseStateResetsBetweenTurns(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.finalTextBuf.WriteString("stale final")
+	s.emittedTextDelta = true
+	s.inputTokens = 10
+	s.outputTokens = 20
+
+	s.resetResponseState()
+
+	if got := s.finalTextBuf.String(); got != "" {
+		t.Fatalf("finalTextBuf = %q, want empty", got)
+	}
+	if s.emittedTextDelta {
+		t.Fatal("emittedTextDelta = true, want false")
+	}
+	if s.inputTokens != 0 || s.outputTokens != 0 {
+		t.Fatalf("usage = %d/%d, want 0/0", s.inputTokens, s.outputTokens)
+	}
+}
+
 func TestHandleMessageEnd_NilMessage(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
@@ -982,6 +1244,168 @@ func TestPiSession_Close(t *testing.T) {
 	}
 }
 
+func TestPiAgentSupportsContextCompression(t *testing.T) {
+	agent, err := New(map[string]any{"cmd": "echo"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	supporter, ok := agent.(core.ContextCompressionSupporter)
+	if !ok {
+		t.Fatal("Pi agent should implement ContextCompressionSupporter")
+	}
+	if !supporter.SupportsContextCompression() {
+		t.Fatal("SupportsContextCompression() = false, want true")
+	}
+}
+
+func writeFakePiRPC(t *testing.T, dir string) (string, string, string) {
+	t.Helper()
+	argsPath := filepath.Join(dir, "args.txt")
+	cmdPath := filepath.Join(dir, "cmd.json")
+	scriptPath := filepath.Join(dir, "fake-pi-rpc.sh")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "` + argsPath + `"
+IFS= read -r line
+printf '%s\n' "$line" > "` + cmdPath + `"
+id=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+printf '{"id":"%s","type":"response","command":"compact","success":true}\n' "$id"
+sleep 5
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake rpc script: %v", err)
+	}
+	return scriptPath, argsPath, cmdPath
+}
+
+func readRecordedRPCCommand(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded command: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(data), &got); err != nil {
+		t.Fatalf("unmarshal recorded command %q: %v", string(data), err)
+	}
+	return got
+}
+
+func TestPiRPCSessionCompactContextSendsCompactCommand(t *testing.T) {
+	tmp := t.TempDir()
+	fake, _, cmdPath := writeFakePiRPC(t, tmp)
+	s, err := newPiRPCSession(context.Background(), fake, tmp, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiRPCSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err != nil {
+		t.Fatalf("CompactContext() error = %v", err)
+	}
+	got := readRecordedRPCCommand(t, cmdPath)
+	if got["type"] != "compact" {
+		t.Fatalf("RPC command type = %v, want compact; full command=%v", got["type"], got)
+	}
+	if _, ok := got["message"]; ok {
+		t.Fatalf("compact RPC should not include prompt message: %v", got)
+	}
+}
+
+func TestPiSessionCompactContextUsesRPCResume(t *testing.T) {
+	tmp := t.TempDir()
+	fake, argsPath, cmdPath := writeFakePiRPC(t, tmp)
+	s, err := newPiSession(context.Background(), fake, tmp, "", "default", "", "json-sess-123", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err != nil {
+		t.Fatalf("CompactContext() error = %v", err)
+	}
+	got := readRecordedRPCCommand(t, cmdPath)
+	if got["type"] != "compact" {
+		t.Fatalf("RPC command type = %v, want compact; full command=%v", got["type"], got)
+	}
+	argsBytes, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	args := string(argsBytes)
+	if !strings.Contains(args, "--mode\nrpc") || !strings.Contains(args, "--session\njson-sess-123") {
+		t.Fatalf("transient RPC args = %q, want rpc mode resumed session", args)
+	}
+}
+
+func TestPiSessionCompactContextRequiresKnownSession(t *testing.T) {
+	s, err := newPiSession(context.Background(), "echo", t.TempDir(), "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("CompactContext() error = %v, want missing session id error", err)
+	}
+}
+
+func TestPiSessionCompactionEvents(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "compaction_start"})
+	s.handleEvent(map[string]any{"type": "compaction_end"})
+	s.handleEvent(map[string]any{"type": "compaction_end", "errorMessage": "boom"})
+	evts := drainEvents(s)
+
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventThinking || !strings.Contains(evts[0].Content, "started") {
+		t.Fatalf("start event = %+v", evts[0])
+	}
+	if evts[1].Type != core.EventThinking || !strings.Contains(evts[1].Content, "completed") {
+		t.Fatalf("end event = %+v", evts[1])
+	}
+	if evts[2].Type != core.EventError || evts[2].Error == nil || !strings.Contains(evts[2].Error.Error(), "boom") {
+		t.Fatalf("error event = %+v", evts[2])
+	}
+}
+
+func TestPiRPCSessionCompactionEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &piRPCSession{events: make(chan core.Event, 64), ctx: ctx, cancel: cancel}
+	s.alive.Store(true)
+
+	s.handleAgentEvent(map[string]any{"type": "compaction_start"})
+	s.handleAgentEvent(map[string]any{"type": "compaction_end"})
+	s.handleAgentEvent(map[string]any{"type": "compaction_end", "errorMessage": "boom"})
+
+	var evts []core.Event
+	for {
+		select {
+		case ev := <-s.events:
+			evts = append(evts, ev)
+		default:
+			goto done
+		}
+	}
+done:
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventThinking || !strings.Contains(evts[0].Content, "started") {
+		t.Fatalf("start event = %+v", evts[0])
+	}
+	if evts[1].Type != core.EventThinking || !strings.Contains(evts[1].Content, "completed") {
+		t.Fatalf("end event = %+v", evts[1])
+	}
+	if evts[2].Type != core.EventError || evts[2].Error == nil || !strings.Contains(evts[2].Error.Error(), "boom") {
+		t.Fatalf("error event = %+v", evts[2])
+	}
+}
+
 // ── Full event stream simulation ─────────────────────────────
 
 func TestHandleEvent_FullConversation(t *testing.T) {
@@ -1066,6 +1490,89 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 }
 
 // ── readLoop with real process ───────────────────────────────
+
+func TestPiSession_ReadLoopHeartbeatStopsBeforeResult(t *testing.T) {
+	oldInterval := piJSONHeartbeatInterval
+	piJSONHeartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { piJSONHeartbeatInterval = oldInterval })
+
+	sessionEvent := map[string]any{"type": "session", "id": "heartbeat-sess"}
+	line, _ := json.Marshal(sessionEvent)
+	script := "sleep 0.09; printf '%s\\n' '" + string(line) + "'"
+
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+
+	cmd := exec.CommandContext(s.ctx, "sh", "-c", script)
+	cmd.Dir = "/tmp"
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(cmd, stdout, &stderrBuf)
+
+	var evts []core.Event
+	timeout := time.After(5 * time.Second)
+loop:
+	for {
+		select {
+		case ev := <-s.Events():
+			evts = append(evts, ev)
+			if ev.Type == core.EventResult {
+				break loop
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for heartbeat/result events")
+		}
+	}
+
+	seenHeartbeat := false
+	seenResult := false
+	for _, ev := range evts {
+		switch ev.Type {
+		case core.EventHeartbeat:
+			if seenResult {
+				t.Fatalf("heartbeat arrived after result in collected events: %+v", evts)
+			}
+			seenHeartbeat = true
+			if !ev.Synthetic {
+				t.Fatal("heartbeat should be synthetic")
+			}
+			if source, _ := ev.Metadata["source"].(string); source != "pi_json_process_alive" {
+				t.Fatalf("heartbeat source = %q, want pi_json_process_alive", source)
+			}
+		case core.EventResult:
+			seenResult = true
+		}
+	}
+	if !seenHeartbeat {
+		t.Fatalf("missing heartbeat before result; events: %+v", evts)
+	}
+	if !seenResult {
+		t.Fatalf("missing result; events: %+v", evts)
+	}
+
+	select {
+	case ev := <-s.Events():
+		if ev.Type == core.EventHeartbeat {
+			t.Fatalf("heartbeat arrived after result: %+v", ev)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Close()
+}
 
 func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	// Use sh -c to simulate pi JSON output on stdout.
@@ -1155,5 +1662,133 @@ loop:
 	}
 	if s.CurrentSessionID() != "echo-sess" {
 		t.Errorf("sessionID = %q, want echo-sess", s.CurrentSessionID())
+	}
+}
+
+func TestPiSession_ReadLoopUsesFinalTextOnlyResultContent(t *testing.T) {
+	sessionEvent := map[string]any{"type": "session", "id": "final-sess"}
+	finalEvent := map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "text", "text": "real final from message end"},
+			},
+		},
+	}
+
+	evts := runReadLoopEvents(t, sessionEvent, finalEvent)
+
+	var result *core.Event
+	for i := range evts {
+		if evts[i].Type == core.EventText {
+			t.Fatalf("unexpected text event: %+v", evts[i])
+		}
+		if evts[i].Type == core.EventResult {
+			result = &evts[i]
+		}
+	}
+	if result == nil {
+		t.Fatal("missing result event")
+	}
+	if result.Content != "real final from message end" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+}
+
+func TestPiSession_ReadLoopTextDeltaSuppressesDuplicateResultContent(t *testing.T) {
+	sessionEvent := map[string]any{"type": "session", "id": "delta-sess"}
+	textEvent := map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "real final from delta",
+		},
+	}
+	finalEvent := map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "stop",
+			"content": []any{
+				map[string]any{"type": "text", "text": "real final from delta"},
+			},
+		},
+	}
+
+	evts := runReadLoopEvents(t, sessionEvent, textEvent, finalEvent)
+
+	var textCount int
+	var result *core.Event
+	for i := range evts {
+		switch evts[i].Type {
+		case core.EventText:
+			textCount++
+			if evts[i].Content != "real final from delta" {
+				t.Fatalf("text content = %q", evts[i].Content)
+			}
+		case core.EventResult:
+			result = &evts[i]
+		}
+	}
+	if textCount != 1 {
+		t.Fatalf("text event count = %d, want 1", textCount)
+	}
+	if result == nil {
+		t.Fatal("missing result event")
+	}
+	if result.Content != "" {
+		t.Fatalf("result content = %q, want empty to avoid duplicate", result.Content)
+	}
+}
+
+func runReadLoopEvents(t *testing.T, events ...map[string]any) []core.Event {
+	t.Helper()
+
+	var script strings.Builder
+	for _, event := range events {
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		script.WriteString("echo '")
+		script.WriteString(string(line))
+		script.WriteString("';")
+	}
+
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	cmd := exec.CommandContext(s.ctx, "sh", "-c", script.String())
+	cmd.Dir = "/tmp"
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(cmd, stdout, &stderrBuf)
+
+	var evts []core.Event
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			evts = append(evts, ev)
+			if ev.Type == core.EventResult {
+				return evts
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for events")
+		}
 	}
 }

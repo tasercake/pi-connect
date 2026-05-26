@@ -7336,6 +7336,38 @@ type stubCompressorAgent struct {
 
 func (a *stubCompressorAgent) CompressCommand() string { return a.cmd }
 
+type stubCompressionSupportAgent struct {
+	stubAgent
+	supported bool
+}
+
+func (a *stubCompressionSupportAgent) SupportsContextCompression() bool { return a.supported }
+
+type nativeCompactSession struct {
+	*queuingAgentSession
+	compactCalls int
+	compactErr   error
+	compactMu    sync.Mutex
+}
+
+func newNativeCompactSession(id string) *nativeCompactSession {
+	return &nativeCompactSession{queuingAgentSession: newQueuingSession(id)}
+}
+
+func (s *nativeCompactSession) CompactContext() error {
+	s.compactMu.Lock()
+	s.compactCalls++
+	err := s.compactErr
+	s.compactMu.Unlock()
+	return err
+}
+
+func (s *nativeCompactSession) CompactCalls() int {
+	s.compactMu.Lock()
+	defer s.compactMu.Unlock()
+	return s.compactCalls
+}
+
 func TestCmdCompress_NoCompressor_RepliesNotSupported(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -7366,6 +7398,155 @@ func TestCmdCompress_NoSession_RepliesNoSession(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], e.i18n.T(MsgCompressNoSession)) {
 		t.Fatalf("expected MsgCompressNoSession, got %q", sent[0])
+	}
+}
+
+func TestCmdCompress_UsesSessionNativeCompactor(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newNativeCompactSession("compress-native")
+	agent := &stubCompressionSupportAgent{supported: true}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if sess.CompactCalls() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for native compaction")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	sends := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sends) != 0 {
+		t.Fatalf("expected native compaction not to send a slash command, got sends %v", sends)
+	}
+
+	for {
+		sent := p.getSent()
+		foundDone := false
+		for _, s := range sent {
+			if strings.Contains(s, e.i18n.T(MsgCompressDone)) {
+				foundDone = true
+			}
+		}
+		if foundDone {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for MsgCompressDone, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCmdCompress_NativeCompactorErrorRepliesError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newNativeCompactSession("compress-native-error")
+	sess.compactErr = fmt.Errorf("native compact failed")
+	agent := &stubCompressionSupportAgent{supported: true}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"}
+	e.cmdCompress(p, msg)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		sent := p.getSent()
+		foundErr := false
+		for _, s := range sent {
+			if strings.Contains(s, "native compact failed") {
+				foundErr = true
+			}
+			if strings.Contains(s, e.i18n.T(MsgCompressDone)) {
+				t.Fatalf("unexpected success reply after native compaction error: %v", sent)
+			}
+		}
+		if foundErr {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for native compaction error, sent = %v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestAutoCompress_UsesSessionNativeCompactor(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newNativeCompactSession("auto-compress-native")
+	agent := &stubCompressionSupportAgent{supported: true}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0) // tiny threshold
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Seed history so estimate crosses threshold after assistant response.
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hello world")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if sess.CompactCalls() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for native auto-compress")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	sends := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sends) != 0 {
+		t.Fatalf("expected native auto-compress not to send a slash command, got sends %v", sends)
 	}
 }
 
@@ -8476,6 +8657,55 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 	}
 	if foundTimeout {
 		t.Error("should NOT have timed out — events should have reset the timer")
+	}
+}
+
+func TestEventIdleTimeout_HeartbeatResetsTimer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("idle-heartbeat")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetEventIdleTimeout(120 * time.Millisecond)
+
+	key := "test:idle-heartbeat"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil)
+		close(done)
+	}()
+
+	for i := 0; i < 4; i++ {
+		time.Sleep(60 * time.Millisecond)
+		sess.events <- Event{Type: EventHeartbeat, Synthetic: true}
+	}
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete after heartbeat events")
+	}
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if strings.Contains(s, "timed out") {
+			t.Fatalf("should NOT have timed out after heartbeat events, got %v", sent)
+		}
+		if strings.Contains(s, "heartbeat") || strings.Contains(s, "pi_json_process_alive") {
+			t.Fatalf("heartbeat should be user-invisible, got %v", sent)
+		}
 	}
 }
 
