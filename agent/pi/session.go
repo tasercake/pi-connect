@@ -20,6 +20,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+var piJSONHeartbeatInterval = time.Minute
+
 // piSession manages a multi-turn pi coding agent conversation.
 // Each Send() spawns `pi --mode json -p <prompt>`.
 // Subsequent turns use `--session <sessionID>` to resume.
@@ -168,6 +170,8 @@ func (s *piSession) CompactContext() error {
 
 func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
+	stopHeartbeat := s.startJSONHeartbeat()
+	defer stopHeartbeat()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
@@ -214,6 +218,10 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		}
 	}
 
+	// Stop synthetic liveness events before emitting EventResult, so no stale
+	// heartbeat can arrive after the final result for this turn.
+	stopHeartbeat()
+
 	// Emit EventResult when the process finishes.
 	sid := s.CurrentSessionID()
 	evt := core.Event{
@@ -233,6 +241,50 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	}
 }
 
+func (s *piSession) startJSONHeartbeat() func() {
+	interval := piJSONHeartbeatInterval
+	if interval <= 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				evt := core.Event{
+					Type:      core.EventHeartbeat,
+					Metadata:  map[string]any{"source": "pi_json_process_alive"},
+					Synthetic: true,
+				}
+				select {
+				case s.events <- evt:
+				case <-s.ctx.Done():
+					return
+				case <-done:
+					return
+				}
+			case <-s.ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
+}
+
 // Pi NDJSON event types:
 //
 //	session           — session metadata with id
@@ -241,6 +293,7 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 //	message_start     — beginning of user/assistant/toolResult message
 //	message_update    — streaming deltas (assistantMessageEvent sub-events)
 //	message_end       — complete message
+//	custom_message    — visible extension message (e.g. subagent completion)
 func (s *piSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
@@ -257,6 +310,9 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_end":
 		s.handleMessageEnd(raw)
 
+	case "custom_message":
+		s.handleCustomMessage(raw)
+
 	case "turn_end":
 		s.handleTurnEnd(raw)
 
@@ -270,6 +326,35 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	default:
 		slog.Debug("piSession: unhandled event", "type", eventType)
 	}
+}
+
+func (s *piSession) handleCustomMessage(raw map[string]any) {
+	content := customMessageContent(raw)
+	if content == "" {
+		return
+	}
+	// Subagent completion notifications are often unsolicited background
+	// messages. Emit a complete result so cc-connect's unsolicited reader sends
+	// the notification immediately instead of buffering text until a later turn.
+	evt := core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
+	}
+}
+
+func customMessageContent(raw map[string]any) string {
+	content, _ := raw["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	customType, _ := raw["customType"].(string)
+	display, _ := raw["display"].(bool)
+	if customType != "subagent-notify" || !display {
+		return ""
+	}
+	return content
 }
 
 func (s *piSession) handleCompactionEvent(eventType string, raw map[string]any) {

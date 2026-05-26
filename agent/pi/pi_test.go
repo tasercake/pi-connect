@@ -14,6 +14,29 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// ── normalizeTransport ───────────────────────────────────────
+
+func TestNormalizeTransport(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "rpc"},
+		{"rpc", "rpc"},
+		{"RPC", "rpc"},
+		{"  rpc  ", "rpc"},
+		{"json", "json"},
+		{"JSON", "json"},
+		{"  json  ", "json"},
+		{"unknown", "rpc"},
+	}
+	for _, tt := range tests {
+		if got := normalizeTransport(tt.in); got != tt.want {
+			t.Errorf("normalizeTransport(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 // ── normalizeMode ────────────────────────────────────────────
 
 func TestNormalizeMode(t *testing.T) {
@@ -60,14 +83,18 @@ func TestNew_DefaultValues(t *testing.T) {
 	if a.cmd != "echo" {
 		t.Errorf("cmd = %q, want \"echo\"", a.cmd)
 	}
+	if a.transport != "rpc" {
+		t.Errorf("transport = %q, want \"rpc\"", a.transport)
+	}
 }
 
 func TestNew_CustomOptions(t *testing.T) {
 	ag, err := New(map[string]any{
-		"cmd":      "echo",
-		"work_dir": "/tmp",
-		"model":    "qwen3.5-plus",
-		"mode":     "yolo",
+		"cmd":       "echo",
+		"work_dir":  "/tmp",
+		"model":     "qwen3.5-plus",
+		"mode":      "yolo",
+		"transport": "json",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -81,6 +108,9 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 	if a.mode != "yolo" {
 		t.Errorf("mode = %q", a.mode)
+	}
+	if a.transport != "json" {
+		t.Errorf("transport = %q", a.transport)
 	}
 }
 
@@ -218,7 +248,7 @@ func TestAgent_MemoryFiles(t *testing.T) {
 }
 
 func TestAgent_StartSession(t *testing.T) {
-	a := &Agent{cmd: "echo", workDir: "/tmp", model: "test-model", mode: "yolo"}
+	a := &Agent{cmd: "echo", workDir: "/tmp", model: "test-model", mode: "yolo", transport: "json"}
 	a.SetSessionEnv([]string{"TEST_VAR=1"})
 
 	sess, err := a.StartSession(context.Background(), "resume-123")
@@ -416,6 +446,83 @@ func drainEvents(s *piSession) []core.Event {
 		default:
 			return evts
 		}
+	}
+}
+
+func newTestRPCSession() *piRPCSession {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &piRPCSession{
+		events:  make(chan core.Event, 64),
+		ctx:     ctx,
+		cancel:  cancel,
+		pending: make(map[string]chan rpcResponse),
+	}
+	s.alive.Store(true)
+	return s
+}
+
+func drainRPCEvents(s *piRPCSession) []core.Event {
+	var evts []core.Event
+	for {
+		select {
+		case e := <-s.events:
+			evts = append(evts, e)
+		default:
+			return evts
+		}
+	}
+}
+
+func TestHandleEvent_CustomMessageSubagentNotifyEmitsResult(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":       "custom_message",
+		"customType": "subagent-notify",
+		"display":    true,
+		"content":    "child done",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("events len = %d, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventResult || evts[0].Content != "child done" || !evts[0].Done {
+		t.Fatalf("event = %#v, want done EventResult child done", evts[0])
+	}
+}
+
+func TestHandleEvent_CustomMessageInvisibleOrEmptyEmitsNothing(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "subagent-notify", "display": false, "content": "hidden"})
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "other", "display": true, "content": "hidden"})
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "subagent-notify", "display": true, "content": ""})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("events len = %d, want 0", len(evts))
+	}
+}
+
+func TestRPCHandleAgentEvent_CustomMessageSubagentNotifyEmitsResult(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.cancel()
+
+	s.handleAgentEvent(map[string]any{
+		"type":       "custom_message",
+		"customType": "subagent-notify",
+		"display":    true,
+		"content":    "rpc child done",
+	})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("events len = %d, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventResult || evts[0].Content != "rpc child done" || !evts[0].Done {
+		t.Fatalf("event = %#v, want done EventResult rpc child done", evts[0])
 	}
 }
 
@@ -1383,6 +1490,89 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 }
 
 // ── readLoop with real process ───────────────────────────────
+
+func TestPiSession_ReadLoopHeartbeatStopsBeforeResult(t *testing.T) {
+	oldInterval := piJSONHeartbeatInterval
+	piJSONHeartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { piJSONHeartbeatInterval = oldInterval })
+
+	sessionEvent := map[string]any{"type": "session", "id": "heartbeat-sess"}
+	line, _ := json.Marshal(sessionEvent)
+	script := "sleep 0.09; printf '%s\\n' '" + string(line) + "'"
+
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+
+	cmd := exec.CommandContext(s.ctx, "sh", "-c", script)
+	cmd.Dir = "/tmp"
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(cmd, stdout, &stderrBuf)
+
+	var evts []core.Event
+	timeout := time.After(5 * time.Second)
+loop:
+	for {
+		select {
+		case ev := <-s.Events():
+			evts = append(evts, ev)
+			if ev.Type == core.EventResult {
+				break loop
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for heartbeat/result events")
+		}
+	}
+
+	seenHeartbeat := false
+	seenResult := false
+	for _, ev := range evts {
+		switch ev.Type {
+		case core.EventHeartbeat:
+			if seenResult {
+				t.Fatalf("heartbeat arrived after result in collected events: %+v", evts)
+			}
+			seenHeartbeat = true
+			if !ev.Synthetic {
+				t.Fatal("heartbeat should be synthetic")
+			}
+			if source, _ := ev.Metadata["source"].(string); source != "pi_json_process_alive" {
+				t.Fatalf("heartbeat source = %q, want pi_json_process_alive", source)
+			}
+		case core.EventResult:
+			seenResult = true
+		}
+	}
+	if !seenHeartbeat {
+		t.Fatalf("missing heartbeat before result; events: %+v", evts)
+	}
+	if !seenResult {
+		t.Fatalf("missing result; events: %+v", evts)
+	}
+
+	select {
+	case ev := <-s.Events():
+		if ev.Type == core.EventHeartbeat {
+			t.Fatalf("heartbeat arrived after result: %+v", ev)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Close()
+}
 
 func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	// Use sh -c to simulate pi JSON output on stdout.

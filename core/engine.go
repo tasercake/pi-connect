@@ -3559,6 +3559,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventHeartbeat:
+			continue
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
 				break
@@ -8167,6 +8169,8 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		}
 
 		switch event.Type {
+		case EventHeartbeat:
+			continue
 		case EventText:
 			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)
