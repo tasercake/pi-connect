@@ -20,6 +20,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+var piJSONHeartbeatInterval = time.Minute
+
 // piSession manages a multi-turn pi coding agent conversation.
 // Each Send() spawns `pi --mode json -p <prompt>`.
 // Subsequent turns use `--session <sessionID>` to resume.
@@ -151,6 +153,8 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 
 func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
+	stopHeartbeat := s.startJSONHeartbeat()
+	defer stopHeartbeat()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
@@ -197,6 +201,10 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		}
 	}
 
+	// Stop synthetic liveness events before emitting EventResult, so no stale
+	// heartbeat can arrive after the final result for this turn.
+	stopHeartbeat()
+
 	// Emit EventResult when the process finishes.
 	sid := s.CurrentSessionID()
 	evt := core.Event{
@@ -213,6 +221,50 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
+	}
+}
+
+func (s *piSession) startJSONHeartbeat() func() {
+	interval := piJSONHeartbeatInterval
+	if interval <= 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				evt := core.Event{
+					Type:      core.EventHeartbeat,
+					Metadata:  map[string]any{"source": "pi_json_process_alive"},
+					Synthetic: true,
+				}
+				select {
+				case s.events <- evt:
+				case <-s.ctx.Done():
+					return
+				case <-done:
+					return
+				}
+			case <-s.ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
 	}
 }
 

@@ -1222,6 +1222,89 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 
 // ── readLoop with real process ───────────────────────────────
 
+func TestPiSession_ReadLoopHeartbeatStopsBeforeResult(t *testing.T) {
+	oldInterval := piJSONHeartbeatInterval
+	piJSONHeartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { piJSONHeartbeatInterval = oldInterval })
+
+	sessionEvent := map[string]any{"type": "session", "id": "heartbeat-sess"}
+	line, _ := json.Marshal(sessionEvent)
+	script := "sleep 0.09; printf '%s\\n' '" + string(line) + "'"
+
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+
+	cmd := exec.CommandContext(s.ctx, "sh", "-c", script)
+	cmd.Dir = "/tmp"
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(cmd, stdout, &stderrBuf)
+
+	var evts []core.Event
+	timeout := time.After(5 * time.Second)
+loop:
+	for {
+		select {
+		case ev := <-s.Events():
+			evts = append(evts, ev)
+			if ev.Type == core.EventResult {
+				break loop
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for heartbeat/result events")
+		}
+	}
+
+	seenHeartbeat := false
+	seenResult := false
+	for _, ev := range evts {
+		switch ev.Type {
+		case core.EventHeartbeat:
+			if seenResult {
+				t.Fatalf("heartbeat arrived after result in collected events: %+v", evts)
+			}
+			seenHeartbeat = true
+			if !ev.Synthetic {
+				t.Fatal("heartbeat should be synthetic")
+			}
+			if source, _ := ev.Metadata["source"].(string); source != "pi_json_process_alive" {
+				t.Fatalf("heartbeat source = %q, want pi_json_process_alive", source)
+			}
+		case core.EventResult:
+			seenResult = true
+		}
+	}
+	if !seenHeartbeat {
+		t.Fatalf("missing heartbeat before result; events: %+v", evts)
+	}
+	if !seenResult {
+		t.Fatalf("missing result; events: %+v", evts)
+	}
+
+	select {
+	case ev := <-s.Events():
+		if ev.Type == core.EventHeartbeat {
+			t.Fatalf("heartbeat arrived after result: %+v", ev)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Close()
+}
+
 func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	// Use sh -c to simulate pi JSON output on stdout.
 	sessionEvent := map[string]any{"type": "session", "id": "echo-sess"}
