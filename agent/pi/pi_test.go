@@ -945,7 +945,10 @@ func TestHandleMessageEnd_AssistantError(t *testing.T) {
 		"type": "message_end",
 		"message": map[string]any{
 			"role":         "assistant",
-			"errorMessage": "400 model not supported",
+			"errorMessage": "WebSocket closed 1006 Connection ended",
+			"stopReason":   "error",
+			"details":      map[string]any{"phase": "after_message_stream_start", "requestBytes": float64(1222867)},
+			"diagnostics":  []any{map[string]any{"type": "provider_transport_failure"}},
 		},
 	})
 
@@ -956,8 +959,112 @@ func TestHandleMessageEnd_AssistantError(t *testing.T) {
 	if evts[0].Type != core.EventError {
 		t.Errorf("type = %s", evts[0].Type)
 	}
-	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "400") {
-		t.Errorf("error = %v", evts[0].Error)
+	if evts[0].Error == nil {
+		t.Fatal("expected EventError error")
+	}
+	errText := evts[0].Error.Error()
+	for _, want := range []string{"WebSocket closed 1006", "stopReason=error", "phase=after_message_stream_start", "bytes=1222867", "diag=provider_transport_failure"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("error %q missing %q", errText, want)
+		}
+	}
+	if s.Alive() {
+		t.Error("expected assistant error to mark Pi JSON session dead")
+	}
+	select {
+	case <-s.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected assistant error to cancel session context")
+	}
+}
+
+func TestPiSessionTerminalErrorDoesNotBlockWhenEventsFull(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventHeartbeat}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.handleEvent(map[string]any{
+			"type": "message_end",
+			"message": map[string]any{
+				"role":         "assistant",
+				"errorMessage": "WebSocket closed 1006 Connection ended",
+				"stopReason":   "error",
+			},
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal assistant error blocked on full events channel")
+	}
+	if s.Alive() {
+		t.Error("expected terminal assistant error to mark session dead")
+	}
+	select {
+	case <-s.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected terminal assistant error to cancel session context")
+	}
+}
+
+func TestPiSessionReadLoopDoesNotEmitResultAfterTerminalError(t *testing.T) {
+	tmpDir := t.TempDir()
+	script := filepath.Join(tmpDir, "pi-json-error.sh")
+	errLine := `{"type":"message_end","message":{"role":"assistant","errorMessage":"WebSocket closed 1006 Connection ended","stopReason":"error","diagnostics":[{"type":"provider_transport_failure"}]}}`
+	finalLine := `{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final answer that must not become EventResult"}]}}`
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '"+errLine+"'\nprintf '%s\\n' '"+finalLine+"'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s, err := newPiSession(context.Background(), script, tmpDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.Send("hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case evt := <-s.Events():
+		if evt.Type != core.EventError {
+			t.Fatalf("first event type = %s, want %s", evt.Type, core.EventError)
+		}
+		if evt.Error == nil || !strings.Contains(evt.Error.Error(), "WebSocket closed 1006") {
+			t.Fatalf("event error = %v", evt.Error)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for EventError")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop did not exit after terminal error")
+	}
+
+	select {
+	case evt := <-s.Events():
+		if evt.Type == core.EventResult {
+			t.Fatalf("unexpected EventResult after terminal error: %+v", evt)
+		}
+		// A stderr/process error would also be a regression: terminal-error
+		// cancellation should not enqueue follow-up events after EventError.
+		t.Fatalf("unexpected follow-up event after terminal error: %+v", evt)
+	default:
 	}
 }
 

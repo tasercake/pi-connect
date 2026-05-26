@@ -38,6 +38,11 @@ type piSession struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	alive     atomic.Bool
+	// terminalError is set when Pi JSON reports an assistant-level error.
+	// Such errors end the underlying one-shot JSON process for cc-connect's
+	// purposes: keeping the session alive after the engine consumes EventError
+	// can leave no goroutine draining stdout and wedge the child pipe.
+	terminalError atomic.Bool
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
 
@@ -177,6 +182,9 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("piSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
+				if s.terminalError.Load() || !s.alive.Load() {
+					return
+				}
 				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 				select {
 				case s.events <- evt:
@@ -221,6 +229,15 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	// Stop synthetic liveness events before emitting EventResult, so no stale
 	// heartbeat can arrive after the final result for this turn.
 	stopHeartbeat()
+
+	// Assistant-level Pi JSON errors are terminal for this adapter. The engine
+	// has already received EventError and will not keep consuming this channel
+	// when eventsNeedResync=true, so do not enqueue a synthetic final result that
+	// can block stdout cleanup behind a full events channel.
+	if s.terminalError.Load() || !s.alive.Load() {
+		s.resetResponseState()
+		return
+	}
 
 	// Emit EventResult when the process finishes.
 	sid := s.CurrentSessionID()
@@ -541,12 +558,7 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 				fullErr = "transient provider transport failure: " + fullErr + ". Please try again."
 			}
 
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", fullErr)}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-				return
-			}
+			s.emitTerminalError(fmt.Errorf("%s", fullErr))
 			return
 		}
 		s.captureFinalAssistantMessage(msg)
@@ -681,6 +693,19 @@ func extractToolInput(item map[string]any) string {
 	}
 	b, _ := json.Marshal(args)
 	return truncStr(string(b), 200)
+}
+
+func (s *piSession) emitTerminalError(err error) {
+	s.terminalError.Store(true)
+	s.alive.Store(false)
+	evt := core.Event{Type: core.EventError, Error: err}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	case <-time.After(100 * time.Millisecond):
+		slog.Warn("piSession: dropping terminal error because events channel is full", "error", err)
+	}
+	s.cancel()
 }
 
 func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {

@@ -6551,6 +6551,65 @@ func TestProcessInteractiveEvents_PermissionWhileSendBlocked(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_DropsQueuedMessagesWhenErrorMarksSessionDead(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("dead-on-error")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-current",
+		pendingMessages: []queuedMessage{
+			{
+				messageID: "queued-1",
+				platform:  p,
+				replyCtx:  "ctx-queued",
+				content:   "queued prompt",
+			},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx-current")
+		close(done)
+	}()
+
+	// Simulate an adapter such as Pi JSON marking itself dead before emitting a
+	// terminal EventError. The core must then drop queued messages instead of
+	// preserving a live-but-unconsumed agent event channel.
+	sess.alive = false
+	sess.events <- Event{Type: EventError, Error: errors.New("WebSocket closed 1006 Connection ended")}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return after terminal EventError")
+	}
+
+	state.mu.Lock()
+	queued := len(state.pendingMessages)
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("pendingMessages len = %d, want 0", queued)
+	}
+	if !resync {
+		t.Fatal("eventsNeedResync = false, want true after EventError")
+	}
+
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent messages = %v, want current error and queued drop notification", sent)
+	}
+	if !strings.Contains(sent[0], "WebSocket closed 1006") || !strings.Contains(sent[1], "WebSocket closed 1006") {
+		t.Fatalf("sent messages do not include terminal error: %v", sent)
+	}
+}
+
 func TestReapIdleWorkspaces_SkipsWorkspaceWithActiveTurn(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newBlockingSendSession("busy-turn")
