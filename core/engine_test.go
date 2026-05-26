@@ -8479,6 +8479,55 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 	}
 }
 
+func TestEventIdleTimeout_HeartbeatResetsTimer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("idle-heartbeat")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetEventIdleTimeout(120 * time.Millisecond)
+
+	key := "test:idle-heartbeat"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.TryLock()
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil)
+		close(done)
+	}()
+
+	for i := 0; i < 4; i++ {
+		time.Sleep(60 * time.Millisecond)
+		sess.events <- Event{Type: EventHeartbeat, Synthetic: true}
+	}
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete after heartbeat events")
+	}
+
+	sent := p.getSent()
+	for _, s := range sent {
+		if strings.Contains(s, "timed out") {
+			t.Fatalf("should NOT have timed out after heartbeat events, got %v", sent)
+		}
+		if strings.Contains(s, "heartbeat") || strings.Contains(s, "pi_json_process_alive") {
+			t.Fatalf("heartbeat should be user-invisible, got %v", sent)
+		}
+	}
+}
+
 func TestEventIdleTimeout_DisabledWhenZero(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("idle-zero")
