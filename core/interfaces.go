@@ -298,6 +298,13 @@ type AgentSession interface {
 	Close() error
 }
 
+// TerminalEventErrorSession is an optional AgentSession capability for agents
+// whose EventError means the session transport/process must be closed even if
+// Alive still reports true.
+type TerminalEventErrorSession interface {
+	EventErrorIsTerminal(error) bool
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

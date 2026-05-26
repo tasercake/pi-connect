@@ -382,6 +382,10 @@ func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {
 	return nil
 }
 
+func (s *piSession) EventErrorIsTerminal(error) bool {
+	return true
+}
+
 func (s *piSession) Events() <-chan core.Event {
 	return s.events
 }

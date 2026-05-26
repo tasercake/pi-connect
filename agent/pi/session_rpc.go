@@ -660,6 +660,13 @@ func (s *piRPCSession) RespondPermission(_ string, _ core.PermissionResult) erro
 	return nil
 }
 
+func (s *piRPCSession) EventErrorIsTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !strings.HasPrefix(err.Error(), "extension ")
+}
+
 func (s *piRPCSession) Events() <-chan core.Event { return s.events }
 
 func (s *piRPCSession) CurrentSessionID() string {

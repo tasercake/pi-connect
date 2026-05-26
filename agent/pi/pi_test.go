@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -522,15 +523,15 @@ func TestHandleMessageUpdate_ThinkingAccumulation(t *testing.T) {
 
 	// Multiple thinking deltas should be accumulated.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "Let me "},
 	})
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "think about "},
 	})
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": "this."},
 	})
 
@@ -542,7 +543,7 @@ func TestHandleMessageUpdate_ThinkingAccumulation(t *testing.T) {
 
 	// thinking_end triggers the accumulated event.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_end"},
 	})
 
@@ -564,7 +565,7 @@ func TestHandleMessageUpdate_ThinkingEndEmpty(t *testing.T) {
 
 	// thinking_end with no prior deltas should not emit.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_end"},
 	})
 
@@ -580,7 +581,7 @@ func TestHandleMessageUpdate_ThinkingDeltaEmpty(t *testing.T) {
 
 	// Empty deltas should not grow the buffer.
 	s.handleEvent(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "thinking_delta", "delta": ""},
 	})
 
@@ -979,6 +980,26 @@ func TestPiSession_Close(t *testing.T) {
 	}
 	if s.Alive() {
 		t.Error("session should not be alive after Close()")
+	}
+}
+
+func TestPiSession_EventErrorIsTerminal(t *testing.T) {
+	s, _ := newPiSession(context.Background(), "pi", t.TempDir(), "", "default", "", "", nil)
+	defer s.Close()
+	var _ core.TerminalEventErrorSession = s
+	if !s.EventErrorIsTerminal(errors.New("provider failed")) {
+		t.Fatal("JSON-mode pi EventError should be terminal")
+	}
+}
+
+func TestPiRPCSession_EventErrorIsTerminalPolicy(t *testing.T) {
+	s := &piRPCSession{}
+	var _ core.TerminalEventErrorSession = s
+	if !s.EventErrorIsTerminal(errors.New("provider failed")) {
+		t.Fatal("provider errors should be terminal")
+	}
+	if s.EventErrorIsTerminal(errors.New("extension goals: local command failed")) {
+		t.Fatal("extension-local errors should be non-terminal")
 	}
 }
 
