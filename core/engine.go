@@ -3013,6 +3013,14 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	e.interactiveMu.Unlock()
 }
 
+func eventErrorIsTerminal(agentSession AgentSession, err error) bool {
+	if agentSession == nil {
+		return false
+	}
+	terminal, ok := agentSession.(TerminalEventErrorSession)
+	return ok && terminal.EventErrorIsTerminal(err)
+}
+
 func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSession) {
 	if agentSession == nil {
 		return
@@ -3356,6 +3364,21 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if event.Error != nil {
 					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
 					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				}
+				if eventErrorIsTerminal(agentSession, event.Error) {
+					e.notifyDroppedQueuedMessages(state, event.Error)
+					state.mu.Lock()
+					if state.unsolicitedDone == done {
+						state.unsolicitedCancel = nil
+						state.unsolicitedDone = nil
+					}
+					state.mu.Unlock()
+					// Cancel this reader before cleanup closes the session, but clear
+					// state.unsolicitedDone first so cleanup does not wait on this
+					// goroutine's own deferred close(done).
+					cancel()
+					e.cleanupInteractiveState(sessionKey, state)
+					return
 				}
 				state.mu.Lock()
 				state.eventsNeedResync = true
@@ -4407,10 +4430,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				e.send(p, replyCtx, userMsg)
 			}
-			// Only drop queued messages if the agent session is dead.
+			// Only drop queued messages if the agent session is terminal/dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
-			if state.agentSession == nil || !state.agentSession.Alive() {
+			if eventErrorIsTerminal(state.agentSession, event.Error) {
+				e.notifyDroppedQueuedMessages(state, event.Error)
+				e.cleanupInteractiveState(sessionKey, state)
+			} else if state.agentSession == nil || !state.agentSession.Alive() {
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			}
 			return
@@ -8162,9 +8188,12 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			if !auto && event.Error != nil {
 				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 			}
-			// Only drop queued messages if the agent is dead; some agents
+			// Only drop queued messages if the agent is terminal/dead; some agents
 			// emit per-turn EventError while staying alive.
-			if !state.agentSession.Alive() {
+			if eventErrorIsTerminal(state.agentSession, event.Error) {
+				e.notifyDroppedQueuedMessages(state, event.Error)
+				e.cleanupInteractiveState(sessionKey, state)
+			} else if state.agentSession == nil || !state.agentSession.Alive() {
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			} else {
 				// Agent survived — try to process queued messages.

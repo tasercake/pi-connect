@@ -5550,6 +5550,25 @@ func (s *controllableAgentSession) Close() error {
 	return nil
 }
 
+type terminalEventErrorSession struct {
+	controllableAgentSession
+	terminal bool
+}
+
+func newTerminalEventErrorSession(id string, terminal bool) *terminalEventErrorSession {
+	return &terminalEventErrorSession{
+		controllableAgentSession: controllableAgentSession{
+			sessionID: id,
+			alive:     true,
+			events:    make(chan Event, 8),
+			closed:    make(chan struct{}),
+		},
+		terminal: terminal,
+	}
+}
+
+func (s *terminalEventErrorSession) EventErrorIsTerminal(error) bool { return s.terminal }
+
 // controllableAgent lets tests control which session is returned by StartSession.
 type controllableAgent struct {
 	nextSession AgentSession
@@ -6481,6 +6500,124 @@ func (p *permSignalInlinePlatform) SendWithButtons(ctx context.Context, replyCtx
 		}
 	}
 	return nil
+}
+
+func TestProcessInteractiveEvents_TerminalEventErrorClosesStateAndNotifiesQueued(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	queuedP := &stubPlatformEngine{n: "queued"}
+	sess := newTerminalEventErrorSession("terminal-fg", true)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "test:terminal-fg:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{{
+			platform: queuedP,
+			replyCtx: "queued-ctx",
+			content:  "queued prompt",
+		}},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sess.events <- Event{Type: EventError, Error: errors.New("provider down")}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, nil)
+
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal EventError did not close session")
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("terminal EventError did not remove interactive state")
+	}
+
+	queuedSent := queuedP.getSent()
+	if len(queuedSent) != 1 || !strings.Contains(queuedSent[0], "provider down") {
+		t.Fatalf("queued message not notified with actual error: %v", queuedSent)
+	}
+}
+
+func TestProcessInteractiveEvents_NonTerminalEventErrorPreservesAliveState(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newTerminalEventErrorSession("nonterminal-fg", false)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "test:nonterminal-fg:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sess.events <- Event{Type: EventError, Error: errors.New("recoverable turn error")}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, nil)
+
+	select {
+	case <-sess.closed:
+		t.Fatal("non-terminal EventError closed session")
+	default:
+	}
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != state {
+		t.Fatal("non-terminal EventError should preserve interactive state")
+	}
+}
+
+func TestProcessCompressEvents_TerminalEventErrorClosesState(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	queuedP := &stubPlatformEngine{n: "queued"}
+	sess := newTerminalEventErrorSession("terminal-compress", true)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "test:terminal-compress:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{{
+			platform: queuedP,
+			replyCtx: "queued-ctx",
+			content:  "queued prompt",
+		}},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	unlocked := false
+	sess.events <- Event{Type: EventError, Error: errors.New("compress provider failed")}
+	e.processCompressEvents(state, session, e.sessions, key, p, "ctx", &unlocked, false)
+
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal compress EventError did not close session")
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("terminal compress EventError did not remove state")
+	}
+	queuedSent := queuedP.getSent()
+	if len(queuedSent) != 1 || !strings.Contains(queuedSent[0], "compress provider failed") {
+		t.Fatalf("queued message not notified with actual error: %v", queuedSent)
+	}
 }
 
 // Regression: permission events must be handled while Send is still blocked.
@@ -11357,6 +11494,61 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected error to be relayed to platform, got %v", sent)
+	}
+}
+
+func TestUnsolicitedReader_TerminalEventErrorCleansUpWithoutSelfWait(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	queuedP := &stubPlatformEngine{n: "queued"}
+	sess := newTerminalEventErrorSession("unsol-terminal", true)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "test:unsol-terminal:u1"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		pendingMessages: []queuedMessage{{
+			platform: queuedP,
+			replyCtx: "queued-ctx",
+			content:  "queued prompt",
+		}},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, key, "")
+	state.mu.Lock()
+	doneCh := state.unsolicitedDone
+	state.mu.Unlock()
+	if doneCh == nil {
+		t.Fatal("expected unsolicited reader")
+	}
+
+	start := time.Now()
+	sess.events <- Event{Type: EventError, Error: errors.New("transport wedged")}
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal unsolicited EventError waited on itself")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("terminal unsolicited cleanup too slow: %v", elapsed)
+	}
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("terminal unsolicited EventError did not remove state")
+	}
+	queuedSent := queuedP.getSent()
+	if len(queuedSent) != 1 || !strings.Contains(queuedSent[0], "transport wedged") {
+		t.Fatalf("queued message not notified with actual error: %v", queuedSent)
 	}
 }
 
