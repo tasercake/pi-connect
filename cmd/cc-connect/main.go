@@ -529,15 +529,7 @@ func main() {
 		}
 
 		// Wire auto-compress settings
-		if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
-			minGap := 30 * time.Minute
-			if proj.AutoCompress.MinGapMins != nil {
-				minGap = time.Duration(*proj.AutoCompress.MinGapMins) * time.Minute
-			}
-			maxTokens := derefInt(proj.AutoCompress.MaxTokens)
-			if maxTokens <= 0 {
-				maxTokens = 12000
-			}
+		if enabled, maxTokens, minGap := resolveAutoCompress(&proj); enabled {
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
@@ -1445,15 +1437,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	result.DisplayUpdated = true
 
 	// Reload auto-compress settings
-	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
-		minGap := 30 * time.Minute
-		if proj.AutoCompress.MinGapMins != nil {
-			minGap = time.Duration(*proj.AutoCompress.MinGapMins) * time.Minute
-		}
-		maxTokens := derefInt(proj.AutoCompress.MaxTokens)
-		if maxTokens <= 0 {
-			maxTokens = 12000
-		}
+	if enabled, maxTokens, minGap := resolveAutoCompress(proj); enabled {
 		engine.SetAutoCompressConfig(true, maxTokens, minGap)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
@@ -1747,6 +1731,33 @@ func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
 		cfg.TimeoutMins = *hc.TimeoutMins
 	}
 	return cfg
+}
+
+func resolveAutoCompress(proj *config.ProjectConfig) (bool, int, time.Duration) {
+	if proj == nil {
+		return false, 0, 0
+	}
+	if proj.AutoCompress.Enabled != nil && !*proj.AutoCompress.Enabled {
+		return false, 0, 0
+	}
+	enabled := proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled
+	defaultMaxTokens := 12000
+	if proj.AutoCompress.Enabled == nil && strings.EqualFold(proj.Agent.Type, "pi") {
+		enabled = true
+		defaultMaxTokens = 200000
+	}
+	if !enabled {
+		return false, 0, 0
+	}
+	minGap := 30 * time.Minute
+	if proj.AutoCompress.MinGapMins != nil {
+		minGap = time.Duration(*proj.AutoCompress.MinGapMins) * time.Minute
+	}
+	maxTokens := derefInt(proj.AutoCompress.MaxTokens)
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
+	return true, maxTokens, minGap
 }
 
 func derefInt(v *int) int {

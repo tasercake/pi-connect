@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,29 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// ── normalizeTransport ───────────────────────────────────────
+
+func TestNormalizeTransport(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", "rpc"},
+		{"rpc", "rpc"},
+		{"RPC", "rpc"},
+		{"  rpc  ", "rpc"},
+		{"json", "json"},
+		{"JSON", "json"},
+		{"  json  ", "json"},
+		{"unknown", "rpc"},
+	}
+	for _, tt := range tests {
+		if got := normalizeTransport(tt.in); got != tt.want {
+			t.Errorf("normalizeTransport(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
 
 // ── normalizeMode ────────────────────────────────────────────
 
@@ -61,14 +83,18 @@ func TestNew_DefaultValues(t *testing.T) {
 	if a.cmd != "echo" {
 		t.Errorf("cmd = %q, want \"echo\"", a.cmd)
 	}
+	if a.transport != "rpc" {
+		t.Errorf("transport = %q, want \"rpc\"", a.transport)
+	}
 }
 
 func TestNew_CustomOptions(t *testing.T) {
 	ag, err := New(map[string]any{
-		"cmd":      "echo",
-		"work_dir": "/tmp",
-		"model":    "qwen3.5-plus",
-		"mode":     "yolo",
+		"cmd":       "echo",
+		"work_dir":  "/tmp",
+		"model":     "qwen3.5-plus",
+		"mode":      "yolo",
+		"transport": "json",
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -82,6 +108,9 @@ func TestNew_CustomOptions(t *testing.T) {
 	}
 	if a.mode != "yolo" {
 		t.Errorf("mode = %q", a.mode)
+	}
+	if a.transport != "json" {
+		t.Errorf("transport = %q", a.transport)
 	}
 }
 
@@ -120,6 +149,13 @@ func TestAgent_NameAndDisplay(t *testing.T) {
 	}
 	if a.CLIDisplayName() != "Pi" {
 		t.Errorf("CLIDisplayName() = %q", a.CLIDisplayName())
+	}
+}
+
+func TestAgent_CompressCommand(t *testing.T) {
+	a := &Agent{}
+	if got := a.CompressCommand(); got != "/compact" {
+		t.Fatalf("CompressCommand() = %q, want /compact", got)
 	}
 }
 
@@ -219,7 +255,7 @@ func TestAgent_MemoryFiles(t *testing.T) {
 }
 
 func TestAgent_StartSession(t *testing.T) {
-	a := &Agent{cmd: "echo", workDir: "/tmp", model: "test-model", mode: "yolo"}
+	a := &Agent{cmd: "echo", workDir: "/tmp", model: "test-model", mode: "yolo", transport: "json"}
 	a.SetSessionEnv([]string{"TEST_VAR=1"})
 
 	sess, err := a.StartSession(context.Background(), "resume-123")
@@ -417,6 +453,83 @@ func drainEvents(s *piSession) []core.Event {
 		default:
 			return evts
 		}
+	}
+}
+
+func newTestRPCSession() *piRPCSession {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &piRPCSession{
+		events:  make(chan core.Event, 64),
+		ctx:     ctx,
+		cancel:  cancel,
+		pending: make(map[string]chan rpcResponse),
+	}
+	s.alive.Store(true)
+	return s
+}
+
+func drainRPCEvents(s *piRPCSession) []core.Event {
+	var evts []core.Event
+	for {
+		select {
+		case e := <-s.events:
+			evts = append(evts, e)
+		default:
+			return evts
+		}
+	}
+}
+
+func TestHandleEvent_CustomMessageSubagentNotifyEmitsResult(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":       "custom_message",
+		"customType": "subagent-notify",
+		"display":    true,
+		"content":    "child done",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("events len = %d, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventResult || evts[0].Content != "child done" || !evts[0].Done {
+		t.Fatalf("event = %#v, want done EventResult child done", evts[0])
+	}
+}
+
+func TestHandleEvent_CustomMessageInvisibleOrEmptyEmitsNothing(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "subagent-notify", "display": false, "content": "hidden"})
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "other", "display": true, "content": "hidden"})
+	s.handleEvent(map[string]any{"type": "custom_message", "customType": "subagent-notify", "display": true, "content": ""})
+
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("events len = %d, want 0", len(evts))
+	}
+}
+
+func TestRPCHandleAgentEvent_CustomMessageSubagentNotifyEmitsResult(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.cancel()
+
+	s.handleAgentEvent(map[string]any{
+		"type":       "custom_message",
+		"customType": "subagent-notify",
+		"display":    true,
+		"content":    "rpc child done",
+	})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("events len = %d, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventResult || evts[0].Content != "rpc child done" || !evts[0].Done {
+		t.Fatalf("event = %#v, want done EventResult rpc child done", evts[0])
 	}
 }
 
@@ -839,7 +952,10 @@ func TestHandleMessageEnd_AssistantError(t *testing.T) {
 		"type": "message_end",
 		"message": map[string]any{
 			"role":         "assistant",
-			"errorMessage": "400 model not supported",
+			"errorMessage": "WebSocket closed 1006 Connection ended",
+			"stopReason":   "error",
+			"details":      map[string]any{"phase": "after_message_stream_start", "requestBytes": float64(1222867)},
+			"diagnostics":  []any{map[string]any{"type": "provider_transport_failure"}},
 		},
 	})
 
@@ -850,8 +966,124 @@ func TestHandleMessageEnd_AssistantError(t *testing.T) {
 	if evts[0].Type != core.EventError {
 		t.Errorf("type = %s", evts[0].Type)
 	}
-	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "400") {
-		t.Errorf("error = %v", evts[0].Error)
+	if evts[0].Error == nil {
+		t.Fatal("expected EventError error")
+	}
+	errText := evts[0].Error.Error()
+	for _, want := range []string{"WebSocket closed 1006", "stopReason=error", "phase=after_message_stream_start", "bytes=1222867", "diag=provider_transport_failure"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("error %q missing %q", errText, want)
+		}
+	}
+	if s.Alive() {
+		t.Error("expected assistant error to mark Pi JSON session dead")
+	}
+	select {
+	case <-s.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected assistant error to cancel session context")
+	}
+}
+
+func TestPiSessionTerminalErrorDoesNotBlockWhenEventsFull(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventHeartbeat}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.handleEvent(map[string]any{
+			"type": "message_end",
+			"message": map[string]any{
+				"role":         "assistant",
+				"errorMessage": "WebSocket closed 1006 Connection ended",
+				"stopReason":   "error",
+			},
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal assistant error blocked on full events channel")
+	}
+	if s.Alive() {
+		t.Error("expected terminal assistant error to mark session dead")
+	}
+	select {
+	case <-s.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected terminal assistant error to cancel session context")
+	}
+
+	evts := drainEvents(s)
+	if len(evts) != cap(s.events) {
+		t.Fatalf("drained %d events, want channel to remain at capacity %d", len(evts), cap(s.events))
+	}
+	last := evts[len(evts)-1]
+	if last.Type != core.EventError {
+		t.Fatalf("last event type = %s, want terminal %s; events=%v", last.Type, core.EventError, evts)
+	}
+	if last.Error == nil || !strings.Contains(last.Error.Error(), "WebSocket closed 1006") {
+		t.Fatalf("terminal error = %v", last.Error)
+	}
+}
+
+func TestPiSessionReadLoopDoesNotEmitResultAfterTerminalError(t *testing.T) {
+	tmpDir := t.TempDir()
+	script := filepath.Join(tmpDir, "pi-json-error.sh")
+	errLine := `{"type":"message_end","message":{"role":"assistant","errorMessage":"WebSocket closed 1006 Connection ended","stopReason":"error","diagnostics":[{"type":"provider_transport_failure"}]}}`
+	finalLine := `{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final answer that must not become EventResult"}]}}`
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '"+errLine+"'\nprintf '%s\\n' '"+finalLine+"'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s, err := newPiSession(context.Background(), script, tmpDir, "", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.Send("hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case evt := <-s.Events():
+		if evt.Type != core.EventError {
+			t.Fatalf("first event type = %s, want %s", evt.Type, core.EventError)
+		}
+		if evt.Error == nil || !strings.Contains(evt.Error.Error(), "WebSocket closed 1006") {
+			t.Fatalf("event error = %v", evt.Error)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for EventError")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop did not exit after terminal error")
+	}
+
+	select {
+	case evt := <-s.Events():
+		if evt.Type == core.EventResult {
+			t.Fatalf("unexpected EventResult after terminal error: %+v", evt)
+		}
+		// A stderr/process error would also be a regression: terminal-error
+		// cancellation should not enqueue follow-up events after EventError.
+		t.Fatalf("unexpected follow-up event after terminal error: %+v", evt)
+	default:
 	}
 }
 
@@ -896,8 +1128,8 @@ func TestHandleMessageEnd_AssistantFinalTextFallback(t *testing.T) {
 	if got := s.finalTextBuf.String(); got != "real final answer with suffix" {
 		t.Fatalf("finalTextBuf = %q", got)
 	}
-	if s.inputTokens != 123 || s.outputTokens != 45 {
-		t.Fatalf("usage = %d/%d, want 123/45", s.inputTokens, s.outputTokens)
+	if s.inputTokens != 168 || s.outputTokens != 45 {
+		t.Fatalf("usage = %d/%d, want 168/45", s.inputTokens, s.outputTokens)
 	}
 }
 
@@ -1138,23 +1370,165 @@ func TestPiSession_Close(t *testing.T) {
 	}
 }
 
-func TestPiSession_EventErrorIsTerminal(t *testing.T) {
-	s, _ := newPiSession(context.Background(), "pi", t.TempDir(), "", "default", "", "", nil)
-	defer s.Close()
-	var _ core.TerminalEventErrorSession = s
-	if !s.EventErrorIsTerminal(errors.New("provider failed")) {
-		t.Fatal("JSON-mode pi EventError should be terminal")
+func TestPiAgentSupportsContextCompression(t *testing.T) {
+	agent, err := New(map[string]any{"cmd": "echo"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	supporter, ok := agent.(core.ContextCompressionSupporter)
+	if !ok {
+		t.Fatal("Pi agent should implement ContextCompressionSupporter")
+	}
+	if !supporter.SupportsContextCompression() {
+		t.Fatal("SupportsContextCompression() = false, want true")
 	}
 }
 
-func TestPiRPCSession_EventErrorIsTerminalPolicy(t *testing.T) {
-	s := &piRPCSession{}
-	var _ core.TerminalEventErrorSession = s
-	if !s.EventErrorIsTerminal(errors.New("provider failed")) {
-		t.Fatal("provider errors should be terminal")
+func writeFakePiRPC(t *testing.T, dir string) (string, string, string) {
+	t.Helper()
+	argsPath := filepath.Join(dir, "args.txt")
+	cmdPath := filepath.Join(dir, "cmd.json")
+	scriptPath := filepath.Join(dir, "fake-pi-rpc.sh")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "` + argsPath + `"
+IFS= read -r line
+printf '%s\n' "$line" > "` + cmdPath + `"
+id=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+printf '{"id":"%s","type":"response","command":"compact","success":true}\n' "$id"
+sleep 5
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake rpc script: %v", err)
 	}
-	if s.EventErrorIsTerminal(errors.New("extension goals: local command failed")) {
-		t.Fatal("extension-local errors should be non-terminal")
+	return scriptPath, argsPath, cmdPath
+}
+
+func readRecordedRPCCommand(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded command: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(data), &got); err != nil {
+		t.Fatalf("unmarshal recorded command %q: %v", string(data), err)
+	}
+	return got
+}
+
+func TestPiRPCSessionCompactContextSendsCompactCommand(t *testing.T) {
+	tmp := t.TempDir()
+	fake, _, cmdPath := writeFakePiRPC(t, tmp)
+	s, err := newPiRPCSession(context.Background(), fake, tmp, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiRPCSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err != nil {
+		t.Fatalf("CompactContext() error = %v", err)
+	}
+	got := readRecordedRPCCommand(t, cmdPath)
+	if got["type"] != "compact" {
+		t.Fatalf("RPC command type = %v, want compact; full command=%v", got["type"], got)
+	}
+	if _, ok := got["message"]; ok {
+		t.Fatalf("compact RPC should not include prompt message: %v", got)
+	}
+}
+
+func TestPiSessionCompactContextUsesRPCResume(t *testing.T) {
+	tmp := t.TempDir()
+	fake, argsPath, cmdPath := writeFakePiRPC(t, tmp)
+	s, err := newPiSession(context.Background(), fake, tmp, "", "default", "", "json-sess-123", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err != nil {
+		t.Fatalf("CompactContext() error = %v", err)
+	}
+	got := readRecordedRPCCommand(t, cmdPath)
+	if got["type"] != "compact" {
+		t.Fatalf("RPC command type = %v, want compact; full command=%v", got["type"], got)
+	}
+	argsBytes, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	args := string(argsBytes)
+	if !strings.Contains(args, "--mode\nrpc") || !strings.Contains(args, "--session\njson-sess-123") {
+		t.Fatalf("transient RPC args = %q, want rpc mode resumed session", args)
+	}
+}
+
+func TestPiSessionCompactContextRequiresKnownSession(t *testing.T) {
+	s, err := newPiSession(context.Background(), "echo", t.TempDir(), "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.CompactContext(); err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("CompactContext() error = %v, want missing session id error", err)
+	}
+}
+
+func TestPiSessionCompactionEvents(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "compaction_start"})
+	s.handleEvent(map[string]any{"type": "compaction_end"})
+	s.handleEvent(map[string]any{"type": "compaction_end", "errorMessage": "boom"})
+	evts := drainEvents(s)
+
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventThinking || !strings.Contains(evts[0].Content, "started") {
+		t.Fatalf("start event = %+v", evts[0])
+	}
+	if evts[1].Type != core.EventThinking || !strings.Contains(evts[1].Content, "completed") {
+		t.Fatalf("end event = %+v", evts[1])
+	}
+	if evts[2].Type != core.EventError || evts[2].Error == nil || !strings.Contains(evts[2].Error.Error(), "boom") {
+		t.Fatalf("error event = %+v", evts[2])
+	}
+}
+
+func TestPiRPCSessionCompactionEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &piRPCSession{events: make(chan core.Event, 64), ctx: ctx, cancel: cancel}
+	s.alive.Store(true)
+
+	s.handleAgentEvent(map[string]any{"type": "compaction_start"})
+	s.handleAgentEvent(map[string]any{"type": "compaction_end"})
+	s.handleAgentEvent(map[string]any{"type": "compaction_end", "errorMessage": "boom"})
+
+	var evts []core.Event
+	for {
+		select {
+		case ev := <-s.events:
+			evts = append(evts, ev)
+		default:
+			goto done
+		}
+	}
+done:
+	if len(evts) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventThinking || !strings.Contains(evts[0].Content, "started") {
+		t.Fatalf("start event = %+v", evts[0])
+	}
+	if evts[1].Type != core.EventThinking || !strings.Contains(evts[1].Content, "completed") {
+		t.Fatalf("end event = %+v", evts[1])
+	}
+	if evts[2].Type != core.EventError || evts[2].Error == nil || !strings.Contains(evts[2].Error.Error(), "boom") {
+		t.Fatalf("error event = %+v", evts[2])
 	}
 }
 
@@ -1242,6 +1616,89 @@ func TestHandleEvent_FullConversation(t *testing.T) {
 }
 
 // ── readLoop with real process ───────────────────────────────
+
+func TestPiSession_ReadLoopHeartbeatStopsBeforeResult(t *testing.T) {
+	oldInterval := piJSONHeartbeatInterval
+	piJSONHeartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { piJSONHeartbeatInterval = oldInterval })
+
+	sessionEvent := map[string]any{"type": "session", "id": "heartbeat-sess"}
+	line, _ := json.Marshal(sessionEvent)
+	script := "sleep 0.09; printf '%s\\n' '" + string(line) + "'"
+
+	s, err := newPiSession(context.Background(), "sh", "/tmp", "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiSession: %v", err)
+	}
+
+	cmd := exec.CommandContext(s.ctx, "sh", "-c", script)
+	cmd.Dir = "/tmp"
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	s.wg.Add(1)
+	go s.readLoop(cmd, stdout, &stderrBuf)
+
+	var evts []core.Event
+	timeout := time.After(5 * time.Second)
+loop:
+	for {
+		select {
+		case ev := <-s.Events():
+			evts = append(evts, ev)
+			if ev.Type == core.EventResult {
+				break loop
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for heartbeat/result events")
+		}
+	}
+
+	seenHeartbeat := false
+	seenResult := false
+	for _, ev := range evts {
+		switch ev.Type {
+		case core.EventHeartbeat:
+			if seenResult {
+				t.Fatalf("heartbeat arrived after result in collected events: %+v", evts)
+			}
+			seenHeartbeat = true
+			if !ev.Synthetic {
+				t.Fatal("heartbeat should be synthetic")
+			}
+			if source, _ := ev.Metadata["source"].(string); source != "pi_json_process_alive" {
+				t.Fatalf("heartbeat source = %q, want pi_json_process_alive", source)
+			}
+		case core.EventResult:
+			seenResult = true
+		}
+	}
+	if !seenHeartbeat {
+		t.Fatalf("missing heartbeat before result; events: %+v", evts)
+	}
+	if !seenResult {
+		t.Fatalf("missing result; events: %+v", evts)
+	}
+
+	select {
+	case ev := <-s.Events():
+		if ev.Type == core.EventHeartbeat {
+			t.Fatalf("heartbeat arrived after result: %+v", ev)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Close()
+}
 
 func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	// Use sh -c to simulate pi JSON output on stdout.
@@ -1459,5 +1916,134 @@ func runReadLoopEvents(t *testing.T, events ...map[string]any) []core.Event {
 		case <-timeout:
 			t.Fatal("timeout waiting for events")
 		}
+	}
+}
+
+func TestPiIssue5ContextUsageFromMessageEvent(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message",
+		"message": map[string]any{
+			"role": "assistant",
+			"usage": map[string]any{
+				"input":       float64(4724),
+				"output":      float64(40),
+				"cacheRead":   float64(267776),
+				"cacheWrite":  float64(0),
+				"totalTokens": float64(272540),
+			},
+		},
+	})
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil")
+	}
+	if usage.UsedTokens != 272540 || usage.TotalTokens != 272540 || usage.CachedInputTokens != 267776 || usage.OutputTokens != 40 {
+		t.Fatalf("usage = %+v, want total/cache/output from Pi event", usage)
+	}
+	usage.UsedTokens = 1
+	if got := s.GetContextUsage().UsedTokens; got != 272540 {
+		t.Fatalf("GetContextUsage returned shared pointer; got UsedTokens %d", got)
+	}
+}
+
+func TestPiIssue5ContextUsageFallbackWithoutTotalTokens(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role": "assistant",
+			"usage": map[string]any{
+				"input":      float64(1000),
+				"output":     float64(50),
+				"cacheRead":  float64(5000),
+				"cacheWrite": float64(25),
+			},
+		},
+	})
+
+	usage := s.GetContextUsage()
+	if usage == nil || usage.UsedTokens != 6075 {
+		t.Fatalf("usage = %+v, want fallback 6075", usage)
+	}
+}
+
+func TestPiIssue5MessageRecordOverflowErrorSuppressed(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"}})
+	if evts := drainEvents(s); len(evts) != 0 {
+		t.Fatalf("overflow should be pending, got %+v", evts)
+	}
+	if errMsg := s.pendingOverflowErrorForEOF(); !strings.Contains(errMsg, "context_length_exceeded") {
+		t.Fatalf("pending overflow = %q", errMsg)
+	}
+
+	s.handleEvent(map[string]any{"type": "message", "message": map[string]any{"role": "assistant"}})
+	if errMsg := s.pendingOverflowErrorForEOF(); !strings.Contains(errMsg, "context_length_exceeded") {
+		t.Fatalf("empty assistant bookkeeping should not clear pending overflow, got %q", errMsg)
+	}
+
+	s.handleEvent(map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "recovered"}}}})
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		t.Fatalf("successful assistant message should clear pending overflow, got %q", errMsg)
+	}
+}
+
+func TestPiIssue5RPCOverflowOnlyAgentEndEmitsError(t *testing.T) {
+	s := &piRPCSession{events: make(chan core.Event, 8)}
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"}}})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventError || evts[0].Error == nil {
+		t.Fatalf("events = %+v, want one EventError", evts)
+	}
+}
+
+func TestPiIssue5RPCOverflowThenSuccessAgentEndClearsError(t *testing.T) {
+	s := &piRPCSession{events: make(chan core.Event, 8)}
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"},
+		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "recovered"}}},
+	}})
+
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].Content != "recovered" {
+		t.Fatalf("events = %+v, want recovered EventResult", evts)
+	}
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		t.Fatalf("pending overflow after recovery = %q", errMsg)
+	}
+}
+
+func TestPiIssue5RPCContextUsageFromAgentEnd(t *testing.T) {
+	s := &piRPCSession{events: make(chan core.Event, 8)}
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{map[string]any{
+		"role":    "assistant",
+		"content": []any{map[string]any{"type": "text", "text": "ok"}},
+		"usage": map[string]any{
+			"input":       float64(3041),
+			"output":      float64(126),
+			"cacheRead":   float64(269824),
+			"totalTokens": float64(272991),
+		},
+	}}})
+
+	usage := s.GetContextUsage()
+	if usage == nil || usage.UsedTokens != 272991 || usage.CachedInputTokens != 269824 {
+		t.Fatalf("usage = %+v, want Pi total/cache tokens", usage)
+	}
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].InputTokens != 272991 || evts[0].OutputTokens != 126 {
+		t.Fatalf("events = %+v, want final usage event", evts)
 	}
 }

@@ -20,6 +20,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+var piJSONHeartbeatInterval = time.Minute
+
 // piSession manages a multi-turn pi coding agent conversation.
 // Each Send() spawns `pi --mode json -p <prompt>`.
 // Subsequent turns use `--session <sessionID>` to resume.
@@ -36,6 +38,11 @@ type piSession struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	alive     atomic.Bool
+	// terminalError is set when Pi JSON reports an assistant-level error.
+	// Such errors end the underlying one-shot JSON process for cc-connect's
+	// purposes: keeping the session alive after the engine consumes EventError
+	// can leave no goroutine draining stdout and wedge the child pipe.
+	terminalError atomic.Bool
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
 
@@ -43,6 +50,11 @@ type piSession struct {
 	emittedTextDelta bool            // true after a non-empty text_delta was emitted this turn
 	inputTokens      int
 	outputTokens     int
+
+	usageMu                   sync.Mutex
+	contextUsage              *core.ContextUsage
+	pendingContextOverflowErr string
+	recoveredAfterOverflow    bool
 }
 
 func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
@@ -149,13 +161,35 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 	return nil
 }
 
+func (s *piSession) CompactContext() error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	sid := s.CurrentSessionID()
+	if sid == "" {
+		return fmt.Errorf("piSession: cannot compact before session id is known")
+	}
+
+	rpc, err := newPiRPCSession(s.ctx, s.cmd, s.workDir, s.model, s.mode, s.thinking, sid, s.extraEnv)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rpc.Close() }()
+	return rpc.CompactContext()
+}
+
 func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
+	stopHeartbeat := s.startJSONHeartbeat()
+	defer stopHeartbeat()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("piSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
+				if s.terminalError.Load() || !s.alive.Load() {
+					return
+				}
 				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 				select {
 				case s.events <- evt:
@@ -188,6 +222,9 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	}
 
 	if err := scanner.Err(); err != nil {
+		if s.terminalError.Load() || !s.alive.Load() {
+			return
+		}
 		slog.Error("piSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
@@ -195,6 +232,25 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		case <-s.ctx.Done():
 			return
 		}
+	}
+
+	// Stop synthetic liveness events before emitting EventResult, so no stale
+	// heartbeat can arrive after the final result for this turn.
+	stopHeartbeat()
+
+	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
+		s.emitTerminalError(fmt.Errorf("%s", errMsg))
+		s.resetResponseState()
+		return
+	}
+
+	// Assistant-level Pi JSON errors are terminal for this adapter. The engine
+	// has already received EventError and will not keep consuming this channel
+	// when eventsNeedResync=true, so do not enqueue a synthetic final result that
+	// can block stdout cleanup behind a full events channel.
+	if s.terminalError.Load() || !s.alive.Load() {
+		s.resetResponseState()
+		return
 	}
 
 	// Emit EventResult when the process finishes.
@@ -216,6 +272,50 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	}
 }
 
+func (s *piSession) startJSONHeartbeat() func() {
+	interval := piJSONHeartbeatInterval
+	if interval <= 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				evt := core.Event{
+					Type:      core.EventHeartbeat,
+					Metadata:  map[string]any{"source": "pi_json_process_alive"},
+					Synthetic: true,
+				}
+				select {
+				case s.events <- evt:
+				case <-s.ctx.Done():
+					return
+				case <-done:
+					return
+				}
+			case <-s.ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
+}
+
 // Pi NDJSON event types:
 //
 //	session           — session metadata with id
@@ -224,7 +324,9 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 //	message_start     — beginning of user/assistant/toolResult message
 //	message_update    — streaming deltas (assistantMessageEvent sub-events)
 //	message_end       — complete message
+//	custom_message    — visible extension message (e.g. subagent completion)
 func (s *piSession) handleEvent(raw map[string]any) {
+	s.updateUsageFromEvent(raw)
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {
@@ -237,11 +339,20 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_update":
 		s.handleMessageUpdate(raw)
 
+	case "message":
+		s.handleMessageRecord(raw)
+
 	case "message_end":
 		s.handleMessageEnd(raw)
 
+	case "custom_message":
+		s.handleCustomMessage(raw)
+
 	case "turn_end":
 		s.handleTurnEnd(raw)
+
+	case "compaction_start", "compaction_end":
+		s.handleCompactionEvent(eventType, raw)
 
 	case "agent_start", "agent_end", "turn_start", "message_start":
 		// Logged for debugging but no action needed.
@@ -249,6 +360,60 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	default:
 		slog.Debug("piSession: unhandled event", "type", eventType)
+	}
+}
+
+func (s *piSession) handleCustomMessage(raw map[string]any) {
+	content := customMessageContent(raw)
+	if content == "" {
+		return
+	}
+	// Subagent completion notifications are often unsolicited background
+	// messages. Emit a complete result so cc-connect's unsolicited reader sends
+	// the notification immediately instead of buffering text until a later turn.
+	evt := core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
+	}
+}
+
+func customMessageContent(raw map[string]any) string {
+	content, _ := raw["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	customType, _ := raw["customType"].(string)
+	display, _ := raw["display"].(bool)
+	if customType != "subagent-notify" || !display {
+		return ""
+	}
+	return content
+}
+
+func (s *piSession) handleCompactionEvent(eventType string, raw map[string]any) {
+	switch eventType {
+	case "compaction_start":
+		slog.Info("piSession: compaction started", "session_id", s.CurrentSessionID())
+		select {
+		case s.events <- core.Event{Type: core.EventThinking, Content: "Context compaction started"}:
+		case <-s.ctx.Done():
+		}
+	case "compaction_end":
+		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
+			slog.Warn("piSession: compaction failed", "session_id", s.CurrentSessionID(), "error", errMsg)
+			select {
+			case s.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("context compaction failed: %s", errMsg)}:
+			case <-s.ctx.Done():
+			}
+			return
+		}
+		slog.Info("piSession: compaction completed", "session_id", s.CurrentSessionID())
+		select {
+		case s.events <- core.Event{Type: core.EventThinking, Content: "Context compaction completed"}:
+		case <-s.ctx.Done():
+		}
 	}
 }
 
@@ -363,21 +528,75 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 	case "assistant":
 		// Check for errors
 		if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
+			if isRecoverablePiOverflow(errMsg) {
+				s.storePendingOverflowError(errMsg)
 				return
 			}
+			var diagDetails []string
+			isTransportFailure := false
+
+			if stopReason, ok := msg["stopReason"].(string); ok && stopReason != "" {
+				diagDetails = append(diagDetails, fmt.Sprintf("stopReason=%s", stopReason))
+			}
+
+			if det, ok := msg["details"].(map[string]any); ok {
+				if phase, ok := det["phase"].(string); ok && phase != "" {
+					diagDetails = append(diagDetails, fmt.Sprintf("phase=%s", phase))
+				}
+				if bytes, ok := det["requestBytes"].(float64); ok && bytes != 0 {
+					diagDetails = append(diagDetails, fmt.Sprintf("bytes=%.0f", bytes))
+				}
+			}
+
+			if diagAny, ok := msg["diagnostics"]; ok {
+				switch d := diagAny.(type) {
+				case map[string]any:
+					if dType, ok := d["type"].(string); ok && dType != "" {
+						diagDetails = append(diagDetails, fmt.Sprintf("diag=%s", dType))
+						if dType == "provider_transport_failure" {
+							isTransportFailure = true
+						}
+					}
+				case []any:
+					for _, item := range d {
+						if diag, ok := item.(map[string]any); ok {
+							if dType, ok := diag["type"].(string); ok && dType != "" {
+								diagDetails = append(diagDetails, fmt.Sprintf("diag=%s", dType))
+								if dType == "provider_transport_failure" {
+									isTransportFailure = true
+								}
+							}
+						}
+					}
+				}
+			}
+
+			fullErr := errMsg
+			if len(diagDetails) > 0 {
+				fullErr = fmt.Sprintf("%s [%s]", errMsg, strings.Join(diagDetails, ", "))
+			}
+
+			if strings.Contains(errMsg, "WebSocket closed 1000") && isTransportFailure {
+				fullErr = "transient provider transport failure: " + fullErr + ". Please try again."
+			}
+
+			s.emitTerminalError(fmt.Errorf("%s", fullErr))
 			return
 		}
 		s.captureFinalAssistantMessage(msg)
+		if assistantMessageSucceeded(msg) {
+			s.clearPendingOverflowError()
+		}
 	}
 }
 
 func (s *piSession) handleTurnEnd(raw map[string]any) {
 	if msg, ok := raw["message"].(map[string]any); ok && msg != nil {
+		s.recordUsageFromMessage(msg)
 		s.captureFinalAssistantMessage(msg)
+		if assistantMessageSucceeded(msg) {
+			s.clearPendingOverflowError()
+		}
 	}
 	slog.Debug("piSession: lifecycle event", "type", "turn_end")
 }
@@ -390,6 +609,7 @@ func (s *piSession) resetResponseState() {
 }
 
 func (s *piSession) captureFinalAssistantMessage(msg map[string]any) {
+	s.recordUsageFromMessage(msg)
 	if !isFinalAssistantMessage(msg) {
 		return
 	}
@@ -397,13 +617,6 @@ func (s *piSession) captureFinalAssistantMessage(msg map[string]any) {
 	if text != "" {
 		s.finalTextBuf.Reset()
 		s.finalTextBuf.WriteString(text)
-	}
-	input, output := extractUsage(msg)
-	if input > 0 {
-		s.inputTokens = input
-	}
-	if output > 0 {
-		s.outputTokens = output
 	}
 }
 
@@ -464,19 +677,86 @@ func hasFinalAnswerSignature(msg map[string]any) bool {
 	return false
 }
 
-func extractUsage(msg map[string]any) (int, int) {
-	usage, _ := msg["usage"].(map[string]any)
-	if usage == nil {
-		return 0, 0
+func (s *piSession) updateUsageFromEvent(raw map[string]any) {
+	if msg, _ := raw["message"].(map[string]any); msg != nil {
+		s.recordUsageFromMessage(msg)
 	}
-	var input, output int
-	if v, ok := usage["input"].(float64); ok {
-		input = int(v)
+	if messages, _ := raw["messages"].([]any); messages != nil {
+		for _, item := range messages {
+			if msg, _ := item.(map[string]any); msg != nil {
+				s.recordUsageFromMessage(msg)
+			}
+		}
 	}
-	if v, ok := usage["output"].(float64); ok {
-		output = int(v)
+}
+
+func (s *piSession) recordUsageFromMessage(msg map[string]any) {
+	u, ok := parsePiUsage(msg)
+	if !ok {
+		return
 	}
-	return input, output
+	cu := u.contextUsage()
+	if cu == nil {
+		return
+	}
+	s.usageMu.Lock()
+	s.contextUsage = cu
+	s.usageMu.Unlock()
+	s.inputTokens = cu.UsedTokens
+	s.outputTokens = cu.OutputTokens
+}
+
+func (s *piSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	return cloneContextUsage(s.contextUsage)
+}
+
+func (s *piSession) handleMessageRecord(raw map[string]any) {
+	msg, _ := raw["message"].(map[string]any)
+	if msg == nil {
+		return
+	}
+	role, _ := msg["role"].(string)
+	if role != "assistant" {
+		return
+	}
+	if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+		if isRecoverablePiOverflow(errMsg) {
+			s.storePendingOverflowError(errMsg)
+			return
+		}
+		s.emitTerminalError(fmt.Errorf("%s", errMsg))
+		return
+	}
+	if assistantMessageSucceeded(msg) {
+		s.clearPendingOverflowError()
+	}
+}
+
+func (s *piSession) storePendingOverflowError(errMsg string) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	s.pendingContextOverflowErr = errMsg
+	s.recoveredAfterOverflow = false
+}
+
+func (s *piSession) clearPendingOverflowError() {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.pendingContextOverflowErr != "" {
+		s.pendingContextOverflowErr = ""
+		s.recoveredAfterOverflow = true
+	}
+}
+
+func (s *piSession) pendingOverflowErrorForEOF() string {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.recoveredAfterOverflow {
+		return ""
+	}
+	return s.pendingContextOverflowErr
 }
 
 // extractToolInput pulls a concise summary from a tool call content item.
@@ -505,12 +785,41 @@ func extractToolInput(item map[string]any) string {
 	return truncStr(string(b), 200)
 }
 
-func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {
-	return nil
+func (s *piSession) emitTerminalError(err error) {
+	s.terminalError.Store(true)
+	s.alive.Store(false)
+	// Cancel first so the heartbeat goroutine stops competing for space while we
+	// make the terminal error observable to the engine.
+	s.cancel()
+
+	evt := core.Event{Type: core.EventError, Error: err}
+
+	// The terminal error must be observable by the engine: after EventError,
+	// core intentionally stops consuming this turn's event stream when the
+	// session is dead. If the bounded channel is already full, evict stale
+	// buffered events to make room rather than silently dropping the only terminal
+	// signal and leaving the foreground loop to wait for the idle timeout.
+	for i := 0; i <= cap(s.events); i++ {
+		select {
+		case s.events <- evt:
+			return
+		default:
+		}
+		select {
+		case dropped := <-s.events:
+			slog.Warn("piSession: evicting buffered event to deliver terminal error", "dropped_type", dropped.Type, "error", err)
+		default:
+		}
+	}
+
+	// This should be unreachable while readLoop owns the still-open events
+	// channel, but keep a non-blocking fallback so a terminal path never wedges
+	// stdout draining if future code adds another concurrent producer.
+	slog.Warn("piSession: terminal error could not be delivered after eviction", "error", err)
 }
 
-func (s *piSession) EventErrorIsTerminal(error) bool {
-	return true
+func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {
+	return nil
 }
 
 func (s *piSession) Events() <-chan core.Event {
