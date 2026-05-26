@@ -98,6 +98,55 @@ func TestResolveResetOnIdle(t *testing.T) {
 	}
 }
 
+func TestResolveAutoCompress(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+	intPtr := func(v int) *int { return &v }
+
+	cases := []struct {
+		name       string
+		proj       *config.ProjectConfig
+		wantEnable bool
+		wantMax    int
+		wantGap    time.Duration
+	}{
+		{
+			name:       "pi omitted defaults enabled high threshold",
+			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}},
+			wantEnable: true,
+			wantMax:    200000,
+			wantGap:    30 * time.Minute,
+		},
+		{
+			name:       "pi explicit false disables",
+			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{Enabled: boolPtr(false)}},
+			wantEnable: false,
+		},
+		{
+			name:       "non pi omitted disabled",
+			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "claudecode"}},
+			wantEnable: false,
+		},
+		{
+			name: "explicit true honors values",
+			proj: &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{
+				Enabled: boolPtr(true), MaxTokens: intPtr(42), MinGapMins: intPtr(7),
+			}},
+			wantEnable: true,
+			wantMax:    42,
+			wantGap:    7 * time.Minute,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotEnable, gotMax, gotGap := resolveAutoCompress(tc.proj)
+			if gotEnable != tc.wantEnable || gotMax != tc.wantMax || gotGap != tc.wantGap {
+				t.Fatalf("resolveAutoCompress() = (%v, %d, %v), want (%v, %d, %v)", gotEnable, gotMax, gotGap, tc.wantEnable, tc.wantMax, tc.wantGap)
+			}
+		})
+	}
+}
+
 func TestApplyProjectStateOverride(t *testing.T) {
 	baseDir := t.TempDir()
 	overrideDir := filepath.Join(t.TempDir(), "override")
