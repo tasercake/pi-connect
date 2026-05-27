@@ -1,61 +1,4 @@
 <p align="center">
-  <img src="./docs/images/banner.svg" alt="CC-Connect Banner" width="800"/>
-</p>
-
-<p align="center">
-  <a href="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml">
-    <img src="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
-  </a>
-  <a href="https://github.com/chenhg5/cc-connect/releases">
-    <img src="https://img.shields.io/github/v/release/chenhg5/cc-connect?include_prereleases" alt="Release"/>
-  </a>
-  <a href="https://www.npmjs.com/package/cc-connect">
-    <img src="https://img.shields.io/npm/dm/cc-connect?logo=npm" alt="npm downloads"/>
-  </a>
-  <a href="https://github.com/chenhg5/cc-connect/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"/>
-  </a>
-  <a href="https://goreportcard.com/report/github.com/chenhg5/cc-connect">
-    <img src="https://goreportcard.com/badge/github.com/chenhg5/cc-connect" alt="Go Report Card"/>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://discord.gg/kHpwgaM4kq">
-    <img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"/>
-  </a>
-  <a href="https://t.me/+odGNDhCjbjdmMmZl">
-    <img src="https://img.shields.io/badge/Telegram-Group-26A5E4?logo=telegram&logoColor=white" alt="Telegram"/>
-  </a>
-</p>
-
-<p align="center">
-  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
-</p>
-
-<p align="center">
-  <a href="https://trendshift.io/repositories/23266" target="_blank">
-    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
-  </a>
-</p>
-
-
-## ❤️ Sponsor
-
-> Want to appear here? Contact: chg80333@gmail.com | WeChat: mongorz
-
-<details open>
-<summary>Sponsors</summary>
-
-Sponsor information has been simplified for this Pi-only fork.
-
-</details>
-
----
-
-<br>
-
-<p align="center">
   <b>Control Pi from any chat app. Anywhere, anytime.</b>
 </p>
 
@@ -65,22 +8,11 @@ Sponsor information has been simplified for this Pi-only fork.
   now accessible from your phone, tablet, or any device with a chat app.
 </p>
 
+**Pi-only agent bridge** – This fork focuses on Pi and keeps the platform bridge simple.
+
 <p align="center">
   <img src="docs/images/connector.png" alt="CC-Connect Architecture" width="90%"/>
 </p>
-
-
-## 🆕 What’s New in v1.3.0
-
-- **🌐 Web Admin UI (Recommended)** — Full management dashboard embedded in the binary — **no extra dependencies**. Create and edit projects, manage providers, monitor sessions, edit cron jobs, and **chat with your agent directly from the browser**. Supports 5 languages (en/zh/zh-TW/ja/es). We recommend managing cc-connect through the web UI instead of editing `config.toml` by hand. Run `cc-connect web` to configure and open the dashboard, then run `cc-connect` to start the service.
-- **Lifecycle Event Hooks** — New `[[hooks]]` config triggers shell commands or HTTP webhooks on message, session, cron, permission, and error events. Async by default, fail-open.
-- **Skill Management** — New `/skills` page with local skill browser and recommended presets.
-- **Global Provider Management** — Add/edit/delete providers in the web UI.
-- **Personal WeChat** — Chat with your local agent from **Weixin (personal)** via ilink long-polling; QR `weixin setup`, CDN media, no public IP. *[Setup → `docs/weixin.md`](docs/weixin.md)*
-- **Weibo DM** — Chat with your agent via **Weibo private messages** over WebSocket; no public IP needed, text streaming supported.
-- **Feishu Enhancements** — Auto-resolve `@name` mentions, multi-level reply chain recognition, done-emoji reactions.
-- **Pi-only fork** — This fork focuses on Pi as the only built-in agent.
-
 
 ## 🧩 Platform feature snapshot
 
@@ -110,11 +42,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 > **Voice row:** many platforms need `[speech]` / TTS providers enabled in `config.toml`; values are a best-effort summary.  
 > Per-platform setup: [Platform setup guides](#-platform-setup-guides) below.
 
-
-## ✨ Why cc-connect?
-
-### 🤖 Pi Agent Support
-**Pi-only agent bridge** — This fork focuses on Pi and keeps the platform bridge simple.
+## Features
 
 ### 📱 Platform Flexibility
 **11 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, Weibo, LINE, QQ, QQ Bot (Official), plus **Weixin (personal ilink)** for **personal WeChat**. Most platforms need **zero public IP**.
