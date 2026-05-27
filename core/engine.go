@@ -249,12 +249,6 @@ type Engine struct {
 	initFlows         map[string]*workspaceInitFlow // workspace channel key → init state
 	initFlowsMu       sync.Mutex
 
-	// Terminal observation (--observe)
-	observeEnabled    bool
-	observeProjectDir string // ~/.claude/projects/{projectKey}
-	observeSessionKey string // e.g. "slack:u:C123:U456" — target for forwarding
-	observeCancel     context.CancelFunc
-
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -332,13 +326,11 @@ type interactiveState struct {
 }
 
 type pendingProviderAddState struct {
-	phase            string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
-	name             string
-	baseURL          string
-	model            string
-	inviteURL        string
-	codexWireAPI     string
-	codexHTTPHeaders map[string]string
+	phase     string // "preset" = waiting for API key; "other" = waiting for name api_key base_url [model]
+	name      string
+	baseURL   string
+	model     string
+	inviteURL string
 }
 
 type deleteModeState struct {
@@ -598,7 +590,7 @@ func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
 }
 
-// SetReplyFooterEnabled controls whether assistant replies include a Codex-like
+// SetReplyFooterEnabled controls whether assistant replies include a agent
 // footer line with model / reasoning / usage / workdir metadata when available.
 func (e *Engine) SetReplyFooterEnabled(show bool) {
 	e.replyFooterEnabled = show
@@ -631,28 +623,8 @@ func (e *Engine) SetAttachmentSendEnabled(v bool) {
 	e.attachmentSendEnabled = v
 }
 
-// SetObserveConfig enables terminal session observation.
-// projectDir is the Claude Code project directory containing session JSONL files.
-// sessionKey identifies the Slack channel to forward messages to.
-func (e *Engine) SetObserveConfig(projectDir, sessionKey string) {
-	e.observeEnabled = true
-	e.observeProjectDir = projectDir
-	e.observeSessionKey = sessionKey
-}
-
 func (e *Engine) SetLanguageSaveFunc(fn func(Language) error) {
 	e.i18n.SetSaveFunc(fn)
-}
-
-// findObserverTarget returns the first platform that implements ObserverTarget,
-// or nil if none do.
-func (e *Engine) findObserverTarget() ObserverTarget {
-	for _, p := range e.platforms {
-		if ot, ok := p.(ObserverTarget); ok {
-			return ot
-		}
-	}
-	return nil
 }
 
 func (e *Engine) SetProviderSaveFunc(fn func(providerName string) error) {
@@ -979,7 +951,7 @@ func (e *Engine) SkillDirs() []string {
 	return e.skills.Dirs()
 }
 
-// AgentTypeName returns the agent type name (e.g. "claudecode", "codex").
+// AgentTypeName returns the agent type name.
 func (e *Engine) AgentTypeName() string {
 	if e.agent != nil {
 		return e.agent.Name()
@@ -1512,7 +1484,6 @@ func (e *Engine) Start() error {
 		return startErrs[0] // Return first error
 	}
 
-	e.startObserver()
 	return nil
 }
 
@@ -1523,10 +1494,6 @@ func (e *Engine) Stop() error {
 
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
-
-	if e.observeCancel != nil {
-		e.observeCancel()
-	}
 
 	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error
@@ -2620,7 +2587,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Unlock()
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
-	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
+	// Send until the prompt turn finishes; they may emit
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
@@ -3034,11 +3001,10 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 	}
 
 	// Allow enough time for the agent's own graceful shutdown sequence:
-	// stdin close → Stop hooks (claude-mem summary etc.) → SIGTERM → SIGKILL.
-	// Claude Code's Stop hooks can take up to 120s (claude-mem uses a
-	// sonnet summarizer). The 130s budget covers the default 120s graceful
-	// phase + 5s SIGTERM + 5s buffer. The wait ends early if the process
-	// exits sooner — this is the ceiling, not the typical duration.
+	// stdin close → Stop hooks → SIGTERM → SIGKILL. The 130s budget covers
+	// the default 120s graceful phase + 5s SIGTERM + 5s buffer. The wait ends
+	// early if the process exits sooner — this is the ceiling, not the typical
+	// duration.
 	const closeTimeout = 130 * time.Second
 
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
@@ -3141,9 +3107,9 @@ func (e *Engine) stopUnsolicitedReader(state *interactiveState) {
 
 // startUnsolicitedReader launches a background goroutine that consumes agent
 // events produced between user-initiated turns (e.g. background task
-// completions in Claude Code). Events are relayed to the platform immediately.
-// The goroutine exits when its context is cancelled (by a new foreground turn
-// or session cleanup) or when the Events channel is closed.
+// completions). Events are relayed to the platform immediately. The goroutine
+// exits when its context is cancelled (by a new foreground turn or session
+// cleanup) or when the Events channel is closed.
 func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, workspaceDir string) {
 	// Ensure no previous reader is still running.
 	e.stopUnsolicitedReader(state)
@@ -4444,7 +4410,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.send(p, replyCtx, userMsg)
 			}
 			// Only drop queued messages if the agent session is terminal/dead.
-			// Some agents (e.g. Codex) emit EventError for per-turn failures
+			// Some agents emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
 			if eventErrorIsTerminal(state.agentSession, event.Error) {
 				e.notifyDroppedQueuedMessages(state, event.Error)
@@ -7187,9 +7153,8 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 // On Telegram, `/start` is a protocol convention sent by the client when a
 // user first opens a bot (or taps the Start button). Without a native
 // handler, the message previously fell through to the default branch and
-// got forwarded verbatim to the agent — and Claude Code's CLI interprets a
-// leading "/" as a slash-command request, replying "Unknown command:
-// /start. Did you mean /stats?" instead of greeting the user.
+// got forwarded verbatim to the agent, where a leading "/" can be interpreted
+// as an agent slash-command request instead of greeting the user.
 //
 // Replying with a localized welcome that names the project keeps the
 // behavior consistent with every other Telegram bot framework, and is a
@@ -8618,12 +8583,10 @@ func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content stri
 			return true
 		}
 		prov = ProviderConfig{
-			Name:             paCopy.name,
-			APIKey:           apiKey,
-			BaseURL:          paCopy.baseURL,
-			Model:            paCopy.model,
-			CodexWireAPI:     paCopy.codexWireAPI,
-			CodexHTTPHeaders: paCopy.codexHTTPHeaders,
+			Name:    paCopy.name,
+			APIKey:  apiKey,
+			BaseURL: paCopy.baseURL,
+			Model:   paCopy.model,
 		}
 	case "other":
 		fields := strings.Fields(content)
@@ -8745,10 +8708,6 @@ func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher Provide
 			baseURL:   ac.BaseURL,
 			model:     ac.Model,
 			inviteURL: preset.InviteURL,
-		}
-		if ac.CodexConfig != nil {
-			pa.codexWireAPI = ac.CodexConfig.WireAPI
-			pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
 		}
 		e.setPendingProviderAdd(msg.SessionKey, pa)
 		displayName := preset.DisplayName
@@ -9589,10 +9548,6 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				baseURL:   ac.BaseURL,
 				model:     ac.Model,
 				inviteURL: preset.InviteURL,
-			}
-			if ac.CodexConfig != nil {
-				pa.codexWireAPI = ac.CodexConfig.WireAPI
-				pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
 			}
 			e.setPendingProviderAdd(sessionKey, pa)
 			return

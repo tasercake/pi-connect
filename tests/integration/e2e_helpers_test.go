@@ -25,9 +25,9 @@ func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
 	for _, m := range p.Models {
 		c.Models = append(c.Models, core.ModelOption{Name: m.Model, Alias: m.Alias})
 	}
-	if p.Codex != nil {
-		c.CodexWireAPI = p.Codex.WireAPI
-		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
+	if p.Pi != nil {
+		c.PiWireAPI = p.Pi.WireAPI
+		c.PiHTTPHeaders = p.Pi.HTTPHeaders
 	}
 	return c
 }

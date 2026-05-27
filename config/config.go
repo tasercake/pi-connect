@@ -241,7 +241,7 @@ type RelayConfig struct {
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
-	Provider string `toml:"provider"` // "openai" | "groq" | "qwen" | "gemini"
+	Provider string `toml:"provider"`
 	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
 	OpenAI   struct {
 		APIKey  string `toml:"api_key"`
@@ -260,7 +260,7 @@ type SpeechConfig struct {
 	Gemini struct {
 		APIKey string `toml:"api_key"`
 		Model  string `toml:"model"`
-	} `toml:"gemini"`
+	}
 }
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
@@ -305,12 +305,6 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
-// ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
-type ObserveConfig struct {
-	Enabled bool   `toml:"enabled"`
-	Channel string `toml:"channel"`
-}
-
 // ReferenceConfig controls local file reference normalization and rendering.
 type ReferenceConfig struct {
 	NormalizeAgents []string `toml:"normalize_agents,omitempty"`
@@ -349,7 +343,7 @@ type ProjectConfig struct {
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
 	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
-	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
+	// ReplyFooter: nil/true = append a agent footer; false = disable.
 	// (model/reasoning/usage/workdir, when available) to assistant replies.
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
@@ -381,7 +375,6 @@ type ProjectConfig struct {
 	//   thinking_messages = false
 	//   tool_messages = false
 	Display    *DisplayConfig  `toml:"display,omitempty"`
-	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
@@ -404,26 +397,13 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name            string                           `toml:"name"`
-	APIKey          string                           `toml:"api_key"`
-	BaseURL         string                           `toml:"base_url,omitempty"`
-	Model           string                           `toml:"model,omitempty"`
-	Models          []ProviderModelConfig            `toml:"models,omitempty"`
-	Thinking        string                           `toml:"thinking,omitempty"`
-	Env             map[string]string                `toml:"env,omitempty"`
-	AgentTypes      []string                         `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
-	Endpoints       map[string]string                `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
-	AgentModels     map[string]string                `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
-	AgentModelLists map[string][]ProviderModelConfig `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
-	Codex           *CodexProviderConfig             `toml:"codex,omitempty"`             // Codex-specific provider settings
-}
-
-// CodexProviderConfig holds Codex CLI-specific provider fields
-// that map to [model_providers.<name>] in Codex's own config.toml.
-type CodexProviderConfig struct {
-	EnvKey      string            `toml:"env_key,omitempty" json:"env_key,omitempty"`
-	WireAPI     string            `toml:"wire_api,omitempty" json:"wire_api,omitempty"`
-	HTTPHeaders map[string]string `toml:"http_headers,omitempty" json:"http_headers,omitempty"`
+	Name     string                `toml:"name"`
+	APIKey   string                `toml:"api_key"`
+	BaseURL  string                `toml:"base_url,omitempty"`
+	Model    string                `toml:"model,omitempty"`
+	Models   []ProviderModelConfig `toml:"models,omitempty"`
+	Thinking string                `toml:"thinking,omitempty"`
+	Env      map[string]string     `toml:"env,omitempty"`
 }
 
 type PlatformConfig struct {
@@ -816,12 +796,6 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	return nil
 }
 
-var supportedReferenceAgents = map[string]struct{}{
-	"all":        {},
-	"codex":      {},
-	"claudecode": {},
-}
-
 var supportedReferencePlatforms = map[string]struct{}{
 	"all":    {},
 	"feishu": {},
@@ -854,12 +828,6 @@ var supportedReferenceEnclosureStyles = map[string]struct{}{
 }
 
 func validateReferenceConfig(prefix string, rc ReferenceConfig) error {
-	for _, v := range rc.NormalizeAgents {
-		key := strings.ToLower(strings.TrimSpace(v))
-		if _, ok := supportedReferenceAgents[key]; !ok {
-			return fmt.Errorf("config: %s.references.normalize_agents has unsupported value %q", prefix, v)
-		}
-	}
 	for _, v := range rc.RenderPlatforms {
 		key := strings.ToLower(strings.TrimSpace(v))
 		if _, ok := supportedReferencePlatforms[key]; !ok {
@@ -1117,7 +1085,6 @@ func (cfg *Config) ResolveProviderRefs() {
 		if len(refs) == 0 {
 			continue
 		}
-		agentType := cfg.Projects[i].Agent.Type
 		inlineNames := make(map[string]bool, len(cfg.Projects[i].Agent.Providers))
 		for _, p := range cfg.Projects[i].Agent.Providers {
 			inlineNames[p.Name] = true
@@ -1132,30 +1099,10 @@ func (cfg *Config) ResolveProviderRefs() {
 				slog.Warn("provider ref not found in global [[providers]]", "project", cfg.Projects[i].Name, "ref", name)
 				continue
 			}
-			if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, agentType) {
-				slog.Debug("skipping provider: agent type mismatch", "provider", name, "project", cfg.Projects[i].Name,
-					"provider_agents", gp.AgentTypes, "project_agent", agentType)
-				continue
-			}
-			resolved = append(resolved, gp.ResolveForAgent(agentType))
+			resolved = append(resolved, gp)
 		}
 		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
 	}
-}
-
-// ResolveForAgent applies per-agent-type overrides (Endpoints, AgentModels,
-// AgentModelLists) to a copy of the provider and returns it.
-func (p ProviderConfig) ResolveForAgent(agentType string) ProviderConfig {
-	if ep, ok := p.Endpoints[agentType]; ok && ep != "" {
-		p.BaseURL = ep
-	}
-	if am, ok := p.AgentModels[agentType]; ok && am != "" {
-		p.Model = am
-	}
-	if aml, ok := p.AgentModelLists[agentType]; ok && len(aml) > 0 {
-		p.Models = aml
-	}
-	return p
 }
 
 func containsString(ss []string, s string) bool {
@@ -1589,7 +1536,7 @@ type EnsureProjectWithFeishuOptions struct {
 	PlatformType     string // optional: "feishu" or "lark", default "feishu"
 	CloneFromProject string // optional source project name to clone agent config from
 	WorkDir          string // optional default work_dir when creating project
-	AgentType        string // optional default agent type when no source project exists, default "codex"
+	AgentType        string // optional default agent type when no source project exists, default "pi"
 }
 
 // EnsureProjectWithFeishuResult describes whether project provisioning created a new project.
@@ -1689,7 +1636,7 @@ func EnsureProjectWithFeishuPlatform(opts EnsureProjectWithFeishuOptions) (*Ensu
 		Platforms: []PlatformConfig{{Type: platformType, Options: map[string]any{}}},
 	}
 	if proj.Agent.Type == "" {
-		proj.Agent.Type = "codex"
+		proj.Agent.Type = "pi"
 	}
 	if proj.Agent.Options == nil {
 		proj.Agent.Options = map[string]any{}
@@ -2058,7 +2005,7 @@ func EnsureProjectWithWeixinPlatform(opts EnsureProjectWithWeixinOptions) (*Ensu
 		Platforms: []PlatformConfig{{Type: "weixin", Options: map[string]any{}}},
 	}
 	if proj.Agent.Type == "" {
-		proj.Agent.Type = "codex"
+		proj.Agent.Type = "pi"
 	}
 	if proj.Agent.Options == nil {
 		proj.Agent.Options = map[string]any{}
@@ -2262,22 +2209,16 @@ func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOpt
 		}
 	}
 	if agentType := strings.TrimSpace(opts.AgentType); agentType != "" {
-		realType, preset, _ := strings.Cut(agentType, ":")
-		agentOpts := map[string]any{}
-		if realType == "acp" && preset != "" {
-			agentOpts["command"] = preset
-			agentOpts["display_name"] = preset
-		}
 		return AgentConfig{
-			Type:    realType,
-			Options: agentOpts,
+			Type:    agentType,
+			Options: map[string]any{},
 		}
 	}
 	if len(cfg.Projects) > 0 {
 		return cloneAgentConfig(cfg.Projects[0].Agent)
 	}
 	return AgentConfig{
-		Type:    "codex",
+		Type:    "pi",
 		Options: map[string]any{},
 	}
 }
@@ -2290,31 +2231,15 @@ func cloneAgentConfig(in AgentConfig) AgentConfig {
 	if len(in.Providers) > 0 {
 		out.Providers = make([]ProviderConfig, len(in.Providers))
 		for i := range in.Providers {
-			p := ProviderConfig{
-				Name:        in.Providers[i].Name,
-				APIKey:      in.Providers[i].APIKey,
-				BaseURL:     in.Providers[i].BaseURL,
-				Model:       in.Providers[i].Model,
-				Models:      append([]ProviderModelConfig(nil), in.Providers[i].Models...),
-				Thinking:    in.Providers[i].Thinking,
-				Env:         cloneStringMap(in.Providers[i].Env),
-				Endpoints:   cloneStringMap(in.Providers[i].Endpoints),
-				AgentModels: cloneStringMap(in.Providers[i].AgentModels),
+			out.Providers[i] = ProviderConfig{
+				Name:     in.Providers[i].Name,
+				APIKey:   in.Providers[i].APIKey,
+				BaseURL:  in.Providers[i].BaseURL,
+				Model:    in.Providers[i].Model,
+				Models:   append([]ProviderModelConfig(nil), in.Providers[i].Models...),
+				Thinking: in.Providers[i].Thinking,
+				Env:      cloneStringMap(in.Providers[i].Env),
 			}
-			if len(in.Providers[i].AgentModelLists) > 0 {
-				p.AgentModelLists = make(map[string][]ProviderModelConfig, len(in.Providers[i].AgentModelLists))
-				for k, v := range in.Providers[i].AgentModelLists {
-					p.AgentModelLists[k] = append([]ProviderModelConfig(nil), v...)
-				}
-			}
-			if in.Providers[i].Codex != nil {
-				p.Codex = &CodexProviderConfig{
-					EnvKey:      in.Providers[i].Codex.EnvKey,
-					WireAPI:     in.Providers[i].Codex.WireAPI,
-					HTTPHeaders: cloneStringMap(in.Providers[i].Codex.HTTPHeaders),
-				}
-			}
-			out.Providers[i] = p
 		}
 	}
 	return out
@@ -2391,7 +2316,7 @@ func patchProjectAgentOption(projectName, key, value string) error {
 				}
 				insertAt = ln + 1
 			}
-			block := []string{"", "[projects.agent]", "type = \"claudecode\"", "", "[projects.agent.options]"}
+			block := []string{"", "[projects.agent]", "type = \"pi\"", "", "[projects.agent.options]"}
 			lines = insertLines(lines, insertAt, block)
 		} else {
 			block := []string{"", "[projects.agent.options]"}
@@ -2824,45 +2749,6 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			continue
 		}
 		proj := &cfg.Projects[i]
-		if update.AgentType != nil && *update.AgentType != proj.Agent.Type {
-			newType := *update.AgentType
-			proj.Agent.Type = newType
-			// Filter out provider_refs incompatible with the new agent type.
-			globalByName := make(map[string]ProviderConfig, len(cfg.Providers))
-			for _, p := range cfg.Providers {
-				globalByName[p.Name] = p
-			}
-			var compatible []string
-			for _, ref := range proj.Agent.ProviderRefs {
-				gp, ok := globalByName[ref]
-				if !ok {
-					continue
-				}
-				if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, newType) {
-					slog.Info("removing incompatible provider ref on agent type change",
-						"project", projectName, "provider", ref,
-						"provider_agents", gp.AgentTypes, "new_agent", newType)
-					continue
-				}
-				compatible = append(compatible, ref)
-			}
-			proj.Agent.ProviderRefs = compatible
-			// Clear active provider if it was removed.
-			if opts := proj.Agent.Options; opts != nil {
-				if prov, ok := opts["provider"].(string); ok && prov != "" {
-					found := false
-					for _, ref := range compatible {
-						if ref == prov {
-							found = true
-							break
-						}
-					}
-					if !found {
-						delete(opts, "provider")
-					}
-				}
-			}
-		}
 		if update.AdminFrom != nil {
 			proj.AdminFrom = *update.AdminFrom
 		}
@@ -3063,7 +2949,7 @@ func AddPlatformToProject(projectName string, platform PlatformConfig, workDir, 
 			return saveConfig(cfg)
 		}
 	}
-	agentCfg := AgentConfig{Type: "codex", Options: map[string]any{}}
+	agentCfg := AgentConfig{Type: "pi", Options: map[string]any{}}
 	at := strings.TrimSpace(agentType)
 	if at != "" {
 		agentCfg.Type = at

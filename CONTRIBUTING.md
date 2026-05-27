@@ -17,7 +17,7 @@ Many bugs are fixed in beta or pre-release builds before they reach stable. Plea
 Please include as much of the following as possible:
 
 - Version: `cc-connect --version`, npm tag, or release asset
-- Environment: OS, installation method, agent type, and platform
+- Environment: OS, installation method, and platform
 - Reproduction steps: the smaller the repro, the better
 - Expected behavior vs. actual behavior
 - Logs or errors, with secrets redacted
@@ -73,7 +73,7 @@ Commercial support, custom work, or enterprise inquiries can go through the same
 建议尽量包含以下信息：
 
 - 版本号：`cc-connect --version`、npm 标签或 release 资源名
-- 环境：操作系统、安装方式、Agent 类型、平台类型
+- 环境：操作系统、安装方式、平台类型
 - 复现步骤：越小越好
 - 预期行为和实际行为
 - 日志或报错，注意打码敏感信息

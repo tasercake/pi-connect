@@ -16,12 +16,11 @@ interface Props {
   platformType: PlatformKind;
   projectName: string;
   workDir?: string;
-  agentType?: string;
   onComplete: () => void;
   onCancel: () => void;
 }
 
-export default function PlatformSetupQR({ platformType, projectName, workDir, agentType, onComplete, onCancel }: Props) {
+export default function PlatformSetupQR({ platformType, projectName, workDir, onComplete, onCancel }: Props) {
   const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>('idle');
   const [qrUrl, setQrUrl] = useState('');
@@ -83,7 +82,6 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
                 platform_type: res.platform || 'feishu',
                 owner_open_id: res.owner_open_id,
                 work_dir: workDir,
-                agent_type: agentType,
               });
               setPhase('completed');
               pollingRef.current = false;
@@ -152,7 +150,6 @@ export default function PlatformSetupQR({ platformType, projectName, workDir, ag
                 ilink_bot_id: pollRes.ilink_bot_id,
                 ilink_user_id: pollRes.ilink_user_id,
                 work_dir: workDir,
-                agent_type: agentType,
               });
               setPhase('completed');
               return;

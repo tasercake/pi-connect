@@ -147,9 +147,8 @@ func countSessions(listOutput string) int {
 }
 
 // ---------------------------------------------------------------------------
-// Comprehensive E2E: covers /list /new /name /switch /delete /current /stop
-// Each test function runs against ONE agent type. We define two entry points
-// (Codex, ClaudeCode) so both are exercised. Skips gracefully if binary or
+// Comprehensive E2E: covers /list /new /name /switch /delete /current /stop.
+// The Pi-only fork keeps one entry point and skips gracefully if the binary or
 // config is missing.
 // ---------------------------------------------------------------------------
 
@@ -273,12 +272,8 @@ func runE2E_FullSessionCommands(t *testing.T, project string) {
 	t.Log("=== ALL STEPS PASSED ===")
 }
 
-func TestE2E_Codex_FullSessionCommands(t *testing.T) {
-	runE2E_FullSessionCommands(t, "e2e-codex")
-}
-
-func TestE2E_ClaudeCode_FullSessionCommands(t *testing.T) {
-	runE2E_FullSessionCommands(t, "e2e-claudecode")
+func TestE2E_Pi_FullSessionCommands(t *testing.T) {
+	runE2E_FullSessionCommands(t, "e2e-pi")
 }
 
 // ---------------------------------------------------------------------------
@@ -321,12 +316,8 @@ func runE2E_ProviderSwitch(t *testing.T, project string) {
 	t.Log("=== PROVIDER SWITCH PASSED ===")
 }
 
-func TestE2E_Codex_ProviderSwitch(t *testing.T) {
-	runE2E_ProviderSwitch(t, "e2e-codex")
-}
-
-func TestE2E_ClaudeCode_ProviderSwitch(t *testing.T) {
-	runE2E_ProviderSwitch(t, "e2e-claudecode")
+func TestE2E_Pi_ProviderSwitch(t *testing.T) {
+	runE2E_ProviderSwitch(t, "e2e-pi")
 }
 
 // ---------------------------------------------------------------------------
@@ -441,10 +432,6 @@ func runE2E_SessionPersistence(t *testing.T, project string) {
 	t.Log("=== PERSISTENCE PASSED ===")
 }
 
-func TestE2E_Codex_SessionPersistence(t *testing.T) {
-	runE2E_SessionPersistence(t, "e2e-codex")
-}
-
-func TestE2E_ClaudeCode_SessionPersistence(t *testing.T) {
-	runE2E_SessionPersistence(t, "e2e-claudecode")
+func TestE2E_Pi_SessionPersistence(t *testing.T) {
+	runE2E_SessionPersistence(t, "e2e-pi")
 }

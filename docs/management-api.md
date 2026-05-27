@@ -258,7 +258,7 @@ Returns the current configuration with secrets redacted. Useful for debugging an
       {
         "name": "my-backend",
         "agent": {
-          "type": "claudecode",
+          "type": "pi",
           "providers": [
             {
               "name": "anthropic",
@@ -333,7 +333,7 @@ Lists all projects with a summary.
     "projects": [
       {
         "name": "my-backend",
-        "agent_type": "claudecode",
+        "agent_type": "pi",
         "platforms": ["feishu", "telegram"],
         "sessions_count": 3,
         "heartbeat_enabled": true
@@ -362,7 +362,7 @@ Returns detailed information for a single project.
   "ok": true,
   "data": {
     "name": "my-backend",
-    "agent_type": "claudecode",
+    "agent_type": "pi",
     "platforms": [
       {
         "type": "feishu",
@@ -463,7 +463,7 @@ Lists sessions for a project with summary info including the last message previe
         "session_key": "telegram:123:456",
         "name": "work",
         "platform": "telegram",
-        "agent_type": "claudecode",
+        "agent_type": "pi",
         "active": true,
         "live": true,
         "history_count": 12,
@@ -557,7 +557,7 @@ Returns session detail including message history.
     "session_key": "telegram:123:456",
     "name": "work",
     "platform": "telegram",
-    "agent_type": "claudecode",
+    "agent_type": "pi",
     "agent_session_id": "as_xxx",
     "active": true,
     "live": true,
@@ -715,7 +715,7 @@ Adds a new provider.
   "model": "claude-sonnet-4-20250514",
   "thinking": "disabled",
   "env": {
-    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "PI_ENV_EXAMPLE": "1",
     "AWS_PROFILE": "bedrock"
   }
 }

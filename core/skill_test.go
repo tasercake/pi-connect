@@ -8,7 +8,7 @@ import (
 
 func TestSkillRegistryListAll_RecursesIntoGroupedDirectories(t *testing.T) {
 	root := t.TempDir()
-	writeSkillFile(t, filepath.Join(root, "automation", "telegram-codex-bot", "SKILL.md"), "Telegram bot skill")
+	writeSkillFile(t, filepath.Join(root, "automation", "telegram-pi-bot", "SKILL.md"), "Telegram bot skill")
 	writeSkillFile(t, filepath.Join(root, "productivity", "doc", "SKILL.md"), "Doc skill")
 	writeSkillFile(t, filepath.Join(root, ".system", "skill-installer", "SKILL.md"), "System skill")
 
@@ -20,7 +20,7 @@ func TestSkillRegistryListAll_RecursesIntoGroupedDirectories(t *testing.T) {
 	if len(skills) != 3 {
 		t.Fatalf("skills discovered = %d, want 3", len(skills))
 	}
-	if r.Resolve("telegram-codex-bot") == nil {
+	if r.Resolve("telegram-pi-bot") == nil {
 		t.Fatalf("expected grouped skill to resolve")
 	}
 	if r.Resolve("doc") == nil {
@@ -34,7 +34,7 @@ func TestSkillRegistryListAll_RecursesIntoGroupedDirectories(t *testing.T) {
 func TestSkillRegistryListAll_FollowsDirectorySymlinks(t *testing.T) {
 	root := t.TempDir()
 	targetRoot := t.TempDir()
-	writeSkillFile(t, filepath.Join(targetRoot, "automation", "telegram-codex-bot", "SKILL.md"), "Telegram bot skill")
+	writeSkillFile(t, filepath.Join(targetRoot, "automation", "telegram-pi-bot", "SKILL.md"), "Telegram bot skill")
 	writeSkillFile(t, filepath.Join(targetRoot, "research", "hf-papers", "SKILL.md"), "HF papers skill")
 
 	if err := os.Symlink(filepath.Join(targetRoot, "automation"), filepath.Join(root, "automation")); err != nil {
@@ -52,7 +52,7 @@ func TestSkillRegistryListAll_FollowsDirectorySymlinks(t *testing.T) {
 	if len(skills) != 2 {
 		t.Fatalf("skills discovered = %d, want 2", len(skills))
 	}
-	if r.Resolve("telegram-codex-bot") == nil {
+	if r.Resolve("telegram-pi-bot") == nil {
 		t.Fatalf("expected symlinked automation skill to resolve")
 	}
 	if r.Resolve("hf-papers") == nil {
@@ -62,7 +62,7 @@ func TestSkillRegistryListAll_FollowsDirectorySymlinks(t *testing.T) {
 
 func TestSkillRegistryListAll_DoesNotLoopOnDirectorySymlinks(t *testing.T) {
 	root := t.TempDir()
-	writeSkillFile(t, filepath.Join(root, "automation", "telegram-codex-bot", "SKILL.md"), "Telegram bot skill")
+	writeSkillFile(t, filepath.Join(root, "automation", "telegram-pi-bot", "SKILL.md"), "Telegram bot skill")
 
 	if err := os.Symlink(filepath.Join(root, "automation"), filepath.Join(root, "automation", "again")); err != nil {
 		t.Fatalf("symlink loop: %v", err)
@@ -76,7 +76,7 @@ func TestSkillRegistryListAll_DoesNotLoopOnDirectorySymlinks(t *testing.T) {
 	if len(skills) != 1 {
 		t.Fatalf("skills discovered = %d, want 1", len(skills))
 	}
-	if r.Resolve("telegram-codex-bot") == nil {
+	if r.Resolve("telegram-pi-bot") == nil {
 		t.Fatalf("expected looping symlink tree to still resolve skill")
 	}
 }

@@ -1,12 +1,12 @@
 # Slack Setup Guide
 
-This guide walks you through connecting **cc-connect** to Slack, so you can chat with your local Claude Code via a Slack bot.
+This guide walks you through connecting **cc-connect** to Slack, so you can chat with your local Pi via a Slack bot.
 
 ## Prerequisites
 
 - A Slack workspace account (with permission to create apps)
 - A machine that can run cc-connect (no public IP needed)
-- Claude Code installed and configured
+- Pi installed and configured
 
 > 💡 **Advantage**: Uses Socket Mode (WebSocket) — no public IP, no domain, no reverse proxy needed.
 
@@ -161,7 +161,7 @@ Add both tokens to your `config.toml`:
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -264,7 +264,7 @@ cc-connect: Here's the project structure...
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                         │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► Your Project Code    │
+│   cc-connect ◄──► Pi ◄──► Your Project Code    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```

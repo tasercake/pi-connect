@@ -1,15 +1,14 @@
 # cc-connect Installation & Configuration Guide
 
-> **This document is designed to be read by AI coding agents (Claude Code, Cursor, Gemini CLI, etc.) to help users install and configure cc-connect.** You can feed this file directly to your AI agent.
+> **This document is designed to help users install and configure cc-connect for Pi.**
 
 ## What is cc-connect?
 
-cc-connect bridges local AI coding assistants to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ, **personal WeChat** via the **Weixin (ilink)** platform).
+cc-connect bridges Pi to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ, **personal WeChat** via the **Weixin (ilink)** platform).
 
 GitHub: https://github.com/chenhg5/cc-connect
 
-**IMPORTANT: If you are an AI agent helping a user install cc-connect, use interactive tools (like AskUserQuestion) to guide them through configuration choices:**
-- Agent selection (Claude Code, Cursor, Gemini, etc.)
+**IMPORTANT: If you are helping a user install cc-connect, guide them through configuration choices:**
 - Platform selection (Feishu, Telegram, Discord, etc.)
 - API keys and authentication tokens
 - Project paths and preferences
@@ -67,40 +66,14 @@ make build
 # Binary will be at ./cc-connect
 ```
 
-## Step 2: Install your AI Agent
+## Step 2: Install Pi
 
-cc-connect supports multiple local coding agents. Install at least one:
+cc-connect in this fork supports the Pi coding agent. Install and authenticate Pi before starting cc-connect.
 
-```bash
-# Claude Code
-npm install -g @anthropic-ai/claude-code
-
-# Codex
-npm install -g @openai/codex
-
-# Gemini CLI
-npm install -g @google/gemini-cli
-
-# iFlow CLI
-npm install -g @iflow-ai/iflow-cli
-
-# Qoder CLI
-curl -fsSL https://qoder.com/install | bash
-```
-
-For **Cursor Agent** and **OpenCode**, follow their official install docs:
-- Cursor Agent: https://docs.cursor.com/agent
-- OpenCode: https://github.com/opencode-ai/opencode
-
-Verify your selected agent works:
+Verify Pi works:
 
 ```bash
-claude --version
-codex --version
-gemini --version
-iflow --version
-opencode --version
-qodercli --version
+pi --version
 ```
 
 ## Step 3: Create config.toml
@@ -143,27 +116,11 @@ level = "info"  # debug, info, warn, error
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or "codex", "cursor", "gemini", "qoder", "opencode", "iflow"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/absolute/path/to/your/project"
 mode = "default"
-
-# --- Claude Code mode options ---
-# "default", "acceptEdits" (alias: "edit"), "plan", "auto", "bypassPermissions" (alias: "yolo")
-# allowed_tools = ["Read", "Grep", "Glob"]  # optional: pre-approve specific tools
-
-# --- Codex mode options ---
-# "suggest" (default), "auto-edit", "full-auto", "yolo"
-# model = "o3"  # optional: specify model
-
-# --- Qoder CLI mode options ---
-# "default", "yolo"
-# model = "auto"  # "auto", "ultimate", "performance", "efficient", "lite"
-
-# --- iFlow CLI mode options ---
-# "default", "auto-edit", "plan", "yolo"
-# model = "Qwen3-Coder"  # optional: specify model
 
 # Add one or more platform sections below
 ```
@@ -439,14 +396,6 @@ cc-connect        # start the service
 
 > **Note:** `cc-connect web` only configures the web admin and opens the dashboard in your browser — it does **not** start the cc-connect service itself. You still need to run `cc-connect` (or `cc-connect --config <path>`) separately to actually start the bridge. Think of it as two steps: configure first, then run.
 
-**Important: If you are running inside a Claude Code session** (e.g., Claude Code helped you install and configure cc-connect), you must unset the `CLAUDECODE` environment variable before starting, otherwise Claude Code will refuse to launch as a subprocess:
-
-```bash
-unset CLAUDECODE && cc-connect
-```
-
-Alternatively, open a **separate terminal** and run cc-connect there — this avoids the issue entirely.
-
 **Normal startup:**
 
 ```bash
@@ -464,7 +413,7 @@ You should see logs like:
 
 ```
 level=INFO msg="platform started" project=my-project platform=feishu
-level=INFO msg="engine started" project=my-project agent=claudecode platforms=1
+level=INFO msg="engine started" project=my-project agent=pi platforms=1
 level=INFO msg="cc-connect is running" projects=1
 ```
 
@@ -478,7 +427,6 @@ Once running, send messages to your bot on the configured platform. Available sl
 /switch <id>     — Resume an existing session
 /current         — Show current active session
 /history [n]     — Show last n messages (default 10)
-/reasoning [level] — View/switch reasoning effort (Codex)
 /mode [name]     — View/switch permission mode (default/edit/plan/yolo)
 /quiet           — Toggle thinking/tool progress messages
 /allow <tool>    — Pre-allow a tool (next session)
@@ -487,29 +435,16 @@ Once running, send messages to your bot on the configured platform. Available sl
 /help            — Show available commands
 ```
 
-During a session, Claude may ask for tool permissions. Reply:
+During a session, Pi may ask for tool permissions. Reply:
 - `allow` or `允许` — approve this request
 - `deny` or `拒绝` — reject this request
 - `allow all` or `允许所有` — auto-approve all remaining requests this session
 
-## Step 7: Enable Natural Language Scheduling (Non-Claude-Code Agents)
+## Step 7: Enable Natural Language Scheduling
 
-cc-connect supports scheduled tasks (cron jobs). You can always create them via slash commands (`/cron add ...`) or CLI (`cc-connect cron add ...`), but to let the agent **understand natural language** like "every day at 6am, summarize trending repos", the agent needs to know about cc-connect's cron CLI.
+cc-connect supports scheduled tasks (cron jobs). You can always create them via slash commands (`/cron add ...`) or CLI (`cc-connect cron add ...`). To let Pi **understand natural language** like "every day at 6am, summarize trending repos", add the following instructions to the Pi project instructions in your `work_dir`.
 
-**Claude Code** handles this automatically via `--append-system-prompt` — no extra setup needed.
-
-**For Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, or iFlow CLI**, add the following instructions to the agent's project-level instruction file in your project's `work_dir`:
-
-| Agent | File to create/edit |
-|-------|-------------------|
-| Codex | `AGENTS.md` |
-| Cursor Agent | `.cursorrules` |
-| Qoder CLI | `AGENTS.md` |
-| Gemini CLI | `GEMINI.md` |
-| OpenCode | `OPENCODE.md` |
-| iFlow CLI | `IFLOW.md` |
-
-**Content to add** (copy-paste into the file):
+**Content to add**:
 
 ```markdown
 # cc-connect Integration
@@ -557,18 +492,18 @@ For short single-line messages:
 
 After adding this file, the agent will be able to translate natural language scheduling requests into `cc-connect cron add` commands automatically.
 
-> **Tip:** You may want to add `AGENTS.md` / `.cursorrules` / `GEMINI.md` to your `.gitignore` if you don't want cc-connect instructions committed to version control.
+> **Tip:** You may want to add local instruction files to your `.gitignore` if you don't want cc-connect instructions committed to version control.
 
 ## Multi-Project Setup
 
-A single cc-connect process can manage multiple projects. Each project has its own agent, work directory, and platforms:
+A single cc-connect process can manage multiple projects. Each project uses Pi with its own work directory and platforms:
 
 ```toml
 [[projects]]
 name = "backend"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/backend"
@@ -581,94 +516,22 @@ type = "feishu"
 app_id = "cli_xxx"
 app_secret = "xxx"
 
-# Second project — using Codex
+# Second project — also using Pi
 [[projects]]
 name = "frontend"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "full-auto"
+mode = "default"
 
 [[projects.platforms]]
 type = "telegram"
 
 [projects.platforms.options]
 token = "xxx"
-
-# Third project — using Cursor Agent
-[[projects]]
-name = "design-system"
-
-[projects.agent]
-type = "cursor"
-
-[projects.agent.options]
-work_dir = "/path/to/design-system"
-mode = "force"
-
-[[projects.platforms]]
-type = "discord"
-
-[projects.platforms.options]
-token = "xxx"
-
-# Fourth project — using Gemini CLI
-[[projects]]
-name = "my-gemini-project"
-
-[projects.agent]
-type = "gemini"
-
-[projects.agent.options]
-work_dir = "/path/to/gemini-project"
-mode = "yolo"    # "default" | "auto_edit" | "yolo" | "plan"
-
-[[projects.platforms]]
-type = "slack"
-
-[projects.platforms.options]
-bot_token = "xoxb-xxx"
-app_token = "xapp-xxx"
-
-# Fifth project — using Qoder CLI
-[[projects]]
-name = "my-qoder-project"
-
-[projects.agent]
-type = "qoder"
-
-[projects.agent.options]
-work_dir = "/path/to/qoder-project"
-mode = "default"    # "default" | "yolo"
-# model = "auto"    # "auto" | "ultimate" | "performance" | "efficient" | "lite"
-
-[[projects.platforms]]
-type = "telegram"
-
-[projects.platforms.options]
-token = "xxx"
-
-# Sixth project — using iFlow CLI
-[[projects]]
-name = "my-iflow-project"
-
-[projects.agent]
-type = "iflow"
-
-[projects.agent.options]
-work_dir = "/path/to/iflow-project"
-mode = "default"    # "default" | "auto-edit" | "plan" | "yolo"
-# model = "Qwen3-Coder"
-
-[[projects.platforms]]
-type = "slack"
-
-[projects.platforms.options]
-bot_token = "xoxb-xxx"
-app_token = "xapp-xxx"
 ```
 
 ## Upgrade
@@ -758,21 +621,16 @@ cc-connect daemon uninstall
 
 The following additional features are available:
 
-- **Codex Agent**: OpenAI Codex CLI integration (`codex exec --json`)
-- **Cursor Agent**: Cursor Agent CLI integration (`agent --print --output-format stream-json`)
-- **Gemini CLI**: Google Gemini CLI integration (`gemini -p --output-format stream-json`)
-- **Qoder CLI**: Qoder CLI integration (`qodercli -p -f stream-json`)
-- **OpenCode**: OpenCode CLI integration (`opencode run --format json`)
-- **iFlow CLI**: iFlow CLI integration (`iflow -i -r -o`)
+- **Pi Agent**: Pi coding agent integration
 - **Voice Messages (STT)**: Speech-to-text via Whisper API (OpenAI / Groq / SiliconFlow). Requires `ffmpeg` and `[speech]` config.
 - **Voice Reply (TTS)**: Text-to-speech via Qwen TTS / OpenAI TTS. Requires `ffmpeg` and `[tts]` config.
-- **Image Messages**: Send images to Claude Code for multimodal analysis
+- **Image Messages**: Send images to Pi for multimodal analysis
 - **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI
 - **CLI Send**: `cc-connect send` to inject messages into active sessions from external processes
 
 ## Troubleshooting
 
-- **"session already in use"** — A previous Claude Code process may still be running. Use `/new` to start a fresh session.
+- **"session already in use"** — A previous Pi process may still be running. Use `/new` to start a fresh session.
 - **No response from bot** — Check `cc-connect` logs. Set `level = "debug"` in `[log]` for verbose output.
 - **WeChat Work can't send messages** — Ensure your outbound IP is in the Trusted IP whitelist. If using a proxy, check the proxy is reachable.
 - **LINE/WeChat Work can't receive messages** — Ensure your webhook URL is publicly accessible (ngrok/cloudflared running).

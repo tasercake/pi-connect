@@ -1,8 +1,8 @@
 # cc-connect
 
-Bridge local AI coding agents (Claude Code, Cursor, Gemini CLI, Codex) to messaging platforms (Feishu/Lark, DingTalk, Slack, Telegram, Discord, LINE, WeChat Work).
+Bridge the Pi coding agent to messaging platforms (Feishu/Lark, DingTalk, Slack, Telegram, Discord, LINE, WeChat Work).
 
-Chat with your AI dev assistant from anywhere.
+Chat with Pi from anywhere.
 
 ## Install
 

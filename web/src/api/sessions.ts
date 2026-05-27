@@ -11,7 +11,6 @@ export interface Session {
   session_key: string;
   name: string;
   platform: string;
-  agent_type: string;
   active: boolean;
   live: boolean;
   created_at: string;

@@ -1,6 +1,6 @@
 # 企业微信 (WeChat Work) 接入指南
 
-本文档介绍如何将 **cc-connect** 接入企业微信，让你可以通过企业微信（甚至个人微信）远程调用 Claude Code。
+本文档介绍如何将 **cc-connect** 接入企业微信，让你可以通过企业微信（甚至个人微信）远程调用 Pi。
 
 > 💡 **特色功能**：配置完成后，**个人微信用户也可以直接对话** —— 只需在企业微信管理后台关联微信插件即可。
 
@@ -21,7 +21,7 @@
 
 - 企业微信管理员权限
 - 一台可运行 cc-connect 的服务器（**无需公网 IP**）
-- Claude Code 已安装并配置完成
+- Pi 已安装并配置完成
 
 ### 第一步：创建智能机器人
 
@@ -46,7 +46,7 @@ Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -105,7 +105,7 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 - 企业微信管理员权限
 - 一台可运行 cc-connect 的服务器
 - **公网可访问的 URL**（用于接收企业微信回调）
-- Claude Code 已安装并配置完成
+- Pi 已安装并配置完成
 
 ---
 
@@ -245,7 +245,7 @@ curl -s https://ifconfig.me
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -385,7 +385,7 @@ proxy = "http://vps-ip:8888"
 ┌─────────────────────────────────────────────────────────────┐
 │                    你的服务器                                  │
 │                                                              │
-│   cloudflared ──→ cc-connect ──→ Claude Code CLI             │
+│   cloudflared ──→ cc-connect ──→ Pi             │
 │   / ngrok            │                                       │
 │                      │ (可选) proxy                          │
 │                      ▼                                       │

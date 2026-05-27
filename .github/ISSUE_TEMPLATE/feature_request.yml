@@ -16,7 +16,6 @@ body:
       description: Which part of cc-connect does this relate to?
       options:
         - Core / Engine
-        - Agent (Claude Code, Codex, Cursor, Gemini, etc.)
         - Platform (Feishu, DingTalk, Telegram, Slack, etc.)
         - Session Management
         - API Provider Management

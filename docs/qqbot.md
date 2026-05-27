@@ -18,7 +18,7 @@ cc-connect connects to QQ via the [official QQ Bot Platform API v2](https://bot.
 ## 架构 / Architecture
 
 ```
-QQ Open Platform ←WebSocket→ cc-connect ←→ Agent (Claude Code / etc.)
+QQ Open Platform ←WebSocket→ cc-connect ←→ Pi
 ```
 
 ## 前置条件 / Prerequisites

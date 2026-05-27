@@ -109,7 +109,7 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 		payload: true,
 	}
 
-	w := newCompactProgressWriter(context.Background(), p, replyCtx, "codex", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, replyCtx, "pi", LangEnglish, nil)
 	if !w.enabled {
 		t.Fatal("progress writer should be enabled")
 	}
@@ -197,7 +197,7 @@ func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T
 		style:              "card",
 		supportPayload:     true,
 	}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "pi", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
 	})
 
@@ -287,7 +287,7 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 		style:              "card",
 		supportPayload:     true,
 	}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "pi", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
 	})
 

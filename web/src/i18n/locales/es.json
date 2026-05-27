@@ -36,8 +36,6 @@
     "detail": "Detalles",
     "noProjects": "No hay proyectos configurados",
     "workDir": "Directorio de trabajo",
-    "agentType": "Tipo de agente",
-    "agentTypeChangeHint": "Cambiar el tipo de agente requiere reinicio. Los proveedores incompatibles serán eliminados.",
     "agentMode": "Modo de permisos",
     "agentSettings": "Agente",
     "generalSettings": "General",
@@ -220,7 +218,6 @@
     "addProject": "Agregar proyecto",
     "projectName": "Nombre del proyecto",
     "workDir": "Directorio de trabajo",
-    "agentType": "Tipo de agente",
     "next": "Siguiente",
     "manualSetup": "Configuración manual",
     "manualHint": "Para {{platform}}, configure las credenciales en config.toml y reinicie el servicio.",
@@ -338,7 +335,6 @@
     "title": "Gestión de proveedores",
     "subtitle": "Administra proveedores de API compartidos globalmente entre todos los proyectos",
     "add": "Agregar proveedor",
-    "importCCSwitch": "Importar desde CC-Switch",
     "edit": "Editar proveedor",
     "empty": "No hay proveedores configurados",
     "emptyHint": "Agrega un proveedor global o importa desde los preajustes.",
@@ -358,23 +354,9 @@
       "modelHint": "Modelo usado al cambiar a este proveedor",
       "models": "Modelos disponibles",
       "modelsHint": "Modelos que los usuarios pueden cambiar con /model",
-      "agentTypes": "Tipos de agente",
-      "agentTypesHint": "Dejar vacío para todos los tipos de agente",
       "thinkingDefault": "Predeterminado (auto)",
-      "perAgentHint": "Cada tipo de agente puede usar diferente Base URL / modelos. Configura por tipo abajo.",
       "defaultConfig": "Predeterminado",
-      "baseUrl": "Base URL",
-      "codexWireApi": "Wire API"
-    },
-    "ccSwitch": {
-      "title": "Importar desde CC-Switch",
-      "notFound": "No se encontró la base de datos de CC-Switch. Asegúrese de que CC-Switch esté instalado.",
-      "empty": "No hay proveedores configurados en CC-Switch.",
-      "hint": "Se encontraron {{count}} proveedores en CC-Switch. Seleccione cuáles importar:",
-      "active": "activo",
-      "exists": "existente",
-      "import": "Importar ({{count}})",
-      "result": "Importación completa: {{imported}} importados, {{skipped}} omitidos."
+      "baseUrl": "Base URL"
     }
   },
   "skills": {

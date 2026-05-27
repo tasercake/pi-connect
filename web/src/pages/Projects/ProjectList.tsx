@@ -8,17 +8,6 @@ import PlatformSetupQR from './PlatformSetupQR';
 import PlatformManualForm from './PlatformManualForm';
 import { platformMeta } from '@/lib/platformMeta';
 
-const AGENT_OPTIONS = [
-  { key: 'claudecode', label: 'Claude Code' },
-  { key: 'codex', label: 'Codex' },
-  { key: 'gemini', label: 'Gemini CLI' },
-  { key: 'cursor', label: 'Cursor' },
-  { key: 'devin', label: 'Devin' },
-  { key: 'acp', label: 'ACP (Generic)' },
-  { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
-  { key: 'opencode', label: 'OpenCode' },
-  { key: 'qoder', label: 'Qoder' },
-];
 
 const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolean }[] = [
   { key: 'feishu', label: 'Feishu / Lark', color: 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400', qr: true },
@@ -45,7 +34,6 @@ export default function ProjectList() {
   const [wizStep, setWizStep] = useState<'name' | 'platform' | 'qr' | 'form' | 'done'>('name');
   const [newProjName, setNewProjName] = useState('');
   const [newWorkDir, setNewWorkDir] = useState('');
-  const [newAgentType, setNewAgentType] = useState('claudecode');
   const [selectedPlat, setSelectedPlat] = useState('');
 
   const fetch = useCallback(async () => {
@@ -70,7 +58,6 @@ export default function ProjectList() {
     setWizStep('name');
     setNewProjName('');
     setNewWorkDir('');
-    setNewAgentType('claudecode');
     setSelectedPlat('');
   };
 
@@ -131,7 +118,6 @@ export default function ProjectList() {
                   <ArrowRight size={16} className="text-gray-300 dark:text-gray-600" />
                 </div>
                 <div className="flex flex-wrap gap-1.5 mb-3">
-                  <Badge variant="info">{p.agent_type}</Badge>
                   {p.platforms?.slice(0, 3).map((pl) => <Badge key={pl}>{pl}</Badge>)}
                   {(p.platforms?.length ?? 0) > 3 && (
                     <Badge>+{p.platforms!.length - 3}</Badge>
@@ -170,20 +156,6 @@ export default function ProjectList() {
               onChange={(e) => setNewWorkDir(e.target.value)}
               placeholder="/path/to/project"
             />
-            <div>
-              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                {t('setup.agentType', 'Agent type')}
-              </label>
-              <select
-                value={newAgentType}
-                onChange={(e) => setNewAgentType(e.target.value)}
-                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-accent/50"
-              >
-                {AGENT_OPTIONS.map(a => (
-                  <option key={a.key} value={a.key}>{a.label}</option>
-                ))}
-              </select>
-            </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="secondary" onClick={() => setShowWizard(false)}>{t('common.cancel')}</Button>
               <Button disabled={!newProjName.trim() || !newWorkDir.trim()} onClick={() => setWizStep('platform')}>
@@ -228,7 +200,6 @@ export default function ProjectList() {
             platformType={selectedPlat as 'feishu' | 'weixin'}
             projectName={newProjName}
             workDir={newWorkDir}
-            agentType={newAgentType}
             onComplete={handleQRComplete}
             onCancel={() => setWizStep('platform')}
           />
@@ -239,7 +210,6 @@ export default function ProjectList() {
             platformType={selectedPlat}
             projectName={newProjName}
             workDir={newWorkDir}
-            agentType={newAgentType}
             onComplete={() => {
               setShowWizard(false);
               fetch();

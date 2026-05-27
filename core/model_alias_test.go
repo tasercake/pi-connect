@@ -3,16 +3,16 @@ package core
 import "testing"
 
 func TestResolveModelAlias_CaseInsensitive(t *testing.T) {
-	models := []ModelOption{{Name: "gpt-5.3-codex", Alias: "Codex"}}
+	models := []ModelOption{{Name: "gpt-5.3-pi", Alias: "Pi"}}
 
-	got := resolveModelAlias(models, "codex")
-	if got != "gpt-5.3-codex" {
-		t.Fatalf("resolveModelAlias() = %q, want %q", got, "gpt-5.3-codex")
+	got := resolveModelAlias(models, "pi")
+	if got != "gpt-5.3-pi" {
+		t.Fatalf("resolveModelAlias() = %q, want %q", got, "gpt-5.3-pi")
 	}
 }
 
 func TestResolveModelAlias_NoMatchFallsBackToInput(t *testing.T) {
-	models := []ModelOption{{Name: "gpt-5.3-codex", Alias: "codex"}}
+	models := []ModelOption{{Name: "gpt-5.3-pi", Alias: "pi"}}
 
 	got := resolveModelAlias(models, "gpt-5.4")
 	if got != "gpt-5.4" {

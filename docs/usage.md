@@ -11,7 +11,7 @@ Complete guide to using cc-connect features.
 - [Work Directory Switching (`/dir`, `/cd`)](#work-directory-switching-dir-cd)
 - [Feishu Setup CLI](#feishu-setup-cli)
 - [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
-- [Claude Code Router Integration](#claude-code-router-integration)
+- [Provider Routing Integration](#provider-routing-integration)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
@@ -41,7 +41,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/model [switch <alias>]` | List available models or switch by alias |
 | `/dir [path]` | Show or switch the agent work directory |
 | `/allow <tool>` | Pre-allow a tool (next session) |
-| `/reasoning [level]` | View or switch reasoning effort (Codex) |
+| `/reasoning [level]` | View or switch reasoning effort (Pi) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
@@ -72,7 +72,7 @@ To restore the previous behavior of always continuing, set `reset_on_idle_mins =
 
 All agents support permission modes switchable at runtime via `/mode`.
 
-### Claude Code Modes
+### Pi Modes
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -82,7 +82,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Plan Mode | `plan` | Claude only plans, no execution |
 | YOLO | `bypassPermissions` / `yolo` | All tools auto-approved |
 
-### Codex Modes
+### Pi Modes
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -91,7 +91,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
 
-### Cursor Agent Modes
+### Pi Modes
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -100,7 +100,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Plan | `plan` | Read-only analysis |
 | Ask | `ask` | Q&A style, read-only |
 
-### Gemini CLI Modes
+### Pi Modes
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -109,7 +109,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 | YOLO | `yolo` | Auto-approve all |
 | Plan | `plan` | Read-only plan mode |
 
-### Qoder CLI / OpenCode / iFlow CLI
+### Pi
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -176,7 +176,7 @@ model = "MiniMax-M2.7"
 # For Bedrock, Vertex, etc.
 [[projects.agent.providers]]
 name = "bedrock"
-env = { CLAUDE_CODE_USE_BEDROCK = "1", AWS_PROFILE = "bedrock" }
+env = { PI_ENV_EXAMPLE = "1", AWS_PROFILE = "bedrock" }
 ```
 
 ### CLI Commands
@@ -203,11 +203,11 @@ cc-connect provider import --project my-backend  # from cc-switch
 
 | Agent | api_key → | base_url → |
 |-------|-----------|------------|
-| Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| Gemini CLI | `GEMINI_API_KEY` | use `env` map |
-| OpenCode | `ANTHROPIC_API_KEY` | use `env` map |
-| iFlow CLI | `IFLOW_API_KEY` | `IFLOW_BASE_URL` |
+| Pi | `PI_API_KEY` | `PI_BASE_URL` |
+| Pi | `PI_API_KEY` | `PI_BASE_URL` |
+| Pi | `GEMINI_API_KEY` | use `env` map |
+| Pi | `PI_API_KEY` | use `env` map |
+| Pi | `PI_API_KEY` | `PI_BASE_URL` |
 
 ---
 
@@ -223,15 +223,15 @@ name = "openai"
 api_key = "sk-xxx"
 
 [[projects.agent.providers.models]]
-model = "gpt-5.3-codex"
-alias = "codex"
+model = "gpt-5.3-pi"
+alias = "pi"
 
 [[projects.agent.providers.models]]
 model = "gpt-5.4"
 alias = "gpt"
 
 [[projects.agent.providers.models]]
-model = "gpt-5.3-codex-spark"
+model = "gpt-5.3-pi-spark"
 alias = "spark"
 ```
 
@@ -283,7 +283,7 @@ Examples:
 ## Running agents as a different Unix user (`run_as_user`)
 
 > **Platform support**: Linux and macOS. Not supported on Windows.
-> **Agent support**: Claude Code today. Other agents fall back to the
+> **Agent support**: Pi today. Other agents fall back to the
 > supervisor user; see the tracking issue for migration status.
 
 ### What this is
@@ -332,13 +332,13 @@ sudo useradd -m -s /bin/bash partseeker-coder
 sudo -iu partseeker-coder
 
 # Install the agent CLI under the target user's PATH
-#   (for Claude Code, follow the normal install instructions)
+#   (for Pi, follow the normal install instructions)
 
 # Set up the target user's ~/.claude/
 mkdir -p ~/.claude
 # Copy or re-create:
 #   ~/.claude/settings.json     (MCP servers, hooks, model settings)
-#   ~/.claude.json              (Claude Code auth)
+#   Pi credentials              (Pi auth)
 #   ~/.claude/plugins/          (claude-mem and any other plugin state)
 
 exit
@@ -423,7 +423,7 @@ run_as_user = "partseeker-coder"
 run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 mode = "default"
@@ -441,10 +441,10 @@ has to live in the target user's home.
 Migration checklist:
 
 - [ ] **Agent config** — `~/.claude/settings.json` (MCP servers, hooks,
-      model settings), `~/.claude.json` (auth). Copy from the supervisor
+      model settings), `Pi credentials` (auth). Copy from the supervisor
       or re-create from scratch.
 - [ ] **Plugin state** — `~/.claude/plugins/` — claude-mem, any other
-      Claude Code plugins.
+      Pi plugins.
 - [ ] **MCP server binaries** — must be on the target user's `PATH`, not
       just the supervisor's. Either install under the target user or
       reference full paths in `settings.json`.
@@ -473,7 +473,7 @@ Migration checklist:
                ~/.claude/.credentials.json'
       ```
 
-      **If you use an API key** (`ANTHROPIC_API_KEY`) instead of OAuth,
+      **If you use an API key** (`PI_API_KEY`) instead of OAuth,
       this is not an issue — set the key in the target user's
       `~/.claude/settings.json` `env` block and it won't expire.
 - [ ] **Credential files** — `~/.pgpass`, `~/.gitconfig`, `~/.netrc`,
@@ -572,15 +572,15 @@ Notes:
 
 ---
 
-## Claude Code Router Integration
+## Provider Routing Integration
 
-[Claude Code Router](https://github.com/musistudio/claude-code-router) routes requests to different model providers.
+[Provider router](https://github.com/chenhg5/cc-connect) routes requests to different model providers.
 
 ### Setup
 
-1. Install: `npm install -g @musistudio/claude-code-router`
+1. Install: `npm install -g provider-router`
 
-2. Configure `~/.claude-code-router/config.json`:
+2. Configure `~/.cc-connect/provider-router.json`:
 ```json
 {
   "APIKEY": "your-secret-key",
@@ -780,11 +780,11 @@ cc-connect cron del <job-id>
 
 Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
 
-### Natural Language (Claude Code)
+### Natural Language (Pi)
 
 > "Every day at 6am, summarize GitHub trending"
 
-Claude Code auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
+Pi auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
 
 ---
 
@@ -796,15 +796,15 @@ Cross-platform bot communication in group chats.
 
 ```
 /bind              Show bindings
-/bind claudecode   Add claudecode project
-/bind gemini       Add gemini project
-/bind -claudecode  Remove claudecode
+/bind pi   Add pi project
+/bind pi           Add pi project
+/bind -pi  Remove pi
 ```
 
 ### Bot-to-Bot Communication
 
 ```bash
-cc-connect relay send --to gemini "What do you think about this architecture?"
+cc-connect relay send --to pi "What do you think about this architecture?"
 ```
 
 ---
@@ -838,7 +838,7 @@ mode = "multi-workspace"
 base_dir = "~/workspaces"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 ```
 
 ### Commands
@@ -1008,7 +1008,7 @@ See [config.example.toml](../config.example.toml) for full examples.
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow
+type = "pi"  # pi is the supported agent type
 
 [projects.agent.options]
 work_dir = "/path/to/project"

@@ -39,7 +39,7 @@ export const setupFeishuPoll = (deviceCode: string, baseUrl?: string) =>
 
 export const setupFeishuSave = (body: {
   project: string; app_id: string; app_secret: string; platform_type: string;
-  owner_open_id?: string; work_dir?: string; agent_type?: string;
+  owner_open_id?: string; work_dir?: string;
 }) => api.post<{ message: string; restart_required: boolean }>('/setup/feishu/save', body);
 
 export const setupWeixinBegin = (apiUrl?: string) =>
@@ -50,5 +50,5 @@ export const setupWeixinPoll = (qrKey: string, apiUrl?: string) =>
 
 export const setupWeixinSave = (body: {
   project: string; token: string; base_url?: string;
-  ilink_bot_id?: string; ilink_user_id?: string; work_dir?: string; agent_type?: string;
+  ilink_bot_id?: string; ilink_user_id?: string; work_dir?: string;
 }) => api.post<{ message: string; restart_required: boolean }>('/setup/weixin/save', body);

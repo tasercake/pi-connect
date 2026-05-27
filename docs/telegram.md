@@ -1,12 +1,12 @@
 # Telegram Setup Guide
 
-This guide walks you through connecting **cc-connect** to Telegram, so you can chat with your local Claude Code via a Telegram bot.
+This guide walks you through connecting **cc-connect** to Telegram, so you can chat with your local Pi via a Telegram bot.
 
 ## Prerequisites
 
 - A Telegram account
 - A machine that can run cc-connect (no public IP needed)
-- Claude Code installed and configured
+- Pi installed and configured
 
 > 💡 **Advantage**: Uses Long Polling mode — no public IP, no domain, no reverse proxy needed.
 
@@ -69,7 +69,7 @@ name = "my-project"
 admin_from = "*"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -221,7 +221,7 @@ cc-connect: Here's the project structure...
 ┌─────────────────────────────────────────────────────────────┐
 │                    Your Local Machine                         │
 │                                                              │
-│   cc-connect ◄──► Claude Code CLI ◄──► Your Project Code    │
+│   cc-connect ◄──► Pi ◄──► Your Project Code    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```

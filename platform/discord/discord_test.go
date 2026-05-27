@@ -754,7 +754,7 @@ func TestSendPreviewStart_ProgressPayloadUsesEmbed(t *testing.T) {
 	progress := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
 		{Kind: core.ProgressEntryThinking, Text: "planning"},
 		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
-	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+	}, false, "Pi", core.LangEnglish, core.ProgressCardStateRunning)
 	if progress == "" {
 		t.Fatal("BuildProgressCardPayloadV2() returned empty payload")
 	}
@@ -784,8 +784,8 @@ func TestSendPreviewStart_ProgressPayloadUsesEmbed(t *testing.T) {
 	if !ok {
 		t.Fatalf("embed = %#v, want object", embeds[0])
 	}
-	if embed["title"] != "Codex · Processing" {
-		t.Fatalf("embed title = %#v, want Codex · Processing", embed["title"])
+	if embed["title"] != "Pi · Processing" {
+		t.Fatalf("embed title = %#v, want Pi · Processing", embed["title"])
 	}
 	desc, _ := embed["description"].(string)
 	if !strings.Contains(desc, "💭 planning") {
@@ -865,7 +865,7 @@ func TestUpdateMessage_ProgressPayloadUsesEmbed(t *testing.T) {
 	exitCode := 0
 	progress := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
 		{Kind: core.ProgressEntryToolResult, Tool: "Bash", Text: "hi", Status: "completed", ExitCode: &exitCode},
-	}, false, "Codex", core.LangEnglish, core.ProgressCardStateCompleted)
+	}, false, "Pi", core.LangEnglish, core.ProgressCardStateCompleted)
 	if progress == "" {
 		t.Fatal("BuildProgressCardPayloadV2() returned empty payload")
 	}
@@ -888,8 +888,8 @@ func TestUpdateMessage_ProgressPayloadUsesEmbed(t *testing.T) {
 	if !ok {
 		t.Fatalf("embed = %#v, want object", embeds[0])
 	}
-	if embed["title"] != "Codex · Completed" {
-		t.Fatalf("embed title = %#v, want Codex · Completed", embed["title"])
+	if embed["title"] != "Pi · Completed" {
+		t.Fatalf("embed title = %#v, want Pi · Completed", embed["title"])
 	}
 	desc, _ := embed["description"].(string)
 	if !strings.Contains(desc, "🧾 Bash — completed · exit 0 · hi") {
@@ -906,7 +906,7 @@ func TestUpdateMessage_ProgressPayloadUsesEmbed(t *testing.T) {
 
 func TestBuildDiscordProgressEmbed_ShowsTruncatedNotice(t *testing.T) {
 	payload := &core.ProgressCardPayload{
-		Agent:     "Codex",
+		Agent:     "Pi",
 		Lang:      string(core.LangEnglish),
 		State:     core.ProgressCardStateRunning,
 		Truncated: true,

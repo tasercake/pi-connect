@@ -104,37 +104,6 @@ func TestConfigValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "accepts valid references config",
-			cfg: Config{
-				Projects: []ProjectConfig{
-					func() ProjectConfig {
-						p := validProject("demo")
-						p.References = ReferenceConfig{
-							NormalizeAgents: []string{"codex", "claudecode"},
-							RenderPlatforms: []string{"feishu", "weixin"},
-							DisplayPath:     "dirname_basename",
-							MarkerStyle:     "emoji",
-							EnclosureStyle:  "code",
-						}
-						return p
-					}(),
-				},
-			},
-		},
-		{
-			name: "rejects unsupported reference agent",
-			cfg: Config{
-				Projects: []ProjectConfig{
-					func() ProjectConfig {
-						p := validProject("demo")
-						p.References.NormalizeAgents = []string{"gemini"}
-						return p
-					}(),
-				},
-			},
-			wantErr: `projects[0].references.normalize_agents has unsupported value "gemini"`,
-		},
-		{
 			name: "rejects unsupported reference platform",
 			cfg: Config{
 				Projects: []ProjectConfig{
@@ -504,7 +473,7 @@ func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
  name = "demo"
 
  [projects.agent]
- type = "codex"
+ type = "pi"
 
  [projects.agent.options]
  work_dir = "${CC_ROOT}/repo"
@@ -565,7 +534,7 @@ func TestLoad_MissingEnvPlaceholderBecomesEmptyString(t *testing.T) {
  name = "demo"
 
  [projects.agent]
- type = "codex"
+ type = "pi"
 
  [projects.agent.options]
  work_dir = "/tmp/demo"
@@ -719,7 +688,7 @@ name = "demo"
 work_dir = "/tmp/demo" # inline comment
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 mode = "default"
@@ -939,7 +908,7 @@ name = "alpha"
 work_dir = "/tmp/alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 provider = "openai"
@@ -955,7 +924,7 @@ name = "beta"
 work_dir = "/tmp/beta"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 provider = "anthropic"
@@ -1006,7 +975,7 @@ name = "demo"
 work_dir = "/tmp/demo"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 provider_refs = ["shared-openai"]
 
 [[projects.platforms]]
@@ -1150,7 +1119,7 @@ attachment_send = "off"
 name = "alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/alpha"
@@ -1170,7 +1139,7 @@ timeout_secs = 300
 name = "alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/alpha"
@@ -1190,7 +1159,7 @@ timeout_secs = -1
 name = "alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/alpha"
@@ -1623,7 +1592,7 @@ name = "beta"
 filter_external_sessions = true
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/beta"
@@ -1652,7 +1621,7 @@ name = "gamma"
 filter_external_sessions = false
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/gamma"
@@ -1678,7 +1647,7 @@ func validProject(name string) ProjectConfig {
 	return ProjectConfig{
 		Name: name,
 		Agent: AgentConfig{
-			Type:    "claudecode",
+			Type:    "pi",
 			Options: map[string]any{"mode": "default"},
 		},
 		Platforms: []PlatformConfig{
@@ -1802,7 +1771,7 @@ const baseConfigTOML = `
 name = "demo"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 mode = "default"
@@ -1819,7 +1788,7 @@ const providerConfigTOML = `
 name = "demo"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 mode = "default"
@@ -1845,7 +1814,7 @@ const feishuConfigFixture = `
 name = "alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/alpha"
@@ -1877,7 +1846,7 @@ const projectWithoutFeishuFixture = `
 name = "beta"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/beta"
@@ -1895,7 +1864,7 @@ name = "beta"
 reset_on_idle_mins = 60
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/beta"
@@ -1913,7 +1882,7 @@ name = "beta"
 reset_on_idle_mins = -1
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/beta"
@@ -1932,7 +1901,7 @@ run_as_user = "partseeker-coder"
 run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/sandboxed"
@@ -1951,7 +1920,7 @@ name = "bad"
 run_as_user = "root"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/bad"
@@ -1970,7 +1939,7 @@ name = "bad"
 run_as_user = "has space"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/bad"
@@ -1988,7 +1957,7 @@ const weixinConfigFixture = `
 name = "alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/alpha"
@@ -2008,7 +1977,7 @@ custom_top = "keep_me"
 name = "alpha"
 
 [projects.agent]
-type = "codex"
+type = "pi"
 
 [projects.agent.options]
 work_dir = "/tmp/alpha"
@@ -2035,7 +2004,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users:     nil,
 				}},
@@ -2047,7 +2016,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users:     &UsersConfig{Roles: map[string]RoleConfig{}},
 				}},
@@ -2059,7 +2028,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -2075,7 +2044,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -2092,7 +2061,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -2109,7 +2078,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "superadmin",
@@ -2126,7 +2095,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						DefaultRole: "member",
@@ -2144,7 +2113,7 @@ func TestValidateUsersConfig(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{{
 					Name:      "p1",
-					Agent:     AgentConfig{Type: "codex"},
+					Agent:     AgentConfig{Type: "pi"},
 					Platforms: []PlatformConfig{{Type: "telegram", Options: map[string]any{"token": "x"}}},
 					Users: &UsersConfig{
 						Roles: map[string]RoleConfig{
@@ -2214,7 +2183,7 @@ func TestPickAgentTemplateForNewProject(t *testing.T) {
 	baseProj := ProjectConfig{
 		Name: "base",
 		Agent: AgentConfig{
-			Type:    "claudecode",
+			Type:    "pi",
 			Options: map[string]any{"mode": "yolo"},
 			Providers: []ProviderConfig{{
 				Name:   "openai",
@@ -2229,8 +2198,8 @@ func TestPickAgentTemplateForNewProject(t *testing.T) {
 		cfg := &Config{Projects: []ProjectConfig{baseProj}}
 		opts := EnsureProjectWithFeishuOptions{CloneFromProject: "base"}
 		got := pickAgentTemplateForNewProject(cfg, opts)
-		if got.Type != "claudecode" {
-			t.Errorf("Type = %q, want claudecode", got.Type)
+		if got.Type != "pi" {
+			t.Errorf("Type = %q, want pi", got.Type)
 		}
 		if len(got.Providers) != 1 || got.Providers[0].APIKey != "sk-test" {
 			t.Errorf("Providers not cloned correctly")
@@ -2241,17 +2210,17 @@ func TestPickAgentTemplateForNewProject(t *testing.T) {
 		cfg := &Config{Projects: []ProjectConfig{baseProj}}
 		opts := EnsureProjectWithFeishuOptions{}
 		got := pickAgentTemplateForNewProject(cfg, opts)
-		if got.Type != "claudecode" {
-			t.Errorf("Type = %q, want claudecode", got.Type)
+		if got.Type != "pi" {
+			t.Errorf("Type = %q, want pi", got.Type)
 		}
 	})
 
-	t.Run("no projects uses default codex", func(t *testing.T) {
+	t.Run("no projects uses default pi", func(t *testing.T) {
 		cfg := &Config{Projects: []ProjectConfig{}}
 		opts := EnsureProjectWithFeishuOptions{}
 		got := pickAgentTemplateForNewProject(cfg, opts)
-		if got.Type != "codex" {
-			t.Errorf("Type = %q, want codex", got.Type)
+		if got.Type != "pi" {
+			t.Errorf("Type = %q, want pi", got.Type)
 		}
 		if got.Options == nil {
 			t.Error("Options should not be nil")
@@ -2260,19 +2229,19 @@ func TestPickAgentTemplateForNewProject(t *testing.T) {
 
 	t.Run("no projects with explicit agent type", func(t *testing.T) {
 		cfg := &Config{Projects: []ProjectConfig{}}
-		opts := EnsureProjectWithFeishuOptions{AgentType: "gemini"}
+		opts := EnsureProjectWithFeishuOptions{AgentType: "pi"}
 		got := pickAgentTemplateForNewProject(cfg, opts)
-		if got.Type != "gemini" {
-			t.Errorf("Type = %q, want gemini", got.Type)
+		if got.Type != "pi" {
+			t.Errorf("Type = %q, want pi", got.Type)
 		}
 	})
 
-	t.Run("explicit agent type overrides clone from first project", func(t *testing.T) {
+	t.Run("explicit pi agent type overrides clone from first project", func(t *testing.T) {
 		cfg := &Config{Projects: []ProjectConfig{baseProj}}
-		opts := EnsureProjectWithFeishuOptions{AgentType: "cursor"}
+		opts := EnsureProjectWithFeishuOptions{AgentType: "pi"}
 		got := pickAgentTemplateForNewProject(cfg, opts)
-		if got.Type != "cursor" {
-			t.Errorf("Type = %q, want cursor (explicit AgentType should take priority over cloning first project)", got.Type)
+		if got.Type != "pi" {
+			t.Errorf("Type = %q, want pi (explicit AgentType should take priority over cloning first project)", got.Type)
 		}
 	})
 }
@@ -2282,12 +2251,12 @@ func TestPickAgentTemplateForNewProject(t *testing.T) {
 func TestCloneAgentConfig(t *testing.T) {
 	t.Run("without providers", func(t *testing.T) {
 		in := AgentConfig{
-			Type:    "codex",
+			Type:    "pi",
 			Options: map[string]any{"mode": "default"},
 		}
 		got := cloneAgentConfig(in)
-		if got.Type != "codex" {
-			t.Errorf("Type = %q, want codex", got.Type)
+		if got.Type != "pi" {
+			t.Errorf("Type = %q, want pi", got.Type)
 		}
 		if got.Options["mode"] != "default" {
 			t.Errorf("Options not cloned")
@@ -2299,7 +2268,7 @@ func TestCloneAgentConfig(t *testing.T) {
 
 	t.Run("with providers", func(t *testing.T) {
 		in := AgentConfig{
-			Type:    "claudecode",
+			Type:    "pi",
 			Options: map[string]any{"work_dir": "/tmp/test"},
 			Providers: []ProviderConfig{
 				{
@@ -2526,7 +2495,7 @@ func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
 
-	err := AddPlatformToProject("sigma", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "/sigma", "gemini")
+	err := AddPlatformToProject("sigma", PlatformConfig{Type: "slack", Options: map[string]any{"token": "x"}}, "/sigma", "pi")
 	if err != nil {
 		t.Fatalf("AddPlatformToProject: %v", err)
 	}
@@ -2538,8 +2507,8 @@ func TestAddPlatformToProject_NewProjectWithAgentTypeAndWorkDir(t *testing.T) {
 	if proj.Name != "sigma" {
 		t.Fatalf("name = %q", proj.Name)
 	}
-	if proj.Agent.Type != "gemini" {
-		t.Fatalf("agent type = %q, want gemini", proj.Agent.Type)
+	if proj.Agent.Type != "pi" {
+		t.Fatalf("agent type = %q, want pi", proj.Agent.Type)
 	}
 	if stringMapValue(proj.Agent.Options, "work_dir") != "/sigma" {
 		t.Fatalf("work_dir = %q", stringMapValue(proj.Agent.Options, "work_dir"))
@@ -2559,8 +2528,8 @@ func TestAddPlatformToProject_NewProjectClonesAgentWhenAgentTypeEmpty(t *testing
 	}
 	cfg := readConfigFixture(t, configPath)
 	proj := cfg.Projects[len(cfg.Projects)-1]
-	if proj.Agent.Type != "codex" {
-		t.Fatalf("agent type = %q, want codex (cloned)", proj.Agent.Type)
+	if proj.Agent.Type != "pi" {
+		t.Fatalf("agent type = %q, want pi (cloned)", proj.Agent.Type)
 	}
 	if stringMapValue(proj.Agent.Options, "work_dir") != "/tmp/alpha" {
 		t.Fatalf("cloned work_dir = %q, want /tmp/alpha", stringMapValue(proj.Agent.Options, "work_dir"))
@@ -2616,7 +2585,7 @@ func TestFormatConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
-	messy := "language = \"en\"   \n\n\n\n[[projects]]\nname = \"test\"\n\n\n[projects.agent]\ntype = \"codex\"\n\n[projects.agent.options]\n\n[[projects.platforms]]\ntype = \"telegram\"\n\n[projects.platforms.options]\ntoken = \"abc\"\n"
+	messy := "language = \"en\"   \n\n\n\n[[projects]]\nname = \"test\"\n\n\n[projects.agent]\ntype = \"pi\"\n\n[projects.agent.options]\n\n[[projects.platforms]]\ntype = \"telegram\"\n\n[projects.platforms.options]\ntoken = \"abc\"\n"
 	os.WriteFile(path, []byte(messy), 0o644)
 
 	if err := FormatConfigFile(path); err != nil {
@@ -2671,14 +2640,14 @@ func TestResolveProviderRefs(t *testing.T) {
 			{
 				Name: "proj-with-refs",
 				Agent: AgentConfig{
-					Type:         "claudecode",
+					Type:         "pi",
 					ProviderRefs: []string{"global-a", "global-b"},
 				},
 			},
 			{
 				Name: "proj-inline-only",
 				Agent: AgentConfig{
-					Type: "codex",
+					Type: "pi",
 					Providers: []ProviderConfig{
 						{Name: "inline-p", APIKey: "inline-key"},
 					},
@@ -2687,7 +2656,7 @@ func TestResolveProviderRefs(t *testing.T) {
 			{
 				Name: "proj-mixed",
 				Agent: AgentConfig{
-					Type:         "claudecode",
+					Type:         "pi",
 					ProviderRefs: []string{"global-a", "global-b"},
 					Providers: []ProviderConfig{
 						{Name: "global-a", APIKey: "override-key", BaseURL: "https://override.com"},
@@ -2741,7 +2710,7 @@ func TestResolveProviderRefs_MissingRef(t *testing.T) {
 			{
 				Name: "proj",
 				Agent: AgentConfig{
-					Type:         "claudecode",
+					Type:         "pi",
 					ProviderRefs: []string{"exists", "nonexistent"},
 				},
 			},
@@ -2756,65 +2725,13 @@ func TestResolveProviderRefs_MissingRef(t *testing.T) {
 	}
 }
 
-func TestResolveProviderRefs_AgentTypeFiltering(t *testing.T) {
-	cfg := &Config{
-		Providers: []ProviderConfig{
-			{Name: "claude-only", APIKey: "key-c", AgentTypes: []string{"claudecode"}},
-			{Name: "codex-only", APIKey: "key-x", AgentTypes: []string{"codex"}},
-			{Name: "universal", APIKey: "key-u"}, // no agent_types = works for all
-		},
-		Projects: []ProjectConfig{
-			{
-				Name: "proj-claude",
-				Agent: AgentConfig{
-					Type:         "claudecode",
-					ProviderRefs: []string{"claude-only", "codex-only", "universal"},
-				},
-			},
-			{
-				Name: "proj-codex",
-				Agent: AgentConfig{
-					Type:         "codex",
-					ProviderRefs: []string{"claude-only", "codex-only", "universal"},
-				},
-			},
-		},
-	}
-
-	cfg.ResolveProviderRefs()
-
-	// claudecode project: gets claude-only + universal, skips codex-only
-	p0 := cfg.Projects[0].Agent.Providers
-	if len(p0) != 2 {
-		t.Fatalf("proj-claude: expected 2 providers, got %d: %+v", len(p0), p0)
-	}
-	if p0[0].Name != "claude-only" {
-		t.Errorf("proj-claude[0]: expected claude-only, got %s", p0[0].Name)
-	}
-	if p0[1].Name != "universal" {
-		t.Errorf("proj-claude[1]: expected universal, got %s", p0[1].Name)
-	}
-
-	// codex project: gets codex-only + universal, skips claude-only
-	p1 := cfg.Projects[1].Agent.Providers
-	if len(p1) != 2 {
-		t.Fatalf("proj-codex: expected 2 providers, got %d: %+v", len(p1), p1)
-	}
-	if p1[0].Name != "codex-only" {
-		t.Errorf("proj-codex[0]: expected codex-only, got %s", p1[0].Name)
-	}
-	if p1[1].Name != "universal" {
-		t.Errorf("proj-codex[1]: expected universal, got %s", p1[1].Name)
-	}
-}
-
 func TestResolveProviderRefs_NoGlobalProviders(t *testing.T) {
 	cfg := &Config{
 		Projects: []ProjectConfig{
 			{
 				Name: "proj",
 				Agent: AgentConfig{
-					Type:         "claudecode",
+					Type:         "pi",
 					ProviderRefs: []string{"foo"},
 					Providers: []ProviderConfig{
 						{Name: "bar", APIKey: "key"},
@@ -2840,7 +2757,7 @@ func TestResolveProviderRefs_Basic(t *testing.T) {
 		Projects: []ProjectConfig{{
 			Name: "proj",
 			Agent: AgentConfig{
-				Type:         "claudecode",
+				Type:         "pi",
 				ProviderRefs: []string{"global1"},
 			},
 		}},
@@ -2853,172 +2770,6 @@ func TestResolveProviderRefs_Basic(t *testing.T) {
 	}
 }
 
-func TestResolveProviderRefs_AgentTypesFilter(t *testing.T) {
-	cfg := &Config{
-		Providers: []ProviderConfig{
-			{Name: "claude-only", AgentTypes: []string{"claudecode"}},
-			{Name: "codex-only", AgentTypes: []string{"codex"}},
-			{Name: "universal"},
-		},
-		Projects: []ProjectConfig{{
-			Name: "codex-proj",
-			Agent: AgentConfig{
-				Type:         "codex",
-				ProviderRefs: []string{"claude-only", "codex-only", "universal"},
-			},
-		}},
-	}
-	cfg.ResolveProviderRefs()
-
-	ps := cfg.Projects[0].Agent.Providers
-	names := make([]string, len(ps))
-	for i, p := range ps {
-		names[i] = p.Name
-	}
-	if len(ps) != 2 {
-		t.Fatalf("expected 2 providers (codex-only + universal), got %v", names)
-	}
-	if names[0] != "codex-only" || names[1] != "universal" {
-		t.Fatalf("unexpected providers: %v", names)
-	}
-}
-
-func TestResolveProviderRefs_EndpointsOverride(t *testing.T) {
-	cfg := &Config{
-		Providers: []ProviderConfig{{
-			Name:    "multi",
-			BaseURL: "https://provider.com/api",
-			Model:   "claude-sonnet-4",
-			Endpoints: map[string]string{
-				"codex": "https://provider.com/api/v1",
-			},
-			AgentModels: map[string]string{
-				"codex": "openai/gpt-5.3-codex",
-			},
-		}},
-		Projects: []ProjectConfig{
-			{
-				Name: "claude-proj",
-				Agent: AgentConfig{
-					Type:         "claudecode",
-					ProviderRefs: []string{"multi"},
-				},
-			},
-			{
-				Name: "codex-proj",
-				Agent: AgentConfig{
-					Type:         "codex",
-					ProviderRefs: []string{"multi"},
-				},
-			},
-		},
-	}
-	cfg.ResolveProviderRefs()
-
-	// claudecode project: should keep original base_url and model
-	cp := cfg.Projects[0].Agent.Providers
-	if len(cp) != 1 {
-		t.Fatalf("claude-proj: expected 1 provider, got %d", len(cp))
-	}
-	if cp[0].BaseURL != "https://provider.com/api" {
-		t.Errorf("claude-proj: base_url = %q, want original", cp[0].BaseURL)
-	}
-	if cp[0].Model != "claude-sonnet-4" {
-		t.Errorf("claude-proj: model = %q, want original", cp[0].Model)
-	}
-
-	// codex project: should have overridden base_url and model
-	xp := cfg.Projects[1].Agent.Providers
-	if len(xp) != 1 {
-		t.Fatalf("codex-proj: expected 1 provider, got %d", len(xp))
-	}
-	if xp[0].BaseURL != "https://provider.com/api/v1" {
-		t.Errorf("codex-proj: base_url = %q, want codex endpoint", xp[0].BaseURL)
-	}
-	if xp[0].Model != "openai/gpt-5.3-codex" {
-		t.Errorf("codex-proj: model = %q, want codex model", xp[0].Model)
-	}
-}
-
-func TestResolveProviderRefs_SplitProviderPattern(t *testing.T) {
-	cfg := &Config{
-		Providers: []ProviderConfig{
-			{
-				Name:       "ssy",
-				APIKey:     "key-xxx",
-				BaseURL:    "https://router.example.com/api",
-				Model:      "claude-sonnet-4-6",
-				AgentTypes: []string{"claudecode", "gemini"},
-				Models: []ProviderModelConfig{
-					{Model: "claude-sonnet-4-6"},
-					{Model: "claude-opus-4"},
-				},
-			},
-			{
-				Name:       "ssy-codex",
-				APIKey:     "key-xxx",
-				BaseURL:    "https://router.example.com/api/v1",
-				Model:      "openai/gpt-5.3-codex",
-				AgentTypes: []string{"codex"},
-				Models: []ProviderModelConfig{
-					{Model: "openai/gpt-5.3-codex"},
-					{Model: "openai/gpt-5.4"},
-				},
-				Codex: &CodexProviderConfig{WireAPI: "responses"},
-			},
-		},
-		Projects: []ProjectConfig{
-			{
-				Name: "my-claude",
-				Agent: AgentConfig{
-					Type:         "claudecode",
-					ProviderRefs: []string{"ssy", "ssy-codex"},
-				},
-			},
-			{
-				Name: "my-codex",
-				Agent: AgentConfig{
-					Type:         "codex",
-					ProviderRefs: []string{"ssy", "ssy-codex"},
-				},
-			},
-		},
-	}
-	cfg.ResolveProviderRefs()
-
-	// claudecode project should only get "ssy" (not ssy-codex)
-	cp := cfg.Projects[0].Agent.Providers
-	if len(cp) != 1 || cp[0].Name != "ssy" {
-		names := make([]string, len(cp))
-		for i, p := range cp {
-			names[i] = p.Name
-		}
-		t.Fatalf("claude project: expected [ssy], got %v", names)
-	}
-	if len(cp[0].Models) != 2 || cp[0].Models[0].Model != "claude-sonnet-4-6" {
-		t.Errorf("claude project: unexpected models: %+v", cp[0].Models)
-	}
-
-	// codex project should only get "ssy-codex" (not ssy)
-	xp := cfg.Projects[1].Agent.Providers
-	if len(xp) != 1 || xp[0].Name != "ssy-codex" {
-		names := make([]string, len(xp))
-		for i, p := range xp {
-			names[i] = p.Name
-		}
-		t.Fatalf("codex project: expected [ssy-codex], got %v", names)
-	}
-	if xp[0].BaseURL != "https://router.example.com/api/v1" {
-		t.Errorf("codex project: base_url = %q", xp[0].BaseURL)
-	}
-	if xp[0].Model != "openai/gpt-5.3-codex" {
-		t.Errorf("codex project: model = %q", xp[0].Model)
-	}
-	if xp[0].Codex == nil || xp[0].Codex.WireAPI != "responses" {
-		t.Errorf("codex project: codex config missing or wrong: %+v", xp[0].Codex)
-	}
-}
-
 func TestResolveProviderRefs_InlineOverridesGlobal(t *testing.T) {
 	cfg := &Config{
 		Providers: []ProviderConfig{
@@ -3027,7 +2778,7 @@ func TestResolveProviderRefs_InlineOverridesGlobal(t *testing.T) {
 		Projects: []ProjectConfig{{
 			Name: "proj",
 			Agent: AgentConfig{
-				Type:         "claudecode",
+				Type:         "pi",
 				ProviderRefs: []string{"global1"},
 				Providers: []ProviderConfig{
 					{Name: "global1", BaseURL: "https://override.com", Model: "override-model"},
@@ -3046,82 +2797,6 @@ func TestResolveProviderRefs_InlineOverridesGlobal(t *testing.T) {
 	}
 }
 
-func TestResolveProviderRefs_TOMLParsing(t *testing.T) {
-	input := `
-[[providers]]
-  name = "ssy"
-  api_key = "key123"
-  base_url = "https://router.example.com/api"
-  model = "claude-sonnet-4-6"
-  agent_types = ["claudecode", "gemini"]
-
-  [[providers.models]]
-    model = "claude-sonnet-4-6"
-
-[[providers]]
-  name = "ssy-codex"
-  api_key = "key123"
-  base_url = "https://router.example.com/api/v1"
-  model = "openai/gpt-5.3-codex"
-  agent_types = ["codex"]
-
-  [providers.endpoints]
-    codex = "https://router.example.com/api/v1"
-
-  [providers.agent_models]
-    codex = "openai/gpt-5.3-codex"
-
-  [[providers.models]]
-    model = "openai/gpt-5.3-codex"
-
-  [providers.codex]
-    wire_api = "responses"
-
-[[projects]]
-  name = "test-codex"
-
-  [projects.agent]
-    type = "codex"
-    provider_refs = ["ssy", "ssy-codex"]
-
-  [[projects.platforms]]
-    type = "feishu"
-    [projects.platforms.options]
-      app_id = "test"
-      app_secret = "test"
-`
-	var cfg Config
-	if _, err := toml.Decode(input, &cfg); err != nil {
-		t.Fatalf("TOML decode: %v", err)
-	}
-
-	if len(cfg.Providers) != 2 {
-		t.Fatalf("expected 2 global providers, got %d", len(cfg.Providers))
-	}
-
-	codexProv := cfg.Providers[1]
-	if codexProv.Codex == nil {
-		t.Fatal("ssy-codex: codex config not parsed")
-	}
-	if codexProv.Codex.WireAPI != "responses" {
-		t.Errorf("ssy-codex: wire_api = %q, want responses", codexProv.Codex.WireAPI)
-	}
-	if codexProv.Endpoints["codex"] != "https://router.example.com/api/v1" {
-		t.Errorf("ssy-codex: endpoints not parsed: %+v", codexProv.Endpoints)
-	}
-
-	cfg.ResolveProviderRefs()
-
-	ps := cfg.Projects[0].Agent.Providers
-	if len(ps) != 1 || ps[0].Name != "ssy-codex" {
-		names := make([]string, len(ps))
-		for i, p := range ps {
-			names[i] = p.Name
-		}
-		t.Fatalf("expected [ssy-codex], got %v", names)
-	}
-}
-
 func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 	input := `
 [[providers]]
@@ -3135,7 +2810,7 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 [[projects]]
   name = "proj1"
   [projects.agent]
-    type = "claudecode"
+    type = "pi"
     provider_refs = ["prov-a", "prov-b"]
   [[projects.platforms]]
     type = "feishu"
@@ -3146,7 +2821,7 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 [[projects]]
   name = "proj2"
   [projects.agent]
-    type = "codex"
+    type = "pi"
     provider_refs = ["prov-a"]
   [[projects.platforms]]
     type = "telegram"

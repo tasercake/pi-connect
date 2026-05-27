@@ -23,39 +23,25 @@ PLATFORMS := \
 # ---------------------------------------------------------------------------
 # Selective compilation via build tags.
 #
-# By default all agents and platforms are included. To build with only
-# specific ones, set AGENTS and/or PLATFORMS_INCLUDE:
+# Pi is always included. To build with only specific platforms, set
+# PLATFORMS_INCLUDE:
 #
-#   make build AGENTS=claudecode PLATFORMS_INCLUDE=feishu,telegram
-#
-# You can also exclude specific ones:
-#
-#   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
+#   make build PLATFORMS_INCLUDE=feishu,telegram
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp claudecode codex cursor devin gemini iflow kimi opencode pi qoder
+ALL_AGENTS    := pi
 ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max
 ALL_EXTRAS    := web
 
 COMMA := ,
 
-# Compute exclusion tags from AGENTS / PLATFORMS_INCLUDE / EXCLUDE variables
+# Compute exclusion tags from PLATFORMS_INCLUDE.
 _EXCLUDE_TAGS :=
-
-ifdef AGENTS
-  _WANTED_AGENTS := $(subst $(COMMA), ,$(AGENTS))
-  _EXCLUDE_AGENTS := $(filter-out $(_WANTED_AGENTS),$(ALL_AGENTS))
-  _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_AGENTS))
-endif
 
 ifdef PLATFORMS_INCLUDE
   _WANTED_PLATFORMS := $(subst $(COMMA), ,$(PLATFORMS_INCLUDE))
   _EXCLUDE_PLATFORMS := $(filter-out $(_WANTED_PLATFORMS),$(ALL_PLATFORMS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_PLATFORMS))
-endif
-
-ifdef EXCLUDE
-  _EXCLUDE_TAGS += $(addprefix no_,$(subst $(COMMA), ,$(EXCLUDE)))
 endif
 
 ifdef NO_WEB

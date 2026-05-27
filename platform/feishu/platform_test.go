@@ -912,7 +912,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	payload := core.BuildProgressCardPayloadV2([]core.ProgressCardEntry{
 		{Kind: core.ProgressEntryThinking, Text: "planning"},
 		{Kind: core.ProgressEntryToolUse, Tool: "Bash", Text: "pwd"},
-	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
+	}, false, "Pi", core.LangEnglish, core.ProgressCardStateRunning)
 	if payload == "" {
 		t.Fatal("BuildProgressCardPayload returned empty payload")
 	}
@@ -921,7 +921,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
 		t.Fatalf("card JSON should not leak payload prefix, got %q", cardJSON)
 	}
-	if !strings.Contains(cardJSON, "Codex · Running") {
+	if !strings.Contains(cardJSON, "Pi · Running") {
 		t.Fatalf("card JSON should contain progress title, got %q", cardJSON)
 	}
 	if strings.Contains(cardJSON, "\"tag\":\"note\"") {

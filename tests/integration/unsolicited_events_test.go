@@ -18,7 +18,7 @@ import (
 // Integration tests: unsolicited agent events (background task completion)
 //
 // Covers the end-to-end flow for events that an agent emits AFTER a user's
-// turn has completed — e.g. a Claude Code `run_in_background` bash task
+// turn has completed — e.g. a Pi `run_in_background` bash task
 // finishing minutes later. Without the unsolicited reader, those events
 // pile up in the buffered channel and get discarded by drainEvents() on
 // the next user message.
@@ -27,7 +27,7 @@ import (
 // persistentEventsSession is an AgentSession with a long-lived events channel
 // that stays open across turns. Unlike FakeAgentSession (which returns a new
 // closed channel per Events() call), this is required to model the real
-// Claude Code behavior where one channel spans multiple turns.
+// Pi behavior where one channel spans multiple turns.
 type persistentEventsSession struct {
 	mu        sync.Mutex
 	sessionID string

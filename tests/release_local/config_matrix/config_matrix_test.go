@@ -27,7 +27,7 @@ data_dir = "` + filepath.ToSlash(os.TempDir()) + `/cc-connect-release-test"
 name = "release"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 work_dir = "/tmp/cc-connect-release-work"
 
 [[projects.platforms]]
@@ -60,7 +60,7 @@ thinking_max_len = 111
 tool_max_len = 222
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 work_dir = "/tmp/cc-connect-release-work"
 
 [[projects.platforms]]
@@ -142,7 +142,7 @@ thinking_messages = false
 tool_messages = false
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 work_dir = "/tmp/cc-connect-release-work"
 
 [[projects.platforms]]
@@ -213,7 +213,7 @@ name = "release"
 mode = "verbose"
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 work_dir = "/tmp/cc-connect-release-work"
 
 [[projects.platforms]]
@@ -231,7 +231,7 @@ name = "release"
 reset_on_idle_mins = -1
 
 [projects.agent]
-type = "claudecode"
+type = "pi"
 work_dir = "/tmp/cc-connect-release-work"
 
 [[projects.platforms]]

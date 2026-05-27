@@ -1,5 +1,5 @@
-name: Platform / Agent Support Request
-description: Request support for a new messaging platform or AI agent
+name: Platform Support Request
+description: Request support for a new messaging platform
 title: "[Support Request] "
 labels: ["new-integration"]
 
@@ -7,23 +7,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        Want cc-connect to support a new messaging platform or AI coding agent? Let us know!
-
-  - type: dropdown
-    id: type
-    attributes:
-      label: Request Type
-      options:
-        - New Platform (messaging app)
-        - New Agent (AI coding assistant)
-    validations:
-      required: true
+        Want cc-connect to support a new messaging platform? Let us know!
 
   - type: input
     id: name
     attributes:
-      label: Platform / Agent Name
-      placeholder: "e.g. Microsoft Teams, WhatsApp, Aider, etc."
+      label: Platform Name
+      placeholder: "e.g. Microsoft Teams, WhatsApp, etc."
     validations:
       required: true
 
@@ -31,7 +21,7 @@ body:
     id: description
     attributes:
       label: Description
-      description: Brief description of the platform/agent and why you'd like it supported.
+      description: Brief description of the platform and why you'd like it supported.
     validations:
       required: true
 
@@ -51,7 +41,7 @@ body:
   - type: dropdown
     id: connection
     attributes:
-      label: Connection Type (for platforms)
+      label: Connection Type
       description: If known, what type of connection does this platform support for bots?
       options:
         - WebSocket (no public IP needed)
@@ -59,7 +49,6 @@ body:
         - Stream / SSE (no public IP needed)
         - Webhook (public URL required)
         - Unknown / Not sure
-        - N/A (agent request)
     validations:
       required: false
 

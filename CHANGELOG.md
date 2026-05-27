@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Strip down this fork to the Pi agent only and remove metadata for other agent integrations.
+
 ## v1.3.3-beta.2 (2026-05-09)
 
 Beta release with Slack Assistant API, DingTalk improvements, MAX platform webhook mode, and numerous platform fixes. No breaking changes.
