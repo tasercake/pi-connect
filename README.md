@@ -10,10 +10,6 @@
 
 **Pi-only agent bridge** – This fork focuses on Pi and keeps the platform bridge simple.
 
-<p align="center">
-  <img src="docs/images/connector.png" alt="CC-Connect Architecture" width="90%"/>
-</p>
-
 ## 🧩 Platform feature snapshot
 
 High-level view of what each **built-in platform** can do in cc-connect.
