@@ -3329,7 +3329,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			case EventError:
 				if event.Error != nil {
 					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					e.send(p, replyCtx, e.userFacingAgentError(event.Error))
 				}
 				if eventErrorIsTerminal(agentSession, event.Error) {
 					e.notifyDroppedQueuedMessages(state, event.Error)
@@ -3362,6 +3362,66 @@ type agentErrorHandler struct {
 
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
+}
+
+func (e *Engine) userFacingAgentError(err error) string {
+	if err == nil {
+		return e.i18n.Tf(MsgError, "agent error")
+	}
+	errMsg := strings.TrimSpace(err.Error())
+	for _, h := range agentErrorHandlers {
+		if strings.Contains(errMsg, h.contains) {
+			return e.i18n.T(h.msgKey)
+		}
+	}
+	if isTemporaryAgentFailure(errMsg) {
+		return e.i18n.T(MsgAgentTemporarilyUnavailable)
+	}
+	return e.i18n.Tf(MsgError, stripAgentDiagnostics(errMsg))
+}
+
+func isTemporaryAgentFailure(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "operation timed out") ||
+		strings.Contains(lower, "catalog fetch failed") ||
+		strings.Contains(lower, "context deadline exceeded") ||
+		strings.Contains(lower, "provider_transport_failure") ||
+		(strings.Contains(lower, "provider") && (strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout"))) ||
+		(strings.Contains(lower, "websocket closed") && strings.Contains(lower, "connection ended"))
+}
+
+func stripAgentDiagnostics(msg string) string {
+	msg = strings.TrimSpace(msg)
+	for strings.HasSuffix(msg, "]") {
+		start := strings.LastIndex(msg, " [")
+		if start < 0 {
+			break
+		}
+		block := msg[start+2 : len(msg)-1]
+		if !isAgentDiagnosticBlock(block) {
+			break
+		}
+		msg = strings.TrimSpace(msg[:start])
+	}
+	if msg == "" {
+		return "agent error"
+	}
+	return msg
+}
+
+func isAgentDiagnosticBlock(block string) bool {
+	fields := strings.Split(block, ",")
+	if len(fields) == 0 {
+		return false
+	}
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		parts := strings.SplitN(field, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
@@ -3484,7 +3544,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				e.send(p, replyCtx, e.userFacingAgentError(err))
 				return
 			}
 			continue
@@ -4392,7 +4452,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			if event.Error != nil {
-				errMsg := event.Error.Error()
 				slog.Error("agent error", "error", event.Error)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventError,
@@ -4400,14 +4459,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
-					}
-				}
-				e.send(p, replyCtx, userMsg)
+				e.send(p, replyCtx, e.userFacingAgentError(event.Error))
 			}
 			// Only drop queued messages if the agent session is terminal/dead.
 			// Some agents emit EventError for per-turn failures
@@ -4538,7 +4590,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+		e.send(q.platform, q.replyCtx, e.userFacingAgentError(reason))
 	}
 }
 
@@ -8072,7 +8124,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	if compactor, ok := state.agentSession.(ContextCompactingSession); ok {
 		if err := compactor.CompactContext(); err != nil {
 			if !auto {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				e.reply(p, replyCtx, e.userFacingAgentError(err))
 			}
 			if !state.agentSession.Alive() {
 				e.cleanupInteractiveState(iKey)
@@ -8098,7 +8150,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	cmd := compressor.CompressCommand()
 	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
 		if !auto {
-			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			e.reply(p, replyCtx, e.userFacingAgentError(err))
 		}
 		if !state.agentSession.Alive() {
 			e.cleanupInteractiveState(iKey)
@@ -8211,7 +8263,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			return
 		case EventError:
 			if !auto && event.Error != nil {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				e.reply(p, replyCtx, e.userFacingAgentError(event.Error))
 			}
 			// Only drop queued messages if the agent is terminal/dead; some agents
 			// emit per-turn EventError while staying alive.

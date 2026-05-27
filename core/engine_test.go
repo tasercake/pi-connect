@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -6480,6 +6483,149 @@ func TestProcessInteractiveEvents_TerminalEventErrorClosesStateAndNotifiesQueued
 	}
 }
 
+func TestStripAgentDiagnostics(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "stop reason", in: "boom [stopReason=error]", want: "boom"},
+		{name: "multiple fields", in: "boom [phase=send, request_id=abc]", want: "boom"},
+		{name: "multiple blocks", in: "boom [phase=send] [stopReason=error]", want: "boom"},
+		{name: "human brackets", in: "boom [not diagnostic]", want: "boom [not diagnostic]"},
+		{name: "unchanged", in: "boom", want: "boom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripAgentDiagnostics(tc.in); got != tc.want {
+				t.Fatalf("stripAgentDiagnostics(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessInteractiveEvents_SanitizesPiTimeoutEventError(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	sess := newTerminalEventErrorSession("timeout-fg", false)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "telegram:timeout-fg:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sess.events <- Event{Type: EventError, Error: errors.New("The operation timed out. [stopReason=error]")}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %v, want one", sent)
+	}
+	want := e.i18n.T(MsgAgentTemporarilyUnavailable)
+	if sent[0] != want {
+		t.Fatalf("sent[0] = %q, want %q", sent[0], want)
+	}
+	if strings.Contains(sent[0], "stopReason") || strings.Contains(sent[0], "The operation timed out") {
+		t.Fatalf("sent message leaked raw diagnostic: %q", sent[0])
+	}
+}
+
+func TestProcessInteractiveEvents_PreservesRawAgentErrorInHook(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	sess := newTerminalEventErrorSession("timeout-hook", false)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	received := make(chan HookEvent, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var evt HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+			t.Errorf("decode hook event: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received <- evt
+	}))
+	defer srv.Close()
+	async := false
+	e.SetHooks(NewHookManager("test", []HookConfig{{Event: string(HookEventError), Type: string(HookHandlerHTTP), URL: srv.URL, Async: &async}}))
+
+	key := "telegram:timeout-hook:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	raw := "The operation timed out. [stopReason=error]"
+	sess.events <- Event{Type: EventError, Error: errors.New(raw)}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, nil)
+
+	select {
+	case evt := <-received:
+		if evt.Error != raw {
+			t.Fatalf("hook error = %q, want raw %q", evt.Error, raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for hook event")
+	}
+}
+
+func TestProcessInteractiveEvents_SanitizesPromptSendTimeoutError(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	sess := newControllableSession("timeout-send")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "telegram:timeout-send:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sendDone := make(chan error, 1)
+	sendDone <- errors.New("catalog fetch failed: The operation timed out. [stopReason=error]")
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, sendDone, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %v, want one", sent)
+	}
+	if sent[0] != e.i18n.T(MsgAgentTemporarilyUnavailable) {
+		t.Fatalf("sent[0] = %q, want temporary unavailable", sent[0])
+	}
+	if strings.Contains(sent[0], "stopReason") || strings.Contains(sent[0], "catalog fetch failed") {
+		t.Fatalf("sent message leaked raw send error: %q", sent[0])
+	}
+}
+
+func TestProcessInteractiveEvents_SessionNotFoundStillFriendly(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	sess := newTerminalEventErrorSession("session-not-found", false)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "telegram:session-not-found:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	sess.events <- Event{Type: EventError, Error: errors.New("Session not found: abc")}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, nil)
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgSessionNotFound) {
+		t.Fatalf("sent messages = %v, want %q", sent, e.i18n.T(MsgSessionNotFound))
+	}
+}
+
 func TestProcessInteractiveEvents_NonTerminalEventErrorPreservesAliveState(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newTerminalEventErrorSession("nonterminal-fg", false)
@@ -6675,8 +6821,9 @@ func TestProcessInteractiveEvents_DropsQueuedMessagesWhenErrorMarksSessionDead(t
 	if len(sent) != 2 {
 		t.Fatalf("sent messages = %v, want current error and queued drop notification", sent)
 	}
-	if !strings.Contains(sent[0], "WebSocket closed 1006") || !strings.Contains(sent[1], "WebSocket closed 1006") {
-		t.Fatalf("sent messages do not include terminal error: %v", sent)
+	want := e.i18n.T(MsgAgentTemporarilyUnavailable)
+	if sent[0] != want || sent[1] != want {
+		t.Fatalf("sent messages = %v, want sanitized terminal errors %q", sent, want)
 	}
 }
 
