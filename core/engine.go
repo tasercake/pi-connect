@@ -236,7 +236,7 @@ type Engine struct {
 	showContextIndicator bool
 	replyFooterEnabled   bool
 
-	// When true, /list etc. only show sessions tracked by cc-connect,
+	// When true, /list etc. only show sessions tracked by pi-connect,
 	// hiding sessions created by direct CLI usage in the same work_dir.
 	// Default false = show all sessions.
 	filterExternalSessions bool
@@ -610,7 +610,7 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 // prepended to each message before forwarding it to the agent. When enabled,
 // the agent receives a preamble line like:
 //
-//	[cc-connect sender_id=ou_abc123 platform=feishu]
+//	[pi-connect sender_id=ou_abc123 platform=feishu]
 //
 // This allows the agent to identify who sent the message and adjust behavior
 // accordingly (e.g. personal task views, role-based access control).
@@ -2662,7 +2662,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// this, per-workspace agents silently bypass the project-level
 	// run_as_user config because their opts map is freshly constructed
 	// above, not inherited from the project-level opts that main.go
-	// already decorated. See cc-connect#496 and the cc-connect/core/runas.go
+	// already decorated. See pi-connect#496 and the pi-connect/core/runas.go
 	// preamble for why run_as_user has to survive this copy.
 	if _, ok := opts["run_as_user"]; !ok {
 		if ma, ok := e.agent.(interface{ GetRunAsUser() string }); ok {
@@ -2796,7 +2796,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		ccKey = ccSessionKey
 	}
 
-	// Inject per-session env vars so the agent subprocess can call `cc-connect cron add` etc.
+	// Inject per-session env vars so the agent subprocess can call `pi-connect cron add` etc.
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
@@ -4937,7 +4937,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			e.executeSkill(p, msg, skill, args)
 			return true
 		}
-		// Not a cc-connect command — notify user, then fall through to agent
+		// Not a pi-connect command — notify user, then fall through to agent
 		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
 		return false
 	}
@@ -5210,7 +5210,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 // applySessionFilter conditionally filters agent sessions based on the
 // filter_external_sessions config. When disabled (default), all sessions are
-// returned. When enabled, only sessions tracked by cc-connect are shown.
+// returned. When enabled, only sessions tracked by pi-connect are shown.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
 	if !e.filterExternalSessions {
 		return sessions
@@ -5218,7 +5218,7 @@ func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionMana
 	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
 }
 
-// filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
+// filterOwnedSessions removes agent sessions that are not tracked by pi-connect's
 // session manager. This prevents external CLI sessions in the same work_dir from
 // appearing in /list, /switch, /delete, etc. If the session manager has no tracked
 // agent sessions at all (e.g. first run), all sessions are returned unfiltered.
@@ -13019,7 +13019,7 @@ func (e *Engine) cmdBindStatus(p Platform, replyCtx any, chatID string) {
 	e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgRelayBound), strings.Join(parts, " ↔ ")))
 }
 
-const ccConnectInstructionMarker = "<!-- cc-connect-instructions -->"
+const ccConnectInstructionMarker = "<!-- pi-connect-instructions -->"
 
 type setupResult int
 
@@ -13111,9 +13111,9 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 	}
 	if userName != "" {
 		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
-		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
+		return fmt.Sprintf("[pi-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
 	}
-	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+	return fmt.Sprintf("[pi-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
 func extractChannelID(sessionKey string) string {

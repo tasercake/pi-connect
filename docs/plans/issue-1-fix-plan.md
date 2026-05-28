@@ -1,10 +1,10 @@
-# Issue #1 fix plan: prevent quiet Pi JSON turns from tripping cc-connect idle watchdog
+# Issue #1 fix plan: prevent quiet Pi JSON turns from tripping pi-connect idle watchdog
 
 ## Problem
 
-Pi JSON sessions can stay legitimately quiet for longer than `idle_timeout_mins` while the Pi subprocess is still alive (for example, long model/tool/subagent work with no stdout NDJSON). `core.Engine.processInteractiveEvents` treats "no cc-connect-visible agent events" as a hung session and kills the interactive state after the default 2h.
+Pi JSON sessions can stay legitimately quiet for longer than `idle_timeout_mins` while the Pi subprocess is still alive (for example, long model/tool/subagent work with no stdout NDJSON). `core.Engine.processInteractiveEvents` treats "no pi-connect-visible agent events" as a hung session and kills the interactive state after the default 2h.
 
-Existing config escape hatch (`idle_timeout_mins = 0`) works, but disables stuck-session protection globally. Minimal code fix should make cc-connect see process-alive progress for Pi JSON turns without changing platform UX.
+Existing config escape hatch (`idle_timeout_mins = 0`) works, but disables stuck-session protection globally. Minimal code fix should make pi-connect see process-alive progress for Pi JSON turns without changing platform UX.
 
 ## Minimal surgical fix
 
@@ -81,7 +81,7 @@ Add a synthetic, non-user-visible heartbeat event emitted by the Pi JSON adapter
 
 ## Risks / tradeoffs
 
-- Main risk: a Pi child process that is alive but internally wedged will now keep resetting cc-connect's inter-agent-event watchdog forever. This is narrower than setting `idle_timeout_mins = 0` globally, but it does weaken stuck-child detection for Pi JSON turns.
+- Main risk: a Pi child process that is alive but internally wedged will now keep resetting pi-connect's inter-agent-event watchdog forever. This is narrower than setting `idle_timeout_mins = 0` globally, but it does weaken stuck-child detection for Pi JSON turns.
 - Mitigation: heartbeat only in `agent/pi` JSON adapter, not all agents. Operators can still kill sessions manually. Future improvement can add a separate per-turn max wall-clock timeout or process-health watchdog.
 - Heartbeat events must remain non-user-visible. Do not map them to `EventThinking` or text; that would spam platforms and alter UX.
 - Keep interval comfortably below default 2h; `1m` is low overhead and testable.
@@ -89,7 +89,7 @@ Add a synthetic, non-user-visible heartbeat event emitted by the Pi JSON adapter
 
 ## pi-extensions scope
 
-Out of scope. This issue is in cc-connect's Pi JSON transport + engine watchdog interaction. `pi-extensions` and Pi RPC slash-command extension behavior do not need changes for the minimal fix. RPC transport may later benefit from a similar heartbeat if it has the same quiet-period behavior, but local production evidence points at JSON transport.
+Out of scope. This issue is in pi-connect's Pi JSON transport + engine watchdog interaction. `pi-extensions` and Pi RPC slash-command extension behavior do not need changes for the minimal fix. RPC transport may later benefit from a similar heartbeat if it has the same quiet-period behavior, but local production evidence points at JSON transport.
 
 ## Non-goals
 

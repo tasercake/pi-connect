@@ -38,7 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 // piRPCSession is the long-lived analogue of piSession.
@@ -309,7 +309,7 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("extension %s: %s", filepath.Base(extPath), errMsg)})
 	case "turn_end":
 		// A single prompt can produce multiple turns (assistant -> tools -> assistant).
-		// Do not mark the cc-connect turn complete until agent_end, otherwise the
+		// Do not mark the pi-connect turn complete until agent_end, otherwise the
 		// foreground handler sends an early "(empty response)" and the remaining
 		// assistant text is relayed later by the unsolicited reader.
 	case "compaction_start", "compaction_end":

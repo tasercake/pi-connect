@@ -3,7 +3,7 @@ package telegram
 // Long-message handling for Telegram.
 //
 // Telegram rejects messages over 4096 UTF-16 code units per `sendMessage` call
-// with `Bad Request: message is too long`. Until this file existed, cc-connect
+// with `Bad Request: message is too long`. Until this file existed, pi-connect
 // just propagated that error up and the user never saw the reply.
 //
 // We do two things here:
@@ -31,7 +31,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"

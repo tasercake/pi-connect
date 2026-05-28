@@ -1,8 +1,8 @@
 # ============================================================================
 # Binary outputs
 # ============================================================================
-/cc-connect
-cc-connect.bak-*
+/pi-connect
+pi-connect.bak-*
 *.exe
 *.exe~
 *.dll
@@ -47,7 +47,7 @@ config.*.toml
 *.toml.lock
 
 # CC-Connect runtime state
-.cc-connect/
+.pi-connect/
 
 # npm / pnpm (for npm package distribution and web admin)
 .npmrc

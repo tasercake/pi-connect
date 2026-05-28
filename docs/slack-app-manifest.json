@@ -111,7 +111,7 @@
       },
       {
         "command": "/version",
-        "description": "Show cc-connect version",
+        "description": "Show pi-connect version",
         "should_escape": false
       },
       {
@@ -185,7 +185,7 @@
       },
       {
         "command": "/restart",
-        "description": "Restart cc-connect service",
+        "description": "Restart pi-connect service",
         "should_escape": false
       },
       {

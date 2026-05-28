@@ -3,20 +3,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml">
-    <img src="https://github.com/chenhg5/cc-connect/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
+  <a href="https://github.com/tasercake/pi-connect/actions/workflows/ci.yml">
+    <img src="https://github.com/tasercake/pi-connect/actions/workflows/ci.yml/badge.svg" alt="CI Status"/>
   </a>
-  <a href="https://github.com/chenhg5/cc-connect/releases">
-    <img src="https://img.shields.io/github/v/release/chenhg5/cc-connect?include_prereleases" alt="Release"/>
+  <a href="https://github.com/tasercake/pi-connect/releases">
+    <img src="https://img.shields.io/github/v/release/tasercake/pi-connect?include_prereleases" alt="Release"/>
   </a>
-  <a href="https://www.npmjs.com/package/cc-connect">
-    <img src="https://img.shields.io/npm/dm/cc-connect?logo=npm" alt="npm downloads"/>
+  <a href="https://www.npmjs.com/package/pi-connect">
+    <img src="https://img.shields.io/npm/dm/pi-connect?logo=npm" alt="npm downloads"/>
   </a>
-  <a href="https://github.com/chenhg5/cc-connect/blob/main/LICENSE">
+  <a href="https://github.com/tasercake/pi-connect/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"/>
   </a>
-  <a href="https://goreportcard.com/report/github.com/chenhg5/cc-connect">
-    <img src="https://goreportcard.com/badge/github.com/chenhg5/cc-connect" alt="Go Report Card"/>
+  <a href="https://goreportcard.com/report/github.com/tasercake/pi-connect">
+    <img src="https://goreportcard.com/badge/github.com/tasercake/pi-connect" alt="Go Report Card"/>
   </a>
 </p>
 
@@ -35,7 +35,7 @@
 
 <p align="center">
   <a href="https://trendshift.io/repositories/23266" target="_blank">
-    <img src="https://trendshift.io/api/badge/repositories/23266" alt="chenhg5/cc-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
+    <img src="https://trendshift.io/api/badge/repositories/23266" alt="tasercake/pi-connect | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
   </a>
 </p>
 
@@ -60,7 +60,7 @@
 </p>
 
 <p align="center">
-  cc-connect 把运行在你机器上的 Pi 桥接到你日常使用的即时通讯工具。<br/>
+  pi-connect 把运行在你机器上的 Pi 桥接到你日常使用的即时通讯工具。<br/>
   代码审查、资料研究、自动化任务、数据分析 —— 只要 Pi 能做的事，<br/>
   都能通过手机、平板或任何有聊天应用的设备来完成。
 </p>
@@ -72,7 +72,7 @@
 
 ## 🆕 v1.3.0 更新了什么
 
-- **🌐 Web 管理后台（推荐）** — 内置全功能可视化管理界面，**无需额外依赖**。支持项目增删改查、服务商管理、会话监控、定时任务编辑，还可以**直接在浏览器里和 Pi 对话**。支持 5 种语言 (en/zh/zh-TW/ja/es)。建议通过 Web UI 管理 cc-connect，无需手动编辑 `config.toml`。运行 `cc-connect web` 配置并打开管理后台，然后运行 `cc-connect` 启动服务。
+- **🌐 Web 管理后台（推荐）** — 内置全功能可视化管理界面，**无需额外依赖**。支持项目增删改查、服务商管理、会话监控、定时任务编辑，还可以**直接在浏览器里和 Pi 对话**。支持 5 种语言 (en/zh/zh-TW/ja/es)。建议通过 Web UI 管理 pi-connect，无需手动编辑 `config.toml`。运行 `pi-connect web` 配置并打开管理后台，然后运行 `pi-connect` 启动服务。
 - **生命周期事件钩子** — 新增 `[[hooks]]` 配置，支持在消息收发、会话开始/结束、定时任务触发、权限请求、错误等事件时触发 Shell 命令或 HTTP Webhook。默认异步，失败不阻塞。
 - **技能管理** — 新增 `/skills` 页面，支持本地技能浏览和推荐预设。
 - **全局服务商管理** — 在 Web UI 中添加/编辑/删除 Provider，支持从 cc-switch 配置导入。
@@ -84,13 +84,13 @@
 
 ## 🧩 平台能力一览
 
-内置各渠道在 cc-connect 里的大致能力对照，方便快速对比。
+内置各渠道在 pi-connect 里的大致能力对照，方便快速对比。
 
 **图例**
 
 | 符号 | 含义 |
 |------|------|
-| ✅ | **稳定版** cc-connect + 常规配置下可用 |
+| ✅ | **稳定版** pi-connect + 常规配置下可用 |
 | ⚠️ | 部分支持、需额外配置（如语音/STT）或受厂商接口 / 应用类型限制 |
 | ❌ | 不支持或实际不可用 |
 
@@ -111,7 +111,7 @@
 > 分平台接入步骤见下文 [平台接入指南](#-平台接入指南)。
 
 
-## ✨ 为什么选择 cc-connect？
+## ✨ 为什么选择 pi-connect？
 
 ### 🤖 Pi Agent 支持
 **Pi-only agent bridge** — 此 fork 专注于 Pi，并保持平台桥接层简单。
@@ -134,7 +134,7 @@
 **定时任务** — 自然语言创建 cron 任务。"每天早上6点总结 GitHub trending" 即刻生效。
 
 ### 🎤 多模态支持
-**语音 & 图片** — 发语音或截图，cc-connect 自动处理 STT/TTS 和多模态转发。
+**语音 & 图片** — 发语音或截图，pi-connect 自动处理 STT/TTS 和多模态转发。
 
 ### 📦 多项目架构
 **多项目管理** — 一个进程同时管理多个项目，各自独立的 Pi + 平台组合。
@@ -144,9 +144,9 @@
 
 
 <p align="center">
-  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-telegram.JPG" alt="Telegram" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
+  <img src="docs/images/screenshot/pi-connect-lark.JPG" alt="飞书" width="32%" />
+  <img src="docs/images/screenshot/pi-connect-telegram.JPG" alt="Telegram" width="32%" />
+  <img src="docs/images/screenshot/pi-connect-wechat.JPG" alt="微信" width="32%" />
 </p>
 <p align="center">
   <em>左：飞书 &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; 右：微信</em>
@@ -160,7 +160,7 @@
 > **最简单的方式** — 把这段话发给 Pi，它会帮你完成整个安装和配置过程：
 
 ```bash
-请参考 https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md 帮我安装和配置 cc-connect
+请参考 https://raw.githubusercontent.com/tasercake/pi-connect/refs/heads/main/INSTALL.md 帮我安装和配置 pi-connect
 ```
 
 
@@ -169,54 +169,54 @@
 **通过 npm：**
 
 ```bash
-# npm install -g cc-connect
+# npm install -g pi-connect
 ```
 
 **通过 Homebrew（macOS / Linux）：**
 
 ```bash
-brew install cc-connect
+brew install pi-connect
 ```
 
-**从 [GitHub Releases](https://github.com/chenhg5/cc-connect/releases) 下载：**
+**从 [GitHub Releases](https://github.com/tasercake/pi-connect/releases) 下载：**
 
 ```bash
 # Linux amd64 - 稳定版
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
-chmod +x cc-connect
-sudo mv cc-connect /usr/local/bin/
+curl -L -o pi-connect https://github.com/tasercake/pi-connect/releases/latest/download/pi-connect-linux-amd64
+chmod +x pi-connect
+sudo mv pi-connect /usr/local/bin/
 
 ```
 
 **从源码编译（需要 Go 1.22+）：**
 
 ```bash
-git clone https://github.com/chenhg5/cc-connect.git
-cd cc-connect
+git clone https://github.com/tasercake/pi-connect.git
+cd pi-connect
 make build
 ```
 
 
 ### ⚙️ 配置
 
-> **💡 推荐使用 Web UI 配置** — 安装完成后，运行 `cc-connect web` 配置 Web 管理后台并在浏览器中打开。可以可视化创建项目、添加平台、管理服务商、直接和 Agent 聊天，无需手动编辑 TOML 文件。**注意：** `cc-connect web` 仅用于配置和打开浏览器，并不会启动 cc-connect 服务本身，你仍需单独运行 `cc-connect` 来启动。
+> **💡 推荐使用 Web UI 配置** — 安装完成后，运行 `pi-connect web` 配置 Web 管理后台并在浏览器中打开。可以可视化创建项目、添加平台、管理服务商、直接和 Agent 聊天，无需手动编辑 TOML 文件。**注意：** `pi-connect web` 仅用于配置和打开浏览器，并不会启动 pi-connect 服务本身，你仍需单独运行 `pi-connect` 来启动。
 
 如果你更喜欢手动配置：
 
 ```bash
-mkdir -p ~/.cc-connect
-cp config.example.toml ~/.cc-connect/config.toml
-vim ~/.cc-connect/config.toml
+mkdir -p ~/.pi-connect
+cp config.example.toml ~/.pi-connect/config.toml
+vim ~/.pi-connect/config.toml
 ```
 
 在项目配置里设置 `admin_from = "alice,bob"` 后，只有这些用户 ID 才能执行 `/dir`、`/shell` 等特权命令。
-执行 `/dir reset` 时，cc-connect 会恢复配置中的 `work_dir`，并清除保存在 `data_dir/projects/<project>.state.json` 里的目录覆盖状态。
+执行 `/dir reset` 时，pi-connect 会恢复配置中的 `work_dir`，并清除保存在 `data_dir/projects/<project>.state.json` 里的目录覆盖状态。
 
 
 ### ▶️ 运行
 
 ```bash
-./cc-connect
+./pi-connect
 ```
 
 
@@ -224,14 +224,14 @@ vim ~/.cc-connect/config.toml
 
 ```bash
 # npm
-npm install -g cc-connect
+npm install -g pi-connect
 
 # Homebrew
-brew upgrade cc-connect
+brew upgrade pi-connect
 
 # 二进制自更新
-cc-connect update           # 稳定版
-cc-connect update --pre     # 含预发布版本
+pi-connect update           # 稳定版
+pi-connect update --pre     # 含预发布版本
 ```
 
 
@@ -303,13 +303,13 @@ run_as_env = ["PGSSLROOTCERT"]
 详见[环境传播清单](./docs/usage.md#environment-propagation-what-moves-into-the-target-users-home)。
 完整设置说明见 [`docs/usage.md`](./docs/usage.md#running-agents-as-a-different-unix-user-run_as_user)。
 
-启动 cc-connect 之前，可用以下命令审核配置：
+启动 pi-connect 之前，可用以下命令审核配置：
 
 ```bash
-cc-connect doctor user-isolation
+pi-connect doctor user-isolation
 ```
 
-该命令会执行三项前置检查和一次隔离探测，报告目标用户能/不能读取的内容。如果任一检查失败或探测到跨用户泄漏，cc-connect 将拒绝启动。
+该命令会执行三项前置检查和一次隔离探测，报告目标用户能/不能读取的内容。如果任一检查失败或探测到跨用户泄漏，pi-connect 将拒绝启动。
 
 ---
 
@@ -375,7 +375,7 @@ cc-connect doctor user-isolation
 /cron setup
 ```
 
-这样会把最新的 cc-connect 指令写入项目记忆文件，Agent 才会知道如何回传附件。
+这样会把最新的 pi-connect 指令写入项目记忆文件，Agent 才会知道如何回传附件。
 
 你也可以在 `config.toml` 里全局控制这项能力：
 
@@ -383,14 +383,14 @@ cc-connect doctor user-isolation
 attachment_send = "on"  # 默认 "on"；设为 "off" 会禁用图片/文件回传
 ```
 
-这个开关与 agent 的 `/mode` 独立，只控制 `cc-connect send --image/--file` 这条附件回传路径。
+这个开关与 agent 的 `/mode` 独立，只控制 `pi-connect send --image/--file` 这条附件回传路径。
 
 回传方式：
 
 ```bash
-cc-connect send --image /absolute/path/to/chart.png
-cc-connect send --file /absolute/path/to/report.pdf
-cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+pi-connect send --image /absolute/path/to/chart.png
+pi-connect send --file /absolute/path/to/report.pdf
+pi-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 ```
 
 要点：
@@ -418,7 +418,7 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ## ☕ 支持项目
 
-如果 cc-connect 对你有帮助，请考虑请我们喝杯咖啡！你的支持帮助我们：
+如果 pi-connect 对你有帮助，请考虑请我们喝杯咖啡！你的支持帮助我们：
 
 - 🛠️ 维护和改进项目
 - 📚 编写更好的文档和教程
@@ -458,18 +458,18 @@ cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/ch
 
 ## 🙏 贡献者
 
-<a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
+<a href="https://github.com/tasercake/pi-connect/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=tasercake/pi-connect&v=20250313" />
 </a>
 
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/#chenhg5/cc-connect&Date">
+<a href="https://www.star-history.com/#tasercake/pi-connect&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tasercake/pi-connect&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=tasercake/pi-connect&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tasercake/pi-connect&type=Date" />
  </picture>
 </a>
 
@@ -480,5 +480,5 @@ MIT License
 
 
 <p align="center">
-  <sub>由 cc-connect 社区用 ❤️ 构建</sub>
+  <sub>由 pi-connect 社区用 ❤️ 构建</sub>
 </p>

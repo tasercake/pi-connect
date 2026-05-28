@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 var piJSONHeartbeatInterval = time.Minute
@@ -39,7 +39,7 @@ type piSession struct {
 	wg        sync.WaitGroup
 	alive     atomic.Bool
 	// terminalError is set when Pi JSON reports an assistant-level error.
-	// Such errors end the underlying one-shot JSON process for cc-connect's
+	// Such errors end the underlying one-shot JSON process for pi-connect's
 	// purposes: keeping the session alive after the engine consumes EventError
 	// can leave no goroutine draining stdout and wedge the child pipe.
 	terminalError atomic.Bool
@@ -369,7 +369,7 @@ func (s *piSession) handleCustomMessage(raw map[string]any) {
 		return
 	}
 	// Subagent completion notifications are often unsolicited background
-	// messages. Emit a complete result so cc-connect's unsolicited reader sends
+	// messages. Emit a complete result so pi-connect's unsolicited reader sends
 	// the notification immediately instead of buffering text until a later turn.
 	evt := core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()}
 	select {
@@ -855,7 +855,7 @@ func (s *piSession) Close() error {
 // cleanAttachments removes files from the attachments directory to avoid
 // accumulating files across turns.
 func cleanAttachments(workDir string) {
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(workDir, ".pi-connect", "attachments")
 	entries, err := os.ReadDir(attachDir)
 	if err != nil {
 		return // directory may not exist yet
@@ -867,10 +867,10 @@ func cleanAttachments(workDir string) {
 	}
 }
 
-// saveImagesToDisk saves image attachments to workDir/.cc-connect/attachments/
+// saveImagesToDisk saves image attachments to workDir/.pi-connect/attachments/
 // and returns the list of absolute file paths.
 func saveImagesToDisk(workDir string, images []core.ImageAttachment) []string {
-	attachDir := filepath.Join(workDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(workDir, ".pi-connect", "attachments")
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Error("piSession: failed to create attachments dir", "error", err)
 		return nil

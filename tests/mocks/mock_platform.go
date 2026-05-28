@@ -1,10 +1,10 @@
-// Package mocks provides mock implementations for testing cc-connect components.
+// Package mocks provides mock implementations for testing pi-connect components.
 package mocks
 
 import (
 	"context"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 	"github.com/stretchr/testify/mock"
 )
 

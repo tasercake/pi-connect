@@ -20,10 +20,10 @@ import (
 )
 
 const (
-	githubReleasesAPI = "https://api.github.com/repos/chenhg5/cc-connect/releases"
-	giteeReleasesAPI  = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases"
-	githubDownload    = "https://github.com/chenhg5/cc-connect/releases/download"
-	giteeDownload     = "https://gitee.com/cg33/cc-connect/releases/download"
+	githubReleasesAPI = "https://api.github.com/repos/tasercake/pi-connect/releases"
+	giteeReleasesAPI  = "https://gitee.com/api/v5/repos/cg33/pi-connect/releases"
+	githubDownload    = "https://github.com/tasercake/pi-connect/releases/download"
+	giteeDownload     = "https://gitee.com/cg33/pi-connect/releases/download"
 )
 
 type ReleaseInfo struct {
@@ -102,7 +102,7 @@ func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "cc-connect-updater")
+	req.Header.Set("User-Agent", "pi-connect-updater")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
@@ -132,7 +132,7 @@ func SelfUpdate(tag string, preferGitee bool) error {
 	if goos == "windows" {
 		ext = ".zip"
 	}
-	filename := fmt.Sprintf("cc-connect-%s-%s-%s%s", tag, goos, goarch, ext)
+	filename := fmt.Sprintf("pi-connect-%s-%s-%s%s", tag, goos, goarch, ext)
 
 	giteeURL := fmt.Sprintf("%s/%s/%s", giteeDownload, tag, filename)
 	githubURL := fmt.Sprintf("%s/%s/%s", githubDownload, tag, filename)
@@ -183,7 +183,7 @@ func downloadFile(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "cc-connect-updater")
+	req.Header.Set("User-Agent", "pi-connect-updater")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -216,11 +216,11 @@ func extractBinaryFromTarGz(data []byte) ([]byte, error) {
 			return nil, err
 		}
 		name := filepath.Base(hdr.Name)
-		if strings.HasPrefix(name, "cc-connect") && hdr.Typeflag == tar.TypeReg {
+		if strings.HasPrefix(name, "pi-connect") && hdr.Typeflag == tar.TypeReg {
 			return io.ReadAll(tr)
 		}
 	}
-	return nil, fmt.Errorf("cc-connect binary not found in archive")
+	return nil, fmt.Errorf("pi-connect binary not found in archive")
 }
 
 func extractBinaryFromZip(data []byte) ([]byte, error) {
@@ -230,7 +230,7 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 	}
 	for _, f := range r.File {
 		name := filepath.Base(f.Name)
-		if strings.HasPrefix(name, "cc-connect") && !f.FileInfo().IsDir() {
+		if strings.HasPrefix(name, "pi-connect") && !f.FileInfo().IsDir() {
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err
@@ -239,7 +239,7 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 			return io.ReadAll(rc)
 		}
 	}
-	return nil, fmt.Errorf("cc-connect binary not found in zip archive")
+	return nil, fmt.Errorf("pi-connect binary not found in zip archive")
 }
 
 func replaceBinary(newBinary []byte) error {
@@ -253,7 +253,7 @@ func replaceBinary(newBinary []byte) error {
 	}
 
 	dir := filepath.Dir(execPath)
-	tmpFile, err := os.CreateTemp(dir, "cc-connect-update-*")
+	tmpFile, err := os.CreateTemp(dir, "pi-connect-update-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}

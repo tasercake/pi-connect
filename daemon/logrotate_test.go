@@ -53,7 +53,7 @@ func TestMetaSaveLoad(t *testing.T) {
 		LogFile:     "/tmp/test.log",
 		LogMaxSize:  1024,
 		WorkDir:     "/tmp",
-		BinaryPath:  "/usr/local/bin/cc-connect",
+		BinaryPath:  "/usr/local/bin/pi-connect",
 		InstalledAt: NowISO(),
 	}
 

@@ -8,7 +8,7 @@ CC-Connect is a bridge that connects the Pi coding agent with messaging platform
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                   cmd/cc-connect                │  ← entry point, CLI, daemon
+│                   cmd/pi-connect                │  ← entry point, CLI, daemon
 ├─────────────────────────────────────────────────┤
 │                     config/                     │  ← TOML config parsing
 ├─────────────────────────────────────────────────┤
@@ -159,7 +159,7 @@ make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 ### Direct build tag usage (without Make)
 
 ```bash
-go build -tags 'no_discord no_dingtalk no_qq no_qqbot no_line' ./cmd/cc-connect
+go build -tags 'no_discord no_dingtalk no_qq no_qqbot no_line' ./cmd/pi-connect
 ```
 
 ## Pre-Commit Checklist
@@ -175,7 +175,7 @@ go build -tags 'no_discord no_dingtalk no_qq no_qqbot no_line' ./cmd/cc-connect
 1. Create `platform/newplatform/newplatform.go`
 2. Implement `core.Platform` interface (and optional interfaces as needed)
 3. Register in `init()`: `core.RegisterPlatform("newplatform", factory)`
-4. Create `cmd/cc-connect/plugin_platform_newplatform.go` with `//go:build !no_newplatform` tag
+4. Create `cmd/pi-connect/plugin_platform_newplatform.go` with `//go:build !no_newplatform` tag
 5. Add `newplatform` to `ALL_PLATFORMS` in `Makefile`
 6. Add config example in `config.example.toml`
 7. Add unit tests

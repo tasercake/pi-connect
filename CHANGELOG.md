@@ -48,7 +48,7 @@ Beta release with new agents, new features, and broad platform fixes. No breakin
 - **Message queue depth configurable**: new `[queue] max_depth` config option (default 5) (#690)
 - **Claude Code opus[1m]**: add 1M-context Opus model option with shorthand descriptions (#660)
 - **QQ Bot file send/receive**: full file attachment support with robustness checks (#685)
-- **Bridge ImageSender/FileSender**: `cc-connect send --image/--file` now works through bridge protocol (#712)
+- **Bridge ImageSender/FileSender**: `pi-connect send --image/--file` now works through bridge protocol (#712)
 - **Provider presets**: add NekoCode, VisionCoder, and AIHubMix to provider presets; add Trae CLI ACP and COCO ACP config examples (#739)
 
 ### Fixed
@@ -81,7 +81,7 @@ Thanks to all contributors who made this release possible:
 Hotfix release: session filtering is now configurable and defaults to showing all sessions.
 
 ### Fixed
-- **`/list` shows all sessions by default**: the session filter introduced in v1.3.0 (which hid sessions not created by cc-connect) was accidentally merged and caused confusion. The filter is now **off by default** — `/list`, `/switch`, and `/delete` show all agent sessions regardless of origin.
+- **`/list` shows all sessions by default**: the session filter introduced in v1.3.0 (which hid sessions not created by pi-connect) was accidentally merged and caused confusion. The filter is now **off by default** — `/list`, `/switch`, and `/delete` show all agent sessions regardless of origin.
 
 ### Added
 - **`filter_external_sessions` config option**: users who *do* want to hide externally-created sessions can set `filter_external_sessions = true` in `[[projects]]` to restore the old filtering behavior.
@@ -109,13 +109,13 @@ First stable release of the 1.3 series. 555 commits since v1.2.1 with major new 
 
 ### Highlights
 
-- **Web Admin UI** — Full management dashboard embedded in the binary via `go:embed`. Project CRUD, session monitoring, cron editor, provider management, chat interface, and i18n (en/zh/zh-TW/ja/es). Use `cc-connect web` to open directly in the browser with auto-login.
+- **Web Admin UI** — Full management dashboard embedded in the binary via `go:embed`. Project CRUD, session monitoring, cron editor, provider management, chat interface, and i18n (en/zh/zh-TW/ja/es). Use `pi-connect web` to open directly in the browser with auto-login.
 - **Lifecycle Event Hooks** — New `[[hooks]]` config to trigger shell commands or HTTP webhooks on 7 event types: `message.received`, `message.sent`, `session.started`, `session.ended`, `cron.triggered`, `permission.requested`, `error`. Async by default, fail-open, non-blocking.
 - **Skill Management** — New `/skills` page in the web UI with local skill browser (per-project, per-agent) and recommended skill presets fetched from remote.
 - **Global Provider Management** — Add, edit, delete providers in the web UI; import from cc-switch config; per-agent-type provider presets with featured/star badges.
 
 ### New Features
-- `cc-connect web` CLI command: auto-configure web admin, open browser with token-based login
+- `pi-connect web` CLI command: auto-configure web admin, open browser with token-based login
 - Feishu: auto-resolve `@name` mentions to clickable at-tags (`resolve_mentions` config)
 - Feishu: multi-level reply chain recognition; done-emoji reaction after streaming
 - Feishu: configurable progress display styles (compact/card)
@@ -140,7 +140,7 @@ First stable release of the 1.3 series. 555 commits since v1.2.1 with major new 
 - Fix Gemini image handling: save to workspace, prompt-based file references
 - Fix Claude Code: unblock readLoop when child subprocesses hold stdout pipe
 - Fix Codex: multiline prompt on resume; force-kill process group on stop
-- Fix core: race condition during session cleanup; follow symlinked skill directories; persist agent_session_id; filter `/list` to cc-connect owned sessions
+- Fix core: race condition during session cleanup; follow symlinked skill directories; persist agent_session_id; filter `/list` to pi-connect owned sessions
 - Fix Feishu: slash commands in thread/reply context; user/chat name resolution in async goroutine
 - Fix Telegram: UTF-8-safe command menu descriptions
 - Fix TTS: don't send empty language_type to Qwen TTS API
@@ -311,9 +311,9 @@ Special thanks to all contributors who made this release possible:
 Beta release with significant improvements to agent stability, platform onboarding, and user experience.
 
 ### New Features
-- **Feishu/Lark CLI Onboarding**: New `cc-connect feishu setup` command with QR code terminal display for quick bot configuration, supporting both new bot creation and existing bot binding
+- **Feishu/Lark CLI Onboarding**: New `pi-connect feishu setup` command with QR code terminal display for quick bot configuration, supporting both new bot creation and existing bot binding
 - **Pi Agent**: Added support for Pi coding agent with full session management and tool handling
-- **Session TUI Browser**: New `cc-connect sessions` subcommand with terminal UI for browsing session history
+- **Session TUI Browser**: New `pi-connect sessions` subcommand with terminal UI for browsing session history
 - **Multi-Workspace Mode**: Channel-based workspace resolution with auto-binding by convention and interactive init flow
 - **Design Documentation**: Added comprehensive design plans for multi-workspace and session resilience features
 - **Slack Enhancements**: Typing indicator via emoji reactions, mrkdwn formatting guidance in system prompt
@@ -404,7 +404,7 @@ Patch release with bug fixes and minor enhancements.
 
 ## v1.2.0 (2026-03-08)
 
-This is the first stable release of cc-connect 1.2.0, consolidating all beta changes and adding new features.
+This is the first stable release of pi-connect 1.2.0, consolidating all beta changes and adding new features.
 
 ### New Features (since beta.7)
 - **Official QQ Bot Platform**: Native integration with Tencent's official QQ Bot Platform via WebSocket, supporting text, image, and document messages
@@ -437,7 +437,7 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 ### New Features
 - **Multi-Bot Relay Binding**: `/bind` now supports binding multiple bots in a group chat; use `/bind <project>` to add, `/bind -<project>` to remove specific project
 - **System-level Systemd**: Daemon mode now supports system-level systemd (`/etc/systemd/system/`) when running as root, useful for servers and containers
-- **Config Example Command**: `cc-connect config-example` prints embedded config template for quick reference
+- **Config Example Command**: `pi-connect config-example` prints embedded config template for quick reference
 - **Interactive Command Buttons**: `/lang`, `/model`, `/mode` commands now show interactive button menus for easy selection
 - **Exec Commands**: Custom commands can execute shell commands directly with `exec` field in config
 - **Configurable Idle Timeout**: Agent idle timeout can be configured via `idle_timeout_mins` in config
@@ -452,7 +452,7 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 ## v1.2.0-beta.6 (2026-03-06)
 
 ### New Features
-- **Bot-to-Bot Relay**: Forward messages between different messaging platforms via CLI (`cc-connect relay`) and internal API; enables cross-platform bot communication
+- **Bot-to-Bot Relay**: Forward messages between different messaging platforms via CLI (`pi-connect relay`) and internal API; enables cross-platform bot communication
 - **Session Search**: Search sessions by name, ID prefix, or summary with `/search <keyword>` command
 - **List Pagination**: `/list` now supports pagination with `--page` and `--page-size` flags for large session counts
 - **Per-Platform Streaming Preview Control**: Configure streaming preview per platform via `streaming_preview` setting (Telegram, Discord, Feishu)
@@ -508,7 +508,7 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 
 ### New Features
 - **`/upgrade` Command**: Check for available updates (including beta) and self-update the binary in-place; queries both GitHub and Gitee releases
-- **`/restart` Command**: Restart cc-connect service from chat with post-restart success notification
+- **`/restart` Command**: Restart pi-connect service from chat with post-restart success notification
 - **`/config reload` Command**: Hot-reload configuration (display, providers, commands) without restarting
 - **`/name` Command**: Set custom display names for sessions (e.g. `/name my-feature`, `/name 3 bugfix`); names persist across restarts and show in `/list`, `/switch`, `/status`
 - **Default Quiet Mode**: Configure `quiet = true` globally or per-project in config.toml to suppress thinking/tool progress by default; users can still toggle with `/quiet`
@@ -548,12 +548,12 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 - **`/config` Command**: View and modify runtime configuration (e.g. `thinking_max_len`, `tool_max_len`) from chat, with persistent save to `config.toml`
 - **`/doctor` Command**: Run system diagnostics covering agent authentication, platform connectivity, system resources, dependencies, and network latency; fully i18n-supported
 - **Discord Slash Commands**: Register native Discord Application Commands so typing `/` shows an autocomplete menu; supports per-guild instant registration via `guild_id` config
-- **Daemon Mode**: Run cc-connect as a background service (`cc-connect daemon install/start/stop/status/logs`); supports systemd (Linux) and launchd (macOS)
+- **Daemon Mode**: Run pi-connect as a background service (`pi-connect daemon install/start/stop/status/logs`); supports systemd (Linux) and launchd (macOS)
 - **Qoder CLI Agent**: Full support for the Qoder coding agent with streaming JSON, mode switching, and model selection
 - **Telegram Proxy**: Support HTTP/SOCKS5 proxy for Telegram bot API connections
 - **WeChat Work Proxy Auth**: Add `proxy_username` / `proxy_password` for authenticated forward proxies
 - **i18n Expansion**: Add Traditional Chinese (zh-TW), Japanese (ja), and Spanish (es) language support
-- **`--stdin` Support**: Read prompt from stdin for CLI usage (`echo "hello" | cc-connect send --stdin`)
+- **`--stdin` Support**: Read prompt from stdin for CLI usage (`echo "hello" | pi-connect send --stdin`)
 
 ### Improvements
 - **Slow Operation Monitoring**: Warn-level logs for slow platform send (>2s), agent start (>5s), agent close (>3s), agent send (>2s), and agent first event (>15s); turn completion logs now include `turn_duration`
@@ -593,17 +593,17 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 
 ### New Features
 - **QQ Platform** (Beta): Support QQ messaging via OneBot v11 / NapCat WebSocket
-- **Cron Scheduling**: Schedule recurring tasks via `/cron` command or CLI (`cc-connect cron add`), with JSON persistence and agent-aware session injection
+- **Cron Scheduling**: Schedule recurring tasks via `/cron` command or CLI (`pi-connect cron add`), with JSON persistence and agent-aware session injection
 - **Feishu Emoji Reaction**: Auto-add emoji reaction (default: "OnIt") on incoming messages to confirm receipt; configurable via `reaction_emoji`
 - **Display Truncation Config**: New `[display]` config section to control thinking/tool message truncation (`thinking_max_len`, `tool_max_len`); set to 0 to disable truncation
-- **`/version` Command**: Check current cc-connect version from within chat
+- **`/version` Command**: Check current pi-connect version from within chat
 
 ### Bug Fixes
 - **Windows `/list` fix**: Claude Code sessions now discoverable on Windows despite drive letter colon in project key paths
 - **CLAUDECODE env filter**: Prevent nested Claude Code session crash by filtering CLAUDECODE env var from subprocesses
 
 ### Docs
-- Clarified global config path `~/.cc-connect/config.toml` in INSTALL.md
+- Clarified global config path `~/.pi-connect/config.toml` in INSTALL.md
 - Fixed markdown image syntax in Chinese README
 
 ## v1.1.0-beta.5 (2026-03-01)
@@ -623,21 +623,21 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 ### New Features
 - **Voice Messages (STT)**: Transcribe voice messages to text via OpenAI Whisper, Groq Whisper, or SiliconFlow SenseVoice; requires `ffmpeg`
 - **Image Support**: Handle image messages across platforms with multimodal content forwarding to agents
-- **CLI Send**: `cc-connect send` command and internal Unix socket API for programmatic message sending
+- **CLI Send**: `pi-connect send` command and internal Unix socket API for programmatic message sending
 - **Message Dedup**: Prevent duplicate processing of WeChat Work messages
 
 ## v1.1.0-beta.2 (2026-03-01)
 
 ### New Features
-- **Provider Management**: `/provider` command for runtime API provider switching; CLI `cc-connect provider add/list`
-- **Configurable Data Dir**: Session data stored in `~/.cc-connect/` by default (configurable via `data_dir`)
+- **Provider Management**: `/provider` command for runtime API provider switching; CLI `pi-connect provider add/list`
+- **Configurable Data Dir**: Session data stored in `~/.pi-connect/` by default (configurable via `data_dir`)
 - **Markdown Stripping**: Plain text fallback for platforms that don't support markdown (e.g. WeChat)
 
 ## v1.1.0-beta.1 (2026-03-01)
 
 ### New Features
 - **Codex Agent**: OpenAI Codex CLI integration
-- **Self-Update**: `cc-connect update` and `cc-connect check-update` commands
+- **Self-Update**: `pi-connect update` and `pi-connect check-update` commands
 - **I18n**: Auto-detect language, `/lang` command to switch between English and Chinese
 - **Session Persistence**: Sessions saved to disk as JSON, restored on restart
 

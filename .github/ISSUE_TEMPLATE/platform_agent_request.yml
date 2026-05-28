@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Want cc-connect to support a new messaging platform? Let us know!
+        Want pi-connect to support a new messaging platform? Let us know!
 
   - type: input
     id: name

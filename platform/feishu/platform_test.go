@@ -13,7 +13,7 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -973,7 +973,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
-	if strings.Contains(cardJSON, "cc-connect · 进度") {
+	if strings.Contains(cardJSON, "pi-connect · 进度") {
 		t.Fatalf("normal text should use default card template, got %q", cardJSON)
 	}
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {

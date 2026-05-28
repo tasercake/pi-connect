@@ -3,7 +3,7 @@ package pi
 import (
 	"strings"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 type piUsage struct {

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  cc-connect bridges Pi running on your machine to the messaging platforms you already use.<br/>
+  pi-connect bridges Pi running on your machine to the messaging platforms you already use.<br/>
   Code review, research, automation, data analysis — anything Pi can do,<br/>
   now accessible from your phone, tablet, or any device with a chat app.
 </p>
@@ -12,13 +12,13 @@
 
 ## 🧩 Platform feature snapshot
 
-High-level view of what each **built-in platform** can do in cc-connect.
+High-level view of what each **built-in platform** can do in pi-connect.
 
 **Legend**
 
 | Symbol | Meaning |
 |--------|---------|
-| ✅ | Works in **stable** cc-connect with typical configuration |
+| ✅ | Works in **stable** pi-connect with typical configuration |
 | ⚠️ | Partial, needs extra config (e.g. speech / ASR), or limited by the vendor app or API |
 | ❌ | Not supported or not applicable in practice |
 
@@ -58,7 +58,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 **Scheduled Tasks** — Set up cron jobs in natural language. *"Every day at 6am, summarize GitHub trending"* just works.
 
 ### 🎤 Multimodal Support
-**Voice & Images** — Send voice messages or screenshots; cc-connect handles STT/TTS and multimodal forwarding.
+**Voice & Images** — Send voice messages or screenshots; pi-connect handles STT/TTS and multimodal forwarding.
 
 ### 📦 Multi-Project Architecture
 **Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
@@ -68,9 +68,9 @@ High-level view of what each **built-in platform** can do in cc-connect.
 
 
 <p align="center">
-  <img src="docs/images/screenshot/cc-connect-lark.JPG" alt="飞书" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-telegram.JPG" alt="Telegram" width="32%" />
-  <img src="docs/images/screenshot/cc-connect-wechat.JPG" alt="微信" width="32%" />
+  <img src="docs/images/screenshot/pi-connect-lark.JPG" alt="飞书" width="32%" />
+  <img src="docs/images/screenshot/pi-connect-telegram.JPG" alt="Telegram" width="32%" />
+  <img src="docs/images/screenshot/pi-connect-wechat.JPG" alt="微信" width="32%" />
 </p>
 <p align="center">
   <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
@@ -81,10 +81,10 @@ High-level view of what each **built-in platform** can do in cc-connect.
 
 ### 🤖 Install & Configure with Pi (Recommended)
 
-> **The easiest way** — Ask Pi to follow this installation guide and help configure cc-connect:
+> **The easiest way** — Ask Pi to follow this installation guide and help configure pi-connect:
 
 ```bash
-Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md to install and configure cc-connect.
+Follow https://raw.githubusercontent.com/tasercake/pi-connect/refs/heads/main/INSTALL.md to install and configure pi-connect.
 ```
 
 
@@ -93,54 +93,54 @@ Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INST
 **Via npm:**
 
 ```bash
-npm install -g cc-connect
+npm install -g pi-connect
 ```
 
 **Via Homebrew (macOS / Linux):**
 
 ```bash
-brew install cc-connect
+brew install pi-connect
 ```
 
-**Download binary from [GitHub Releases](https://github.com/chenhg5/cc-connect/releases):**
+**Download binary from [GitHub Releases](https://github.com/tasercake/pi-connect/releases):**
 
 ```bash
 # Linux amd64 - Stable
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
-chmod +x cc-connect
-sudo mv cc-connect /usr/local/bin/
+curl -L -o pi-connect https://github.com/tasercake/pi-connect/releases/latest/download/pi-connect-linux-amd64
+chmod +x pi-connect
+sudo mv pi-connect /usr/local/bin/
 
 ```
 
 **Build from source (requires Go 1.22+):**
 
 ```bash
-git clone https://github.com/chenhg5/cc-connect.git
-cd cc-connect
+git clone https://github.com/tasercake/pi-connect.git
+cd pi-connect
 make build
 ```
 
 
 ### ⚙️ Configure
 
-> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
+> **💡 Tip: Use the Web UI to configure** — After installing, run `pi-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `pi-connect web` only configures and opens the browser — you still need to run `pi-connect` separately to start the service.
 
 If you prefer manual configuration:
 
 ```bash
-mkdir -p ~/.cc-connect
-cp config.example.toml ~/.cc-connect/config.toml
-vim ~/.cc-connect/config.toml
+mkdir -p ~/.pi-connect
+cp config.example.toml ~/.pi-connect/config.toml
+vim ~/.pi-connect/config.toml
 ```
 
 Set `admin_from = "alice,bob"` in a project to allow those user IDs to run privileged commands such as `/dir` and `/shell`.
-When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
+When a user runs `/dir reset`, pi-connect restores the configured `work_dir` and clears the persisted override stored under `data_dir/projects/<project>.state.json`.
 
 
 ### ▶️ Run
 
 ```bash
-./cc-connect
+./pi-connect
 ```
 
 
@@ -148,14 +148,14 @@ When a user runs `/dir reset`, cc-connect restores the configured `work_dir` and
 
 ```bash
 # npm
-npm install -g cc-connect
+npm install -g pi-connect
 
 # Homebrew
-brew upgrade cc-connect
+brew upgrade pi-connect
 
 # Binary self-update
-cc-connect update           # Stable
-cc-connect update --pre     # Include pre-releases
+pi-connect update           # Stable
+pi-connect update --pre     # Include pre-releases
 ```
 
 
@@ -217,7 +217,7 @@ The default is **30 minutes** when unset. Set `reset_on_idle_mins = 0` to opt ou
 
 On Linux/macOS, a project can spawn Pi under a different Unix
 user for OS-level file-system isolation from the supervisor user that
-runs cc-connect.
+runs pi-connect.
 
 ```toml
 [[projects]]
@@ -231,14 +231,14 @@ of its own, read+write on `work_dir`, and its own Pi credentials.
 See [`docs/usage.md`](./docs/usage.md#running-agents-as-a-different-unix-user-run_as_user)
 for the full setup.
 
-Before starting cc-connect, audit the setup with:
+Before starting pi-connect, audit the setup with:
 
 ```bash
-cc-connect doctor user-isolation
+pi-connect doctor user-isolation
 ```
 
 This runs three go/no-go preflight gates and an isolation probe that
-reports what the target user can and cannot read. cc-connect refuses to
+reports what the target user can and cannot read. pi-connect refuses to
 start if any gate fails or if the probe detects a cross-user leak.
 
 ---
@@ -305,7 +305,7 @@ or:
 /cron setup
 ```
 
-This refreshes the cc-connect instructions in the project memory file so the agent knows how to send attachments back.
+This refreshes the pi-connect instructions in the project memory file so the agent knows how to send attachments back.
 
 You can control this feature globally in `config.toml`:
 
@@ -313,14 +313,14 @@ You can control this feature globally in `config.toml`:
 attachment_send = "on"  # default: "on"; set to "off" to block image/file send-back
 ```
 
-This switch is independent from the agent's `/mode`. It only controls `cc-connect send --image/--file`.
+This switch is independent from the agent's `/mode`. It only controls `pi-connect send --image/--file`.
 
 Examples:
 
 ```bash
-cc-connect send --image /absolute/path/to/chart.png
-cc-connect send --file /absolute/path/to/report.pdf
-cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+pi-connect send --image /absolute/path/to/chart.png
+pi-connect send --file /absolute/path/to/report.pdf
+pi-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 ```
 
 Notes:
@@ -348,7 +348,7 @@ Notes:
 
 ## ☕ Support the Project
 
-If cc-connect has been helpful to you, consider buying us a coffee! Your support helps us:
+If pi-connect has been helpful to you, consider buying us a coffee! Your support helps us:
 
 - 🛠️ Maintain and improve the project
 - 📚 Write better documentation and tutorials
@@ -388,18 +388,18 @@ We accept the following commercial collaborations:
 
 ## 🙏 Contributors
 
-<a href="https://github.com/chenhg5/cc-connect/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=chenhg5/cc-connect&v=20250313" />
+<a href="https://github.com/tasercake/pi-connect/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=tasercake/pi-connect&v=20250313" />
 </a>
 
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/#chenhg5/cc-connect&Date">
+<a href="https://www.star-history.com/#tasercake/pi-connect&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=chenhg5/cc-connect&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tasercake/pi-connect&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=tasercake/pi-connect&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tasercake/pi-connect&type=Date" />
  </picture>
 </a>
 
@@ -410,5 +410,5 @@ MIT License
 
 
 <p align="center">
-  <sub>Built with ❤️ by the cc-connect community</sub>
+  <sub>Built with ❤️ by the pi-connect community</sub>
 </p>

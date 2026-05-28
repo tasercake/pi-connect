@@ -10,7 +10,7 @@ import (
 
 const (
 	DefaultLogMaxSize = 10 * 1024 * 1024 // 10 MB
-	ServiceName       = "cc-connect"
+	ServiceName       = "pi-connect"
 )
 
 type Config struct {
@@ -46,16 +46,16 @@ func NewManager() (Manager, error) {
 
 func DefaultLogFile() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc-connect", "logs", "cc-connect.log")
+	return filepath.Join(home, ".pi-connect", "logs", "pi-connect.log")
 }
 
 func DefaultDataDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc-connect")
+	return filepath.Join(home, ".pi-connect")
 }
 
 // ── Metadata ────────────────────────────────────────────────
-// Stored at ~/.cc-connect/daemon.json so that `logs`, `status`,
+// Stored at ~/.pi-connect/daemon.json so that `logs`, `status`,
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {

@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	defaultPresetsURL          = "https://raw.githubusercontent.com/chenhg5/cc-connect/main/provider-presets.json"
-	fallbackPresetsURL         = "https://gitee.com/chenhg5/cc-connect/raw/main/provider-presets.json"
+	defaultPresetsURL          = "https://raw.githubusercontent.com/tasercake/pi-connect/main/provider-presets.json"
+	fallbackPresetsURL         = "https://gitee.com/tasercake/pi-connect/raw/main/provider-presets.json"
 	presetsCacheTTL            = 6 * time.Hour
 	presetsHTTPTimeout         = 15 * time.Second
 	presetsFallbackHTTPTimeout = 10 * time.Second

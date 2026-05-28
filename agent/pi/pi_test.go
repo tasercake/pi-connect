@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 // ── normalizeTransport ───────────────────────────────────────
@@ -404,7 +404,7 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 
 func TestCleanAttachments(t *testing.T) {
 	tmpDir := t.TempDir()
-	attachDir := filepath.Join(tmpDir, ".cc-connect", "attachments")
+	attachDir := filepath.Join(tmpDir, ".pi-connect", "attachments")
 	os.MkdirAll(attachDir, 0o755)
 
 	// Create some files.
