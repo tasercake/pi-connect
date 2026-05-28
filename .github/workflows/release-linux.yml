@@ -36,6 +36,9 @@ jobs:
           version: latest
           args: release --snapshot --skip=publish --clean
 
+      - name: Stage release binary
+        run: cp dist/linux-amd64_linux_amd64_v1/pi-connect dist/pi-connect-linux-amd64
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
