@@ -1,0 +1,30 @@
+version: 2
+
+project_name: cc-connect
+
+builds:
+  - id: linux-amd64
+    main: ./cmd/cc-connect
+    binary: cc-connect
+    goos: [linux]
+    goarch: [amd64]
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.buildTime={{ .Date }}
+
+archives:
+  - id: linux-amd64
+    ids: [linux-amd64]
+    formats: [binary]
+    name_template: cc-connect-linux-amd64
+
+release:
+  github:
+    owner: tasercake
+    name: cc-connect
+  name_template: latest
+  mode: replace
