@@ -16,7 +16,7 @@ import (
 )
 
 // ProjectSettingsUpdate is passed to SetSaveProjectSettings to persist management API PATCH fields.
-// The implementation (typically in cmd/cc-connect) maps this to config.ProjectSettingsUpdate.
+// The implementation (typically in cmd/pi-connect) maps this to config.ProjectSettingsUpdate.
 type ProjectSettingsUpdate struct {
 	Language             *string
 	AdminFrom            *string
@@ -57,7 +57,7 @@ type ManagementServer struct {
 	getGlobalSettings    func() map[string]any
 	saveGlobalSettings   func(map[string]any) error
 
-	// Global provider callbacks (set by cmd/cc-connect)
+	// Global provider callbacks (set by cmd/pi-connect)
 	listGlobalProviders  func() ([]GlobalProviderInfo, error)
 	addGlobalProvider    func(GlobalProviderInfo) error
 	updateGlobalProvider func(name string, info GlobalProviderInfo) error
@@ -230,7 +230,7 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	// Bridge
 	mux.HandleFunc(prefix+"/bridge/adapters", m.wrap(m.handleBridgeAdapters))
 
-	// Static file serving for cc-connect-web (SPA)
+	// Static file serving for pi-connect-web (SPA)
 	return m.withStaticFallback(mux)
 }
 

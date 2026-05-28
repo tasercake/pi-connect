@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 // Max download size for WeCom WS image/file payloads (matches OpenClaw default).

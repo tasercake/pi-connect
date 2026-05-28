@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 	"github.com/stretchr/testify/mock"
 )
 

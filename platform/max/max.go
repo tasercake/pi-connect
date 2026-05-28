@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 func init() {
@@ -96,7 +96,7 @@ type Platform struct {
 //	                                               # X-Max-Bot-Api-Secret header
 //	                                               # of every webhook POST (?s= also
 //	                                               # accepted for manual testing)
-//	webhook_resubscribe_interval = "5m"            # optional, default 5m; cc-connect
+//	webhook_resubscribe_interval = "5m"            # optional, default 5m; pi-connect
 //	                                               # periodically re-POSTs the
 //	                                               # subscription because MAX has been
 //	                                               # observed to silently drop it

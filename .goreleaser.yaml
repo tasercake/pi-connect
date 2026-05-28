@@ -1,11 +1,11 @@
 version: 2
 
-project_name: cc-connect
+project_name: pi-connect
 
 builds:
   - id: linux-amd64
-    main: ./cmd/cc-connect
-    binary: cc-connect
+    main: ./cmd/pi-connect
+    binary: pi-connect
     goos: [linux]
     goarch: [amd64]
     env:
@@ -20,11 +20,11 @@ archives:
   - id: linux-amd64
     ids: [linux-amd64]
     formats: [binary]
-    name_template: cc-connect-linux-amd64
+    name_template: pi-connect-linux-amd64
 
 release:
   github:
     owner: tasercake
-    name: cc-connect
+    name: pi-connect
   name_template: latest
   mode: replace

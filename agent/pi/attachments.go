@@ -2,7 +2,7 @@ package pi
 
 // Attachment routing for the pi agent driver.
 //
-// Background: when cc-connect receives a file from the platform (e.g. a
+// Background: when pi-connect receives a file from the platform (e.g. a
 // Telegram document), it saves the bytes to disk and previously asked pi to
 // inline the file content into the user message via the `@<path>` syntax.
 // That works fine for small text files (configs, code, prose) but is
@@ -25,7 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 // maxInlineFileBytes is the size threshold above which even text/code-like
@@ -52,7 +52,7 @@ type classifiedAttachments struct {
 // within each partition.
 //
 // We deliberately reuse core.SaveFilesToDisk so the on-disk layout under
-// .cc-connect/attachments/ matches the existing convention (path stability
+// .pi-connect/attachments/ matches the existing convention (path stability
 // across turns matters because the model may have already mentioned a file
 // path in earlier output).
 func classifyFileAttachments(workDir string, files []core.FileAttachment) classifiedAttachments {

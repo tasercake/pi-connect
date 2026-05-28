@@ -3,7 +3,7 @@ package telegram
 import (
 	"fmt"
 
-	"github.com/chenhg5/cc-connect/core"
+	"github.com/tasercake/pi-connect/core"
 )
 
 // enrichLocation converts a location attachment into text content that AI agents

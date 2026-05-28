@@ -439,9 +439,9 @@ func (sm *SessionManager) AllSessions() []*Session {
 	return out
 }
 
-// KnownAgentSessionIDs returns the set of agent session IDs tracked by cc-connect.
+// KnownAgentSessionIDs returns the set of agent session IDs tracked by pi-connect.
 // This is used to filter agent.ListSessions() output to only sessions owned by
-// cc-connect, excluding sessions created by external CLI usage in the same work_dir.
+// pi-connect, excluding sessions created by external CLI usage in the same work_dir.
 // It includes both current and historical agent session IDs so that sessions whose
 // IDs were cleared (e.g. after /new or provider switch) remain visible.
 //

@@ -1,58 +1,58 @@
-# cc-connect Installation & Configuration Guide
+# pi-connect Installation & Configuration Guide
 
-> **This document is designed to help users install and configure cc-connect for Pi.**
+> **This document is designed to help users install and configure pi-connect for Pi.**
 
-## What is cc-connect?
+## What is pi-connect?
 
-cc-connect bridges Pi to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ, **personal WeChat** via the **Weixin (ilink)** platform).
+pi-connect bridges Pi to messaging platforms (Feishu, DingTalk, Telegram, Slack, Discord, LINE, WeChat Work, QQ, **personal WeChat** via the **Weixin (ilink)** platform).
 
-GitHub: https://github.com/chenhg5/cc-connect
+GitHub: https://github.com/tasercake/pi-connect
 
-**IMPORTANT: If you are helping a user install cc-connect, guide them through configuration choices:**
+**IMPORTANT: If you are helping a user install pi-connect, guide them through configuration choices:**
 - Platform selection (Feishu, Telegram, Discord, etc.)
 - API keys and authentication tokens
 - Project paths and preferences
 
 Don't guess values—always ask the user to choose via interactive prompts.
 
-## Step 1: Install cc-connect
+## Step 1: Install pi-connect
 
 ### Option A: npm (recommended for most users)
 
 ```bash
-npm install -g cc-connect
+npm install -g pi-connect
 ```
 
-After installation, the `cc-connect` binary will be available globally.
+After installation, the `pi-connect` binary will be available globally.
 
 
 ### Option B: Homebrew (macOS / Linux)
 
 ```bash
-brew install cc-connect
+brew install pi-connect
 ```
 
 ### Option C: Download binary from GitHub Releases
 
-Go to https://github.com/chenhg5/cc-connect/releases and download the binary for your platform.
+Go to https://github.com/tasercake/pi-connect/releases and download the binary for your platform.
 
 Typical artifact names (check the release page for exact filenames):
 
-- Linux: `cc-connect-<version>-linux-amd64` (or `.tar.gz`)
-- macOS: `cc-connect-<version>-darwin-amd64` / `arm64`
-- Windows: `cc-connect-<version>-windows-amd64.exe` (or `.zip`)
+- Linux: `pi-connect-<version>-linux-amd64` (or `.tar.gz`)
+- macOS: `pi-connect-<version>-darwin-amd64` / `arm64`
+- Windows: `pi-connect-<version>-windows-amd64.exe` (or `.zip`)
 
 ```bash
 # Example for Linux amd64 (replace URL with the asset link from the release you chose):
-curl -L -o cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-linux-amd64
-chmod +x cc-connect
-sudo mv cc-connect /usr/local/bin/
+curl -L -o pi-connect https://github.com/tasercake/pi-connect/releases/latest/download/pi-connect-linux-amd64
+chmod +x pi-connect
+sudo mv pi-connect /usr/local/bin/
 ```
 
 On macOS, you may need to remove the quarantine attribute:
 
 ```bash
-xattr -d com.apple.quarantine cc-connect
+xattr -d com.apple.quarantine pi-connect
 ```
 
 ### Option D: Build from source
@@ -60,15 +60,15 @@ xattr -d com.apple.quarantine cc-connect
 Requires Go 1.22+.
 
 ```bash
-git clone https://github.com/chenhg5/cc-connect.git
-cd cc-connect
+git clone https://github.com/tasercake/pi-connect.git
+cd pi-connect
 make build
-# Binary will be at ./cc-connect
+# Binary will be at ./pi-connect
 ```
 
 ## Step 2: Install Pi
 
-cc-connect in this fork supports the Pi coding agent. Install and authenticate Pi before starting cc-connect.
+pi-connect in this fork supports the Pi coding agent. Install and authenticate Pi before starting pi-connect.
 
 Verify Pi works:
 
@@ -78,22 +78,22 @@ pi --version
 
 ## Step 3: Create config.toml
 
-> **💡 Recommended: Use the Web UI** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
+> **💡 Recommended: Use the Web UI** — After installing, run `pi-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. **Note:** `pi-connect web` only configures and opens the browser — you still need to run `pi-connect` separately to start the service.
 
-If you prefer manual configuration, cc-connect looks for config in this order:
+If you prefer manual configuration, pi-connect looks for config in this order:
 1. `-config <path>` flag (explicit)
 2. `./config.toml` (current directory)
-3. `~/.cc-connect/config.toml` (global, **recommended**)
+3. `~/.pi-connect/config.toml` (global, **recommended**)
 
-If no config file exists, running `cc-connect` will auto-create a starter template at `~/.cc-connect/config.toml`.
+If no config file exists, running `pi-connect` will auto-create a starter template at `~/.pi-connect/config.toml`.
 
 **Manual config location:**
 
 ```bash
-mkdir -p ~/.cc-connect
+mkdir -p ~/.pi-connect
 # If you cloned the repo, copy the example:
-cp config.example.toml ~/.cc-connect/config.toml
-# Or just run cc-connect once — it will create a starter config automatically
+cp config.example.toml ~/.pi-connect/config.toml
+# Or just run pi-connect once — it will create a starter config automatically
 ```
 
 You can also use a local config in the current directory:
@@ -139,13 +139,13 @@ Connection: WebSocket long connection (SDK auto-negotiates)
 
 ```bash
 # Recommended: unified entry
-cc-connect feishu setup --project my-project
-cc-connect feishu setup --project my-project --app cli_xxx:sec_xxx
+pi-connect feishu setup --project my-project
+pi-connect feishu setup --project my-project --app cli_xxx:sec_xxx
 
 # Force modes (usually unnecessary)
-cc-connect feishu new --project my-project
+pi-connect feishu new --project my-project
 
-cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
+pi-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 ```
 
 Notes:
@@ -153,7 +153,7 @@ Notes:
   - no credentials => same as `new`
   - with `--app`/`--app-id` => same as `bind`
 - `setup/new` prints a terminal QR code + URL for mobile scanning.
-- If `--project` does not exist, cc-connect creates it automatically.
+- If `--project` does not exist, pi-connect creates it automatically.
 - This flow fills `app_id` / `app_secret`; in QR onboarding flow, Feishu usually pre-configures permissions and event subscriptions.
 - Still verify app publish status and availability scope in Feishu Open Platform.
 
@@ -316,7 +316,7 @@ Connection: HTTP Webhook (you need ngrok, cloudflared, or a server with public I
    - URL: `https://<your-public-domain>:<port>/wecom/callback`
    - Token: any random string
    - EncodingAESKey: click "Random Generate" (43 chars)
-   - **Start cc-connect FIRST, then save** (to pass URL verification)
+   - **Start pi-connect FIRST, then save** (to pass URL verification)
 5. **Trusted IP** → add your server's outbound public IP
 6. (Optional) **WeChat Plugin** → scan QR to link personal WeChat
 
@@ -348,14 +348,14 @@ Personal WeChat uses Tencent’s **ilink bot HTTP API** (same family as OpenClaw
 1. Run:
 
    ```bash
-   cc-connect weixin setup --project my-project
+   pi-connect weixin setup --project my-project
    ```
 
 2. Scan the QR code (or open the printed URL) in WeChat and confirm.
 
-3. Restart cc-connect, then send a message from WeChat once so `context_token` is cached.
+3. Restart pi-connect, then send a message from WeChat once so `context_token` is cached.
 
-If you already have a Bearer token, use `cc-connect weixin bind --project my-project --token '<token>'`.
+If you already have a Bearer token, use `pi-connect weixin bind --project my-project --token '<token>'`.
 
 **Detailed guide (Chinese):** [docs/weixin.md](docs/weixin.md)
 
@@ -385,28 +385,28 @@ allow_from = "*"                 # allowed QQ user IDs: "12345,67890" or "*" for
 
 ---
 
-## Step 5: Run cc-connect
+## Step 5: Run pi-connect
 
 **Open the Web UI (recommended):**
 
 ```bash
-cc-connect web    # configure web admin & open browser (does NOT start cc-connect)
-cc-connect        # start the service
+pi-connect web    # configure web admin & open browser (does NOT start pi-connect)
+pi-connect        # start the service
 ```
 
-> **Note:** `cc-connect web` only configures the web admin and opens the dashboard in your browser — it does **not** start the cc-connect service itself. You still need to run `cc-connect` (or `cc-connect --config <path>`) separately to actually start the bridge. Think of it as two steps: configure first, then run.
+> **Note:** `pi-connect web` only configures the web admin and opens the dashboard in your browser — it does **not** start the pi-connect service itself. You still need to run `pi-connect` (or `pi-connect --config <path>`) separately to actually start the bridge. Think of it as two steps: configure first, then run.
 
 **Normal startup:**
 
 ```bash
 # Run with config.toml in current directory
-cc-connect
+pi-connect
 
 # Or specify config path
-cc-connect -config /path/to/config.toml
+pi-connect -config /path/to/config.toml
 
 # Check version
-cc-connect --version
+pi-connect --version
 ```
 
 You should see logs like:
@@ -414,7 +414,7 @@ You should see logs like:
 ```
 level=INFO msg="platform started" project=my-project platform=feishu
 level=INFO msg="engine started" project=my-project agent=pi platforms=1
-level=INFO msg="cc-connect is running" projects=1
+level=INFO msg="pi-connect is running" projects=1
 ```
 
 ## Step 6: Chat Commands
@@ -442,61 +442,61 @@ During a session, Pi may ask for tool permissions. Reply:
 
 ## Step 7: Enable Natural Language Scheduling
 
-cc-connect supports scheduled tasks (cron jobs). You can always create them via slash commands (`/cron add ...`) or CLI (`cc-connect cron add ...`). To let Pi **understand natural language** like "every day at 6am, summarize trending repos", add the following instructions to the Pi project instructions in your `work_dir`.
+pi-connect supports scheduled tasks (cron jobs). You can always create them via slash commands (`/cron add ...`) or CLI (`pi-connect cron add ...`). To let Pi **understand natural language** like "every day at 6am, summarize trending repos", add the following instructions to the Pi project instructions in your `work_dir`.
 
 **Content to add**:
 
 ```markdown
-# cc-connect Integration
+# pi-connect Integration
 
-This project is managed via cc-connect, a bridge to messaging platforms.
+This project is managed via pi-connect, a bridge to messaging platforms.
 
 ## Scheduled tasks (cron)
 When the user asks you to do something on a schedule (e.g. "every day at 6am",
 "every Monday morning"), use the Bash/shell tool to run:
 
-  cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
+  pi-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
 
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set — do NOT
 specify --project or --session-key.
 
 Examples:
-  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
-  cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
+  pi-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
+  pi-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
 
 To list, edit, or delete cron jobs:
-  cc-connect cron list
-  cc-connect cron edit <job-id> <field> <value>
-  cc-connect cron del <job-id>
+  pi-connect cron list
+  pi-connect cron edit <job-id> <field> <value>
+  pi-connect cron del <job-id>
 
 Use `cron edit` to modify a single field instead of delete-and-recreate.
 Common editable fields: cron_expr, prompt, exec, description, enabled (true/false), mute (true/false), timeout_mins (int).
-Run `cc-connect cron edit --help` for the full field list.
+Run `pi-connect cron edit --help` for the full field list.
 
 Examples:
-  cc-connect cron edit abc123 cron_expr "0 9 * * *"
-  cc-connect cron edit abc123 enabled false
-  cc-connect cron edit abc123 prompt "Updated daily summary task"
+  pi-connect cron edit abc123 cron_expr "0 9 * * *"
+  pi-connect cron edit abc123 enabled false
+  pi-connect cron edit abc123 prompt "Updated daily summary task"
 
 ## Send message to current chat
 To proactively send a message back to the user's chat session (use --stdin heredoc for long/multi-line messages):
 
-  cc-connect send --stdin <<'CCEOF'
+  pi-connect send --stdin <<'CCEOF'
   your message here (any special characters are safe)
   CCEOF
 
 For short single-line messages:
 
-  cc-connect send -m "short message"
+  pi-connect send -m "short message"
 ```
 
-After adding this file, the agent will be able to translate natural language scheduling requests into `cc-connect cron add` commands automatically.
+After adding this file, the agent will be able to translate natural language scheduling requests into `pi-connect cron add` commands automatically.
 
-> **Tip:** You may want to add local instruction files to your `.gitignore` if you don't want cc-connect instructions committed to version control.
+> **Tip:** You may want to add local instruction files to your `.gitignore` if you don't want pi-connect instructions committed to version control.
 
 ## Multi-Project Setup
 
-A single cc-connect process can manage multiple projects. Each project uses Pi with its own work directory and platforms:
+A single pi-connect process can manage multiple projects. Each project uses Pi with its own work directory and platforms:
 
 ```toml
 [[projects]]
@@ -539,49 +539,49 @@ token = "xxx"
 ### Check current version
 
 ```bash
-cc-connect --version
+pi-connect --version
 ```
 
 ### npm users
 
 ```bash
-npm update -g cc-connect
+npm update -g pi-connect
 ```
 
 ### Binary users
 
-Check the latest release at https://github.com/chenhg5/cc-connect/releases and compare with your local version. To upgrade:
+Check the latest release at https://github.com/tasercake/pi-connect/releases and compare with your local version. To upgrade:
 
 ```bash
 # Linux/macOS — replace with your platform suffix
-curl -L -o /usr/local/bin/cc-connect https://github.com/chenhg5/cc-connect/releases/latest/download/cc-connect-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
-chmod +x /usr/local/bin/cc-connect
+curl -L -o /usr/local/bin/pi-connect https://github.com/tasercake/pi-connect/releases/latest/download/pi-connect-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+chmod +x /usr/local/bin/pi-connect
 ```
 
 ### Source users
 
 ```bash
-cd cc-connect
+cd pi-connect
 git pull
 make build
 ```
 
-After upgrading, restart the running cc-connect process.
+After upgrading, restart the running pi-connect process.
 
 ## Step 8: Run as Background Service (Optional)
 
-You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent, Windows Task Scheduler task).
+You can run pi-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent, Windows Task Scheduler task).
 
 ### Install the daemon
 
 ```bash
-cc-connect daemon install --config ~/.cc-connect/config.toml
+pi-connect daemon install --config ~/.pi-connect/config.toml
 ```
 
 You can also point the daemon at the directory that contains `config.toml`:
 
 ```bash
-cc-connect daemon install --work-dir ~/.cc-connect
+pi-connect daemon install --work-dir ~/.pi-connect
 ```
 
 Optional flags: `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit). `--config` points to a config file, while `--work-dir` points to the directory containing `config.toml`.
@@ -589,32 +589,32 @@ Optional flags: `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--
 ### Control the service
 
 ```bash
-cc-connect daemon start
-cc-connect daemon stop
-cc-connect daemon restart
-cc-connect daemon status
+pi-connect daemon start
+pi-connect daemon stop
+pi-connect daemon restart
+pi-connect daemon status
 ```
 
 ### View logs
 
 ```bash
-cc-connect daemon logs           # tail current log
-cc-connect daemon logs -f         # follow (like tail -f)
-cc-connect daemon logs -n 100     # last 100 lines
-cc-connect daemon logs --log-file /path/to/log  # custom log file
+pi-connect daemon logs           # tail current log
+pi-connect daemon logs -f         # follow (like tail -f)
+pi-connect daemon logs -n 100     # last 100 lines
+pi-connect daemon logs --log-file /path/to/log  # custom log file
 ```
 
 Logs auto-rotate at the configured max size and keep one backup.
 
-On Windows, `daemon install` creates a native Task Scheduler task named `cc-connect`.
+On Windows, `daemon install` creates a native Task Scheduler task named `pi-connect`.
 The task runs at user logon and is also started immediately after installation. The
-installer writes a small PowerShell launcher under `~/.cc-connect` so the scheduled
+installer writes a small PowerShell launcher under `~/.pi-connect` so the scheduled
 task uses the selected config directory, log file, PATH, and proxy environment.
 
 ### Uninstall
 
 ```bash
-cc-connect daemon uninstall
+pi-connect daemon uninstall
 ```
 
 ## Additional Features
@@ -626,12 +626,12 @@ The following additional features are available:
 - **Voice Reply (TTS)**: Text-to-speech via Qwen TTS / OpenAI TTS. Requires `ffmpeg` and `[tts]` config.
 - **Image Messages**: Send images to Pi for multimodal analysis
 - **API Provider Management**: Runtime switching between API providers via `/provider` command or CLI
-- **CLI Send**: `cc-connect send` to inject messages into active sessions from external processes
+- **CLI Send**: `pi-connect send` to inject messages into active sessions from external processes
 
 ## Troubleshooting
 
 - **"session already in use"** — A previous Pi process may still be running. Use `/new` to start a fresh session.
-- **No response from bot** — Check `cc-connect` logs. Set `level = "debug"` in `[log]` for verbose output.
+- **No response from bot** — Check `pi-connect` logs. Set `level = "debug"` in `[log]` for verbose output.
 - **WeChat Work can't send messages** — Ensure your outbound IP is in the Trusted IP whitelist. If using a proxy, check the proxy is reachable.
 - **LINE/WeChat Work can't receive messages** — Ensure your webhook URL is publicly accessible (ngrok/cloudflared running).
-- **macOS binary won't open** — Run `xattr -d com.apple.quarantine cc-connect` to remove quarantine flag.
+- **macOS binary won't open** — Run `xattr -d com.apple.quarantine pi-connect` to remove quarantine flag.

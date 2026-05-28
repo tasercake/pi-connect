@@ -12,7 +12,7 @@ import (
 
 func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
 	cfg := Config{
-		BinaryPath: "/opt/cc-connect/cc-connect",
+		BinaryPath: "/opt/pi-connect/pi-connect",
 		WorkDir:    "/tmp/wd",
 		LogFile:    "/tmp/log",
 		LogMaxSize: 10485760,

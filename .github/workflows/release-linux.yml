@@ -38,5 +38,5 @@ jobs:
           name: Latest Linux Build
           target_commitish: ${{ github.sha }}
           make_latest: true
-          files: dist/cc-connect-linux-amd64
+          files: dist/pi-connect-linux-amd64
           fail_on_unmatched_files: true
