@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -477,6 +478,102 @@ func drainRPCEvents(s *piRPCSession) []core.Event {
 		default:
 			return evts
 		}
+	}
+}
+
+func TestPiRPCSessionTryEmitAfterCloseDoesNotPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Close followed by tryEmit panicked: %v", r)
+		}
+	}()
+
+	s := newTestRPCSession()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("late reaper error")})
+
+	if _, ok := <-s.Events(); ok {
+		t.Fatal("Events() channel is open after Close()")
+	}
+}
+
+func TestPiRPCSessionCloseIsIdempotent(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Close called twice panicked: %v", r)
+		}
+	}()
+
+	s := newTestRPCSession()
+	if err := s.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if s.Alive() {
+		t.Fatal("Alive() is true after first Close()")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if _, ok := <-s.Events(); ok {
+		t.Fatal("Events() channel is open after second Close()")
+	}
+}
+
+func TestPiRPCSessionTryEmitOpenSessionDeliversAndDropsWhenFull(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.Close()
+
+	s.tryEmit(core.Event{Type: core.EventText, Content: "hello"})
+
+	evt := <-s.Events()
+	if evt.Type != core.EventText || evt.Content != "hello" {
+		t.Fatalf("event = %#v, want EventText hello", evt)
+	}
+
+	for range cap(s.events) {
+		s.tryEmit(core.Event{Type: core.EventText, Content: "fill"})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.tryEmit(core.Event{Type: core.EventText, Content: "overflow"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("tryEmit blocked when event channel was full")
+	}
+}
+
+func TestPiRPCSessionCloseOverlapsProcessExitWithStderr(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Close overlapping process exit with stderr panicked: %v", r)
+		}
+	}()
+
+	tmp := t.TempDir()
+	fakeScriptPath := filepath.Join(tmp, "fake-pi-rpc-exit-stderr.sh")
+	script := "#!/bin/sh\necho 'catalog fetch failed: test trigger' >&2\nexit 7\n"
+	if err := os.WriteFile(fakeScriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pi rpc script: %v", err)
+	}
+
+	s, err := newPiRPCSession(context.Background(), fakeScriptPath, tmp, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiRPCSession() error = %v", err)
+	}
+	if err := s.startProcess(); err != nil {
+		t.Fatalf("startProcess() error = %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 
