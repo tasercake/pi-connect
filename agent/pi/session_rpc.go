@@ -51,11 +51,14 @@ type piRPCSession struct {
 	thinking string
 	extraEnv []string
 
-	events    chan core.Event
-	sessionID atomic.Value // string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	alive     atomic.Bool
+	events       chan core.Event
+	eventsMu     sync.RWMutex
+	eventsClosed bool
+	closeOnce    sync.Once
+	sessionID    atomic.Value // string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	alive        atomic.Bool
 
 	startOnce sync.Once
 	startErr  error
@@ -781,16 +784,38 @@ func (s *piRPCSession) cancelPending(err error) {
 }
 
 func (s *piRPCSession) tryEmit(evt core.Event) {
-	if s.ctx == nil {
+	if s.events == nil {
+		return
+	}
+	if s.ctx != nil {
 		select {
-		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
 		default:
 		}
+	}
+
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	if s.eventsClosed {
 		return
 	}
 	select {
 	case s.events <- evt:
-	case <-s.ctx.Done():
+	default:
+	}
+}
+
+func (s *piRPCSession) closeEvents() {
+	if s.events == nil {
+		return
+	}
+
+	s.eventsMu.Lock()
+	defer s.eventsMu.Unlock()
+	if !s.eventsClosed {
+		s.eventsClosed = true
+		close(s.events)
 	}
 }
 
@@ -815,33 +840,37 @@ func (s *piRPCSession) CurrentSessionID() string {
 func (s *piRPCSession) Alive() bool { return s.alive.Load() }
 
 func (s *piRPCSession) Close() error {
-	s.alive.Store(false)
-	// Try a graceful shutdown by closing stdin first.
-	s.procMu.Lock()
-	stdin := s.stdin
-	proc := s.proc
-	s.procMu.Unlock()
-	if stdin != nil {
-		_ = stdin.Close()
-	}
-	if proc != nil && proc.Process != nil {
-		_ = proc.Process.Signal(os.Interrupt)
-	}
-	s.cancel()
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(8 * time.Second):
-		if proc != nil && proc.Process != nil {
-			_ = proc.Process.Kill()
+	s.closeOnce.Do(func() {
+		s.alive.Store(false)
+		// Try a graceful shutdown by closing stdin first.
+		s.procMu.Lock()
+		stdin := s.stdin
+		proc := s.proc
+		s.procMu.Unlock()
+		if stdin != nil {
+			_ = stdin.Close()
 		}
-		slog.Warn("piRPCSession: close timed out, killed")
-	}
-	close(s.events)
+		if proc != nil && proc.Process != nil {
+			_ = proc.Process.Signal(os.Interrupt)
+		}
+		if s.cancel != nil {
+			s.cancel()
+		}
+		done := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(8 * time.Second):
+			if proc != nil && proc.Process != nil {
+				_ = proc.Process.Kill()
+			}
+			slog.Warn("piRPCSession: close timed out, killed")
+		}
+		s.closeEvents()
+	})
 	return nil
 }
 
