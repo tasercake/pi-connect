@@ -192,6 +192,8 @@ func (s *piRPCSession) doStart() error {
 	s.wg.Add(1)
 	go s.readLoop()
 
+	s.acquireSessionIDFromState("startup")
+
 	// Reaper goroutine: when the process exits, mark closed and emit final event.
 	go func() {
 		err := cmd.Wait()
@@ -549,6 +551,9 @@ func (s *piRPCSession) handleResponse(line []byte) {
 		slog.Debug("piRPCSession: bad response line", "err", err)
 		return
 	}
+	if resp.Success && resp.Command == "get_state" {
+		s.storeSessionIDFromStateData(resp.Data)
+	}
 	key := idKey(resp.ID)
 	if key == "" {
 		return
@@ -690,6 +695,9 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 	if !resp.success {
 		return fmt.Errorf("piRPCSession: pi rejected prompt: %s", resp.errMsg)
 	}
+	if s.CurrentSessionID() == "" {
+		s.acquireSessionIDFromState("post_prompt")
+	}
 	return nil
 }
 
@@ -726,8 +734,44 @@ func isLikelyExtensionCommand(msg string) bool {
 	return true
 }
 
+func (s *piRPCSession) acquireSessionIDFromState(reason string) {
+	if s.CurrentSessionID() != "" {
+		return
+	}
+	resp, err := s.callWithTimeout(map[string]any{"type": "get_state"}, 2*time.Second)
+	if err != nil {
+		slog.Debug("piRPCSession: get_state session id lookup failed", "reason", reason, "error", err)
+		return
+	}
+	if !resp.success {
+		slog.Debug("piRPCSession: get_state session id lookup rejected", "reason", reason, "error", resp.errMsg)
+		return
+	}
+	s.storeSessionIDFromStateData(resp.data)
+}
+
+func (s *piRPCSession) storeSessionIDFromStateData(data json.RawMessage) {
+	if s.CurrentSessionID() != "" || len(bytes.TrimSpace(data)) == 0 {
+		return
+	}
+	var state struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		slog.Debug("piRPCSession: bad get_state data", "error", err)
+		return
+	}
+	if state.SessionID != "" {
+		s.sessionID.Store(state.SessionID)
+	}
+}
+
 // call writes an RPC command (assigning an id) and waits for the matching response.
 func (s *piRPCSession) call(payload map[string]any) (rpcResponse, error) {
+	return s.callWithTimeout(payload, 30*time.Second)
+}
+
+func (s *piRPCSession) callWithTimeout(payload map[string]any, timeout time.Duration) (rpcResponse, error) {
 	id := fmt.Sprintf("%d", s.nextID.Add(1))
 	payload["id"] = id
 	ch := make(chan rpcResponse, 1)
@@ -749,7 +793,7 @@ func (s *piRPCSession) call(payload map[string]any) (rpcResponse, error) {
 		delete(s.pending, id)
 		s.pendingMu.Unlock()
 		return rpcResponse{}, s.ctx.Err()
-	case <-time.After(30 * time.Second):
+	case <-time.After(timeout):
 		s.pendingMu.Lock()
 		delete(s.pending, id)
 		s.pendingMu.Unlock()
