@@ -1488,11 +1488,16 @@ func writeFakePiRPC(t *testing.T, dir string) (string, string, string) {
 	scriptPath := filepath.Join(dir, "fake-pi-rpc.sh")
 	script := `#!/bin/sh
 printf '%s\n' "$@" > "` + argsPath + `"
-IFS= read -r line
-printf '%s\n' "$line" > "` + cmdPath + `"
-id=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-printf '{"id":"%s","type":"response","command":"compact","success":true}\n' "$id"
-sleep 5
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "` + cmdPath + `"
+  id=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  typ=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["type"])')
+  if [ "$typ" = "get_state" ]; then
+    printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{}}\n' "$id"
+  else
+    printf '{"id":"%s","type":"response","command":"%s","success":true}\n' "$id" "$typ"
+  fi
+done
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake rpc script: %v", err)
@@ -1506,11 +1511,118 @@ func readRecordedRPCCommand(t *testing.T, path string) map[string]any {
 	if err != nil {
 		t.Fatalf("read recorded command: %v", err)
 	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
 	var got map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(data), &got); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(lines[len(lines)-1]), &got); err != nil {
 		t.Fatalf("unmarshal recorded command %q: %v", string(data), err)
 	}
 	return got
+}
+
+func TestPiRPCSessionStoreSessionIDFromStateData(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.cancel()
+
+	s.storeSessionIDFromStateData(json.RawMessage(`{"sessionId":"state-sess-123"}`))
+	if got := s.CurrentSessionID(); got != "state-sess-123" {
+		t.Fatalf("sessionID = %q, want state-sess-123", got)
+	}
+
+	s.storeSessionIDFromStateData(json.RawMessage(`{"sessionId":"other"}`))
+	if got := s.CurrentSessionID(); got != "state-sess-123" {
+		t.Fatalf("sessionID overwritten = %q", got)
+	}
+}
+
+func writeFakePiRPCState(t *testing.T, dir, startupSID, postPromptSID string) (string, string) {
+	t.Helper()
+	cmdPath := filepath.Join(dir, "cmds.jsonl")
+	scriptPath := filepath.Join(dir, "fake-pi-rpc-state.sh")
+	script := `#!/bin/sh
+cmd_path="` + cmdPath + `"
+startup_sid="` + startupSID + `"
+post_prompt_sid="` + postPromptSID + `"
+prompt_seen=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$cmd_path"
+  id=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  typ=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["type"])')
+  if [ "$typ" = "get_state" ]; then
+    sid="$startup_sid"
+    if [ "$prompt_seen" = "1" ]; then sid="$post_prompt_sid"; fi
+    printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s"}}\n' "$id" "$sid"
+  elif [ "$typ" = "prompt" ]; then
+    prompt_seen=1
+    printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+    printf '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}\n'
+  else
+    printf '{"id":"%s","type":"response","command":"%s","success":true}\n' "$id" "$typ"
+  fi
+done
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake rpc state script: %v", err)
+	}
+	return scriptPath, cmdPath
+}
+
+func TestPiRPCSessionStartupAcquiresSessionIDFromGetState(t *testing.T) {
+	tmp := t.TempDir()
+	fake, _ := writeFakePiRPCState(t, tmp, "startup-sess", "post-sess")
+	s, err := newPiRPCSession(context.Background(), fake, tmp, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiRPCSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.startProcess(); err != nil {
+		t.Fatalf("startProcess: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "startup-sess" {
+		t.Fatalf("sessionID = %q, want startup-sess", got)
+	}
+}
+
+func TestPiRPCSessionPostPromptAcquiresSessionIDWhenStartupStateEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	fake, _ := writeFakePiRPCState(t, tmp, "", "post-prompt-sess")
+	s, err := newPiRPCSession(context.Background(), fake, tmp, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newPiRPCSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.Send("hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "post-prompt-sess" {
+		t.Fatalf("sessionID = %q, want post-prompt-sess", got)
+	}
+}
+
+func TestPiRPCSessionLegacySessionEventStillSetsSessionID(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.cancel()
+
+	s.dispatchLine([]byte(`{"type":"session","id":"legacy-sess"}`))
+	if got := s.CurrentSessionID(); got != "legacy-sess" {
+		t.Fatalf("sessionID = %q, want legacy-sess", got)
+	}
+}
+
+func TestPiRPCSessionAgentEndResultUsesLearnedSessionID(t *testing.T) {
+	s := newTestRPCSession()
+	defer s.cancel()
+	s.storeSessionIDFromStateData(json.RawMessage(`{"sessionId":"learned-sess"}`))
+
+	s.rpcHandleAgentEnd(map[string]any{"messages": []any{map[string]any{
+		"role":    "assistant",
+		"content": []any{map[string]any{"type": "text", "text": "done"}},
+	}}})
+	evts := drainRPCEvents(s)
+	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].SessionID != "learned-sess" {
+		t.Fatalf("events = %+v, want EventResult with learned SessionID", evts)
+	}
 }
 
 func TestPiRPCSessionCompactContextSendsCompactCommand(t *testing.T) {
