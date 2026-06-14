@@ -403,33 +403,108 @@ func TestSaveImagesToDisk_Empty(t *testing.T) {
 
 // ── cleanAttachments ─────────────────────────────────────────
 
-func TestCleanAttachments(t *testing.T) {
+func TestCleanAttachments_KeepsRecentFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	attachDir := filepath.Join(tmpDir, ".pi-connect", "attachments")
-	os.MkdirAll(attachDir, 0o755)
-
-	// Create some files.
-	os.WriteFile(filepath.Join(attachDir, "old1.png"), []byte("data"), 0o644)
-	os.WriteFile(filepath.Join(attachDir, "old2.jpg"), []byte("data"), 0o644)
-
-	// Verify files exist.
-	entries, _ := os.ReadDir(attachDir)
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 files, got %d", len(entries))
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
 	}
 
-	cleanAttachments(tmpDir)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	path := filepath.Join(attachDir, "recent.png")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chtimes(path, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
 
-	// Files should be removed.
-	entries, _ = os.ReadDir(attachDir)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 files after clean, got %d", len(entries))
+	cleanAttachmentsWithLimits(tmpDir, 1024, 7*24*time.Hour, now)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("recent file should survive: %v", err)
+	}
+}
+
+func TestCleanAttachments_DeletesOldFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	attachDir := filepath.Join(tmpDir, ".pi-connect", "attachments")
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	oldPath := filepath.Join(attachDir, "old.png")
+	recentPath := filepath.Join(attachDir, "recent.png")
+	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
+		t.Fatalf("WriteFile old: %v", err)
+	}
+	if err := os.WriteFile(recentPath, []byte("recent"), 0o644); err != nil {
+		t.Fatalf("WriteFile recent: %v", err)
+	}
+	oldTime := now.Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes old: %v", err)
+	}
+	recentTime := now.Add(-time.Hour)
+	if err := os.Chtimes(recentPath, recentTime, recentTime); err != nil {
+		t.Fatalf("Chtimes recent: %v", err)
+	}
+
+	cleanAttachmentsWithLimits(tmpDir, 1024, 7*24*time.Hour, now)
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old file should be deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(recentPath); err != nil {
+		t.Fatalf("recent file should survive: %v", err)
+	}
+}
+
+func TestCleanAttachments_SizeCapDeletesOldestUntilUnderCap(t *testing.T) {
+	tmpDir := t.TempDir()
+	attachDir := filepath.Join(tmpDir, ".pi-connect", "attachments")
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	files := []struct {
+		name string
+		size int
+		age  time.Duration
+	}{
+		{name: "oldest.bin", size: 6, age: 3 * time.Hour},
+		{name: "middle.bin", size: 4, age: 2 * time.Hour},
+		{name: "newest.bin", size: 4, age: time.Hour},
+	}
+	for _, f := range files {
+		path := filepath.Join(attachDir, f.name)
+		if err := os.WriteFile(path, bytes.Repeat([]byte("x"), f.size), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", f.name, err)
+		}
+		modTime := now.Add(-f.age)
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatalf("Chtimes %s: %v", f.name, err)
+		}
+	}
+
+	cleanAttachmentsWithLimits(tmpDir, 8, 7*24*time.Hour, now)
+
+	if _, err := os.Stat(filepath.Join(attachDir, "oldest.bin")); !os.IsNotExist(err) {
+		t.Fatalf("oldest file should be deleted, stat err=%v", err)
+	}
+	for _, name := range []string{"middle.bin", "newest.bin"} {
+		if _, err := os.Stat(filepath.Join(attachDir, name)); err != nil {
+			t.Fatalf("%s should survive: %v", name, err)
+		}
 	}
 }
 
 func TestCleanAttachments_NonexistentDir(t *testing.T) {
 	// Should not panic or error on non-existent directory.
-	cleanAttachments("/nonexistent/path/xyz")
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	cleanAttachmentsWithLimits(filepath.Join(t.TempDir(), "missing"), 8, time.Hour, now)
 }
 
 // ── handleEvent ──────────────────────────────────────────────
