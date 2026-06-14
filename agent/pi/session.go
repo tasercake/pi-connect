@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,11 @@ import (
 )
 
 var piJSONHeartbeatInterval = time.Minute
+
+const (
+	attachmentMaxTotalBytes = int64(1 << 30) // 1 GiB
+	attachmentMaxAge        = 7 * 24 * time.Hour
+)
 
 // piSession manages a multi-turn pi coding agent conversation.
 // Each Send() spawns `pi --mode json -p <prompt>`.
@@ -852,18 +858,61 @@ func (s *piSession) Close() error {
 	return nil
 }
 
-// cleanAttachments removes files from the attachments directory to avoid
-// accumulating files across turns.
+// cleanAttachments performs bounded GC on the attachments directory to avoid
+// unbounded growth while keeping recent files available across turns.
 func cleanAttachments(workDir string) {
+	cleanAttachmentsWithLimits(workDir, attachmentMaxTotalBytes, attachmentMaxAge, time.Now())
+}
+
+func cleanAttachmentsWithLimits(workDir string, maxTotalBytes int64, maxAge time.Duration, now time.Time) {
 	attachDir := filepath.Join(workDir, ".pi-connect", "attachments")
 	entries, err := os.ReadDir(attachDir)
 	if err != nil {
 		return // directory may not exist yet
 	}
+	type attachmentFile struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+	files := make([]attachmentFile, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
-			os.Remove(filepath.Join(attachDir, e.Name()))
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
 		}
+		path := filepath.Join(attachDir, e.Name())
+		if maxAge >= 0 && now.Sub(info.ModTime()) > maxAge {
+			if err := os.Remove(path); err != nil {
+				slog.Warn("piSession: failed to remove old attachment", "path", path, "error", err)
+			}
+			continue
+		}
+		files = append(files, attachmentFile{path: path, size: info.Size(), modTime: info.ModTime()})
+	}
+
+	if maxTotalBytes <= 0 {
+		return
+	}
+	var total int64
+	for _, f := range files {
+		total += f.size
+	}
+	if total <= maxTotalBytes {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.Before(files[j].modTime)
+	})
+	for _, f := range files {
+		if total <= maxTotalBytes {
+			break
+		}
+		if err := os.Remove(f.path); err != nil {
+			slog.Warn("piSession: failed to remove attachment over size cap", "path", f.path, "error", err)
+			continue
+		}
+		total -= f.size
 	}
 }
 
