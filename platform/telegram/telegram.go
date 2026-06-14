@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,32 @@ type replyContext struct {
 	chatID    int64
 	threadID  int
 	messageID int
+}
+
+type mediaGroupKey struct {
+	chatID       int64
+	threadID     int
+	userID       int64
+	mediaGroupID string
+}
+
+type pendingMediaGroup struct {
+	key      mediaGroupKey
+	items    []pendingMediaGroupItem
+	accepted bool
+	timer    *time.Timer
+}
+
+type pendingMediaGroupItem struct {
+	messageID  int
+	message    *models.Message
+	core       core.Message
+	imageFile  string
+	fileID     string
+	fileMime   string
+	fileName   string
+	hasCaption bool
+	directed   bool
 }
 
 // telegramBot abstracts the Telegram bot API methods for testability.
@@ -125,12 +152,17 @@ type Platform struct {
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+
+	mediaGroupMu       sync.Mutex
+	mediaGroupDebounce time.Duration
+	mediaGroups        map[mediaGroupKey]*pendingMediaGroup
 }
 
 const (
-	initialReconnectBackoff = time.Second
-	maxReconnectBackoff     = 30 * time.Second
-	stableConnectionWindow  = 10 * time.Second
+	initialReconnectBackoff   = time.Second
+	maxReconnectBackoff       = 30 * time.Second
+	stableConnectionWindow    = 10 * time.Second
+	defaultMediaGroupDebounce = 1500 * time.Millisecond
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -359,9 +391,11 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		chatName = msg.Chat.Title
 	}
 
+	directed := true
 	if isGroup && !p.groupReplyAll {
 		slog.Debug("telegram: checking group message", "text", msg.Text, "is_command", isCommand(msg))
-		if !p.isDirectedAtBot(msg) {
+		directed = p.isDirectedAtBot(msg)
+		if !directed && msg.MediaGroupID == "" {
 			return
 		}
 	}
@@ -374,21 +408,33 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	if len(msg.Photo) > 0 {
 		best := msg.Photo[len(msg.Photo)-1]
-		imgData, err := p.downloadFile(best.FileID)
-		if err != nil {
-			slog.Error("telegram: download photo failed", "error", err)
-			return
-		}
 		caption := stripBotMention(msg.Caption, botName)
-		p.dispatchMessage(&core.Message{
+		base := core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:    caption,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
-			Images:     []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 			ReplyCtx:   rctx,
-		}, msg)
+		}
+		if msg.MediaGroupID != "" {
+			p.enqueueMediaGroupItem(mediaGroupKey{chatID: msg.Chat.ID, threadID: threadID, userID: msg.From.ID, mediaGroupID: msg.MediaGroupID}, pendingMediaGroupItem{
+				messageID:  msg.ID,
+				message:    msg,
+				core:       base,
+				imageFile:  best.FileID,
+				hasCaption: caption != "",
+				directed:   directed,
+			})
+			return
+		}
+		imgData, err := p.downloadFile(best.FileID)
+		if err != nil {
+			slog.Error("telegram: download photo failed", "error", err)
+			return
+		}
+		base.Images = []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}}
+		p.dispatchMessage(&base, msg)
 		return
 	}
 
@@ -447,21 +493,35 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	if msg.Document != nil {
 		slog.Info("telegram: document received", "user", userName, "file_name", msg.Document.FileName, "mime", msg.Document.MimeType, "file_id", msg.Document.FileID)
-		fileData, err := p.downloadFile(msg.Document.FileID)
-		if err != nil {
-			slog.Error("telegram: download document failed", "error", err)
-			return
-		}
 		caption := stripBotMention(msg.Caption, botName)
-		p.dispatchMessage(&core.Message{
+		base := core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:    caption,
 			MessageID:  strconv.Itoa(msg.ID),
 			ChannelKey: channelKey,
-			Files:      []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}},
 			ReplyCtx:   rctx,
-		}, msg)
+		}
+		if msg.MediaGroupID != "" {
+			p.enqueueMediaGroupItem(mediaGroupKey{chatID: msg.Chat.ID, threadID: threadID, userID: msg.From.ID, mediaGroupID: msg.MediaGroupID}, pendingMediaGroupItem{
+				messageID:  msg.ID,
+				message:    msg,
+				core:       base,
+				fileID:     msg.Document.FileID,
+				fileMime:   msg.Document.MimeType,
+				fileName:   msg.Document.FileName,
+				hasCaption: caption != "",
+				directed:   directed,
+			})
+			return
+		}
+		fileData, err := p.downloadFile(msg.Document.FileID)
+		if err != nil {
+			slog.Error("telegram: download document failed", "error", err)
+			return
+		}
+		base.Files = []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}}
+		p.dispatchMessage(&base, msg)
 		return
 	}
 
@@ -498,6 +558,98 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		ChannelKey: channelKey,
 		ReplyCtx:   rctx,
 	}, msg)
+}
+
+func (p *Platform) enqueueMediaGroupItem(key mediaGroupKey, item pendingMediaGroupItem) {
+	debounce := p.mediaGroupDebounce
+	if debounce <= 0 {
+		debounce = defaultMediaGroupDebounce
+	}
+
+	p.mediaGroupMu.Lock()
+	if p.mediaGroups == nil {
+		p.mediaGroups = make(map[mediaGroupKey]*pendingMediaGroup)
+	}
+	group := p.mediaGroups[key]
+	if group == nil {
+		group = &pendingMediaGroup{key: key}
+		p.mediaGroups[key] = group
+	}
+	group.items = append(group.items, item)
+	group.accepted = group.accepted || item.directed
+	if group.timer != nil {
+		group.timer.Stop()
+	}
+	group.timer = time.AfterFunc(debounce, func() {
+		p.flushMediaGroup(key)
+	})
+	p.mediaGroupMu.Unlock()
+}
+
+func (p *Platform) flushMediaGroup(key mediaGroupKey) {
+	p.mediaGroupMu.Lock()
+	group := p.mediaGroups[key]
+	if group == nil {
+		p.mediaGroupMu.Unlock()
+		return
+	}
+	delete(p.mediaGroups, key)
+	accepted := group.accepted
+	items := append([]pendingMediaGroupItem(nil), group.items...)
+	p.mediaGroupMu.Unlock()
+
+	if !accepted {
+		return
+	}
+	if len(items) == 0 {
+		return
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].messageID < items[j].messageID })
+
+	baseIdx := 0
+	for i, item := range items {
+		if item.hasCaption {
+			baseIdx = i
+			break
+		}
+	}
+
+	out := items[baseIdx].core
+	out.Images = nil
+	out.Files = nil
+	out.MessageID = strconv.Itoa(items[0].messageID)
+	for _, item := range items {
+		if item.imageFile != "" {
+			imgData, err := p.downloadFile(item.imageFile)
+			if err != nil {
+				slog.Error("telegram: download media group photo failed", "error", err, "message_id", item.messageID)
+				return
+			}
+			out.Images = append(out.Images, core.ImageAttachment{MimeType: "image/jpeg", Data: imgData})
+			continue
+		}
+		if item.fileID != "" {
+			fileData, err := p.downloadFile(item.fileID)
+			if err != nil {
+				slog.Error("telegram: download media group document failed", "error", err, "message_id", item.messageID)
+				return
+			}
+			out.Files = append(out.Files, core.FileAttachment{MimeType: item.fileMime, Data: fileData, FileName: item.fileName})
+		}
+	}
+
+	p.dispatchMessage(&out, items[baseIdx].message)
+}
+
+func (p *Platform) cancelMediaGroups() {
+	p.mediaGroupMu.Lock()
+	defer p.mediaGroupMu.Unlock()
+	for key, group := range p.mediaGroups {
+		if group.timer != nil {
+			group.timer.Stop()
+		}
+		delete(p.mediaGroups, key)
+	}
 }
 
 func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
@@ -1414,6 +1566,7 @@ func (p *Platform) Stop() error {
 	p.selfUser = nil
 	p.mu.Unlock()
 
+	p.cancelMediaGroups()
 	if cancel != nil {
 		cancel()
 	}

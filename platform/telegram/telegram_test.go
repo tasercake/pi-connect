@@ -83,9 +83,11 @@ type stubTelegramBot struct {
 	getFileCalls         int
 	setReactionCalls     int
 
-	sendErr    error
-	getFileErr error
-	file       *models.File
+	sendErr     error
+	getFileErr  error
+	file        *models.File
+	files       map[string]*models.File
+	downloadURL string
 }
 
 func newStubTelegramBot() *stubTelegramBot {
@@ -191,17 +193,25 @@ func (b *stubTelegramBot) SetMyCommands(_ context.Context, _ *tgbot.SetMyCommand
 	return true, nil
 }
 
-func (b *stubTelegramBot) GetFile(_ context.Context, _ *tgbot.GetFileParams) (*models.File, error) {
+func (b *stubTelegramBot) GetFile(_ context.Context, params *tgbot.GetFileParams) (*models.File, error) {
 	b.mu.Lock()
 	b.getFileCalls++
 	b.mu.Unlock()
 	if b.getFileErr != nil {
 		return nil, b.getFileErr
 	}
+	if b.files != nil {
+		if f := b.files[params.FileID]; f != nil {
+			return f, nil
+		}
+	}
 	return b.file, nil
 }
 
 func (b *stubTelegramBot) FileDownloadLink(f *models.File) string {
+	if b.downloadURL != "" {
+		return b.downloadURL + "/" + f.FilePath
+	}
 	return "https://test.example.com/file/" + f.FilePath
 }
 
@@ -892,6 +902,174 @@ func TestHandleMessageWithForumTopic(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("message not handled")
+	}
+}
+
+func TestHandleMessageMediaGroupPhotosAggregates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, strings.TrimPrefix(r.URL.Path, "/"))
+	}))
+	defer server.Close()
+
+	handled := make(chan *core.Message, 2)
+	p := &Platform{token: "token", httpClient: server.Client(), groupReplyAll: true, mediaGroupDebounce: 10 * time.Millisecond}
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg }
+	p.bot = &stubTelegramBot{
+		file:        &models.File{FilePath: "fallback"},
+		downloadURL: server.URL,
+		files: map[string]*models.File{
+			"photo-3": {FilePath: "third"},
+			"photo-1": {FilePath: "first"},
+			"photo-2": {FilePath: "second"},
+		},
+	}
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	for _, msg := range []*models.Message{
+		telegramPhotoMessage(3, 100, 7, "album", "photo-3", ""),
+		telegramPhotoMessage(1, 100, 7, "album", "photo-1", ""),
+		telegramPhotoMessage(2, 100, 7, "album", "photo-2", "look @mybot"),
+	} {
+		p.handleMessage(context.Background(), msg)
+	}
+
+	select {
+	case got := <-handled:
+		if got.Content != "look" {
+			t.Fatalf("Content = %q, want %q", got.Content, "look")
+		}
+		if len(got.Images) != 3 {
+			t.Fatalf("len(Images) = %d, want 3", len(got.Images))
+		}
+		want := []string{"first", "second", "third"}
+		for i := range want {
+			if string(got.Images[i].Data) != want[i] {
+				t.Fatalf("Images[%d] = %q, want %q", i, got.Images[i].Data, want[i])
+			}
+		}
+		if got.MessageID != "1" {
+			t.Fatalf("MessageID = %q, want first sorted id 1", got.MessageID)
+		}
+		if rc := got.ReplyCtx.(replyContext); rc.messageID != 2 {
+			t.Fatalf("ReplyCtx messageID = %d, want caption message 2", rc.messageID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("media group not handled")
+	}
+}
+
+func TestHandleMessageMediaGroupSeparatesChatUserAndGroup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, strings.TrimPrefix(r.URL.Path, "/"))
+	}))
+	defer server.Close()
+
+	handled := make(chan *core.Message, 4)
+	p := &Platform{token: "token", httpClient: server.Client(), groupReplyAll: true, mediaGroupDebounce: 10 * time.Millisecond}
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg }
+	p.bot = &stubTelegramBot{file: &models.File{FilePath: "file"}, downloadURL: server.URL}
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), telegramPhotoMessage(1, 100, 7, "same", "a", ""))
+	p.handleMessage(context.Background(), telegramPhotoMessage(2, 101, 7, "same", "b", ""))
+	p.handleMessage(context.Background(), telegramPhotoMessage(3, 100, 8, "same", "c", ""))
+	p.handleMessage(context.Background(), telegramPhotoMessage(4, 100, 7, "other", "d", ""))
+
+	seen := make(map[string]bool)
+	for range 4 {
+		select {
+		case got := <-handled:
+			if len(got.Images) != 1 {
+				t.Fatalf("len(Images) = %d, want isolated groups with 1 image", len(got.Images))
+			}
+			seen[got.SessionKey+":"+got.MessageID] = true
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for separated groups")
+		}
+	}
+	for _, key := range []string{"telegram:100:7:1", "telegram:101:7:2", "telegram:100:8:3", "telegram:100:7:4"} {
+		if !seen[key] {
+			t.Fatalf("missing dispatched group %s in %#v", key, seen)
+		}
+	}
+}
+
+func TestHandleMessageMediaGroupIncludesDocumentsAndPhotos(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, strings.TrimPrefix(r.URL.Path, "/"))
+	}))
+	defer server.Close()
+
+	handled := make(chan *core.Message, 1)
+	p := &Platform{token: "token", httpClient: server.Client(), groupReplyAll: true, mediaGroupDebounce: 10 * time.Millisecond}
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg }
+	p.bot = &stubTelegramBot{
+		file:        &models.File{FilePath: "fallback"},
+		downloadURL: server.URL,
+		files: map[string]*models.File{
+			"photo": {FilePath: "photo-bytes"},
+			"doc":   {FilePath: "doc-bytes"},
+		},
+	}
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), telegramPhotoMessage(1, 100, 7, "mixed", "photo", ""))
+	p.handleMessage(context.Background(), &models.Message{
+		ID:           2,
+		Date:         int(time.Now().Unix()),
+		MediaGroupID: "mixed",
+		Caption:      "caption",
+		From:         &models.User{ID: 7, Username: "alice"},
+		Chat:         models.Chat{ID: 100, Type: models.ChatTypePrivate},
+		Document:     &models.Document{FileID: "doc", FileName: "doc.txt", MimeType: "text/plain"},
+	})
+
+	select {
+	case got := <-handled:
+		if got.Content != "caption" || len(got.Images) != 1 || len(got.Files) != 1 {
+			t.Fatalf("got content=%q images=%d files=%d, want caption/1/1", got.Content, len(got.Images), len(got.Files))
+		}
+		if string(got.Images[0].Data) != "photo-bytes" || string(got.Files[0].Data) != "doc-bytes" || got.Files[0].FileName != "doc.txt" {
+			t.Fatalf("unexpected attachments: %#v %#v", got.Images, got.Files)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mixed media group not handled")
+	}
+}
+
+func TestHandleMessagePhotoWithoutMediaGroupDispatchesImmediately(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "photo")
+	}))
+	defer server.Close()
+
+	handled := make(chan *core.Message, 1)
+	p := &Platform{token: "token", httpClient: server.Client(), groupReplyAll: true, mediaGroupDebounce: time.Hour}
+	p.handler = func(_ core.Platform, msg *core.Message) { handled <- msg }
+	p.bot = &stubTelegramBot{file: &models.File{FilePath: "photo"}, downloadURL: server.URL}
+	p.selfUser = &models.User{ID: 42, Username: "mybot"}
+
+	p.handleMessage(context.Background(), telegramPhotoMessage(1, 100, 7, "", "photo", "now"))
+
+	select {
+	case got := <-handled:
+		if got.Content != "now" || len(got.Images) != 1 {
+			t.Fatalf("got content=%q images=%d, want immediate photo", got.Content, len(got.Images))
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("non-media-group photo was not dispatched immediately")
+	}
+}
+
+func telegramPhotoMessage(id int, chatID, userID int64, mediaGroupID, fileID, caption string) *models.Message {
+	return &models.Message{
+		ID:           id,
+		Date:         int(time.Now().Unix()),
+		MediaGroupID: mediaGroupID,
+		Caption:      caption,
+		From:         &models.User{ID: userID, Username: "alice"},
+		Chat:         models.Chat{ID: chatID, Type: models.ChatTypePrivate},
+		Photo:        []models.PhotoSize{{FileID: fileID, Width: 10, Height: 10}},
 	}
 }
 
