@@ -1685,7 +1685,7 @@ func TestPiRPCSessionLegacySessionEventStillSetsSessionID(t *testing.T) {
 	}
 }
 
-func TestPiRPCSessionAgentEndResultUsesLearnedSessionID(t *testing.T) {
+func TestPiRPCSessionAgentSettledResultUsesLearnedSessionID(t *testing.T) {
 	s := newTestRPCSession()
 	defer s.cancel()
 	s.storeSessionIDFromStateData(json.RawMessage(`{"sessionId":"learned-sess"}`))
@@ -1694,6 +1694,7 @@ func TestPiRPCSessionAgentEndResultUsesLearnedSessionID(t *testing.T) {
 		"role":    "assistant",
 		"content": []any{map[string]any{"type": "text", "text": "done"}},
 	}}})
+	s.rpcHandleAgentSettled()
 	evts := drainRPCEvents(s)
 	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].SessionID != "learned-sess" {
 		t.Fatalf("events = %+v, want EventResult with learned SessionID", evts)
@@ -2280,10 +2281,11 @@ func TestPiIssue5MessageRecordOverflowErrorSuppressed(t *testing.T) {
 	}
 }
 
-func TestPiIssue5RPCOverflowOnlyAgentEndEmitsError(t *testing.T) {
+func TestPiIssue5RPCOverflowOnlyEmitsErrorAtSettled(t *testing.T) {
 	s := &piRPCSession{events: make(chan core.Event, 8)}
 
 	s.rpcHandleAgentEnd(map[string]any{"messages": []any{map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"}}})
+	s.rpcHandleAgentSettled()
 
 	evts := drainRPCEvents(s)
 	if len(evts) != 1 || evts[0].Type != core.EventError || evts[0].Error == nil {
@@ -2291,13 +2293,14 @@ func TestPiIssue5RPCOverflowOnlyAgentEndEmitsError(t *testing.T) {
 	}
 }
 
-func TestPiIssue5RPCOverflowThenSuccessAgentEndClearsError(t *testing.T) {
+func TestPiIssue5RPCOverflowThenSuccessSettledClearsError(t *testing.T) {
 	s := &piRPCSession{events: make(chan core.Event, 8)}
 
 	s.rpcHandleAgentEnd(map[string]any{"messages": []any{
 		map[string]any{"role": "assistant", "errorMessage": "context_length_exceeded: too long"},
 		map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "recovered"}}},
 	}})
+	s.rpcHandleAgentSettled()
 
 	evts := drainRPCEvents(s)
 	if len(evts) != 1 || evts[0].Type != core.EventResult || evts[0].Content != "recovered" {
@@ -2321,6 +2324,7 @@ func TestPiIssue5RPCContextUsageFromAgentEnd(t *testing.T) {
 			"totalTokens": float64(272991),
 		},
 	}}})
+	s.rpcHandleAgentSettled()
 
 	usage := s.GetContextUsage()
 	if usage == nil || usage.UsedTokens != 272991 || usage.CachedInputTokens != 269824 {

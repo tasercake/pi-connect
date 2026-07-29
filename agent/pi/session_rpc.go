@@ -51,14 +51,17 @@ type piRPCSession struct {
 	thinking string
 	extraEnv []string
 
-	events       chan core.Event
-	eventsMu     sync.RWMutex
-	eventsClosed bool
-	closeOnce    sync.Once
-	sessionID    atomic.Value // string
-	ctx          context.Context
-	cancel       context.CancelFunc
-	alive        atomic.Bool
+	events        chan core.Event
+	eventsMu      sync.RWMutex
+	emitMu        sync.Mutex // reserves one channel slot for lifecycle events
+	eventsClosed  bool
+	closeOnce     sync.Once
+	transportOnce sync.Once
+	sessionID     atomic.Value // string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	alive         atomic.Bool
+	closing       atomic.Bool
 
 	startOnce sync.Once
 	startErr  error
@@ -81,8 +84,18 @@ type piRPCSession struct {
 	streamMu    sync.Mutex
 	isStreaming bool
 
+	// promptPending covers extension errors emitted while Send waits for its
+	// authoritative prompt ACK, before agent_start establishes turn state.
+	promptPending bool // guarded by turnMu
+
 	// thinking accumulation buffer.
 	thinkingBuf strings.Builder
+
+	// Pi 0.82.1 makes agent_settled the only terminal prompt boundary. All
+	// assistant text/errors remain private here until that event, so a failed
+	// attempt cannot escape before Pi's native retry/compaction machinery runs.
+	turnMu sync.Mutex
+	turn   rpcTurnState
 
 	usageMu                   sync.Mutex
 	contextUsage              *core.ContextUsage
@@ -96,6 +109,44 @@ type rpcResponse struct {
 	success bool
 	data    json.RawMessage
 	errMsg  string
+}
+
+type rpcTurnState struct {
+	active              bool
+	attemptOutput       string
+	attemptSucceeded    bool
+	streamed            strings.Builder
+	committed           strings.Builder
+	committedSuccess    bool
+	attemptErr          string
+	finalErr            string
+	attemptUsage        piUsage
+	attemptUsages       []piUsage
+	pendingExtensionErr string
+	deferredCustom      []string
+	finalizedSeq        uint64
+}
+
+// rpcProviderError is a settled assistant/provider-turn failure. The RPC
+// transport and persistent Pi process are still healthy.
+type rpcProviderError struct{ message string }
+
+func (e *rpcProviderError) Error() string { return e.message }
+
+// rpcTransportError means stdout/process/protocol liveness was lost and the
+// persistent session can no longer accept another turn.
+type rpcTransportError struct{ cause error }
+
+func (e *rpcTransportError) Error() string { return e.cause.Error() }
+func (e *rpcTransportError) Unwrap() error { return e.cause }
+
+type rpcExtensionError struct {
+	extension string
+	message   string
+}
+
+func (e *rpcExtensionError) Error() string {
+	return fmt.Sprintf("extension %s: %s", e.extension, e.message)
 }
 
 // extensionUIBridge handles extension_ui_request events. Implementations decide
@@ -194,14 +245,14 @@ func (s *piRPCSession) doStart() error {
 
 	s.acquireSessionIDFromState("startup")
 
-	// Reaper goroutine: when the process exits, mark closed and emit final event.
+	// Reaper only owns process state. readLoop owns the single transport-failure
+	// event, avoiding duplicate stderr/EOF errors racing into the engine.
 	go func() {
 		err := cmd.Wait()
 		s.alive.Store(false)
 		stderrMsg := strings.TrimSpace(stderrBuf.String())
 		if err != nil && stderrMsg != "" {
 			slog.Error("piRPCSession: process exited", "error", err, "stderr", truncStr(stderrMsg, 300))
-			s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)})
 		} else if err != nil {
 			slog.Warn("piRPCSession: process exited", "error", err)
 		}
@@ -236,20 +287,20 @@ func (s *piRPCSession) readLoop() {
 		}
 		s.dispatchLine(line)
 	}
-	if err := scanner.Err(); err != nil {
-		slog.Debug("piRPCSession: stdout scanner closed", "error", err)
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		slog.Debug("piRPCSession: stdout scanner closed", "error", scanErr)
 	}
-	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
-		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
+	if s.closing.Load() || s.ctx.Err() != nil {
+		return
 	}
-	// Emit final EventResult when readLoop returns.
-	usage := s.GetContextUsage()
-	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
-	if usage != nil {
-		evt.InputTokens = usage.UsedTokens
-		evt.OutputTokens = usage.OutputTokens
+	cause := scanErr
+	if cause == nil {
+		// stderr is still owned by cmd.Wait's writer here; reading its buffer
+		// would race process teardown. Reaper logs details after Wait completes.
+		cause = errors.New("pi RPC stdout closed unexpectedly")
 	}
-	s.tryEmit(evt)
+	s.emitTransportFailure(cause)
 }
 
 func (s *piRPCSession) dispatchLine(line []byte) {
@@ -297,29 +348,55 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		s.rpcHandleMessageEnd(raw)
 	case "custom_message":
 		if content := customMessageContent(raw); content != "" {
-			s.tryEmit(core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()})
+			s.rpcFinalizeCustomMessage(content)
 		}
 	case "agent_start":
 		s.streamMu.Lock()
 		s.isStreaming = true
 		s.streamMu.Unlock()
+		s.rpcBeginAttempt()
 	case "agent_end":
+		// agent_end is deliberately not a terminal boundary. Pi can retry,
+		// compact, or continue queued work after it.
+		s.rpcHandleAgentEnd(raw)
+	case "agent_settled":
 		s.streamMu.Lock()
 		s.isStreaming = false
 		s.streamMu.Unlock()
-		s.rpcHandleAgentEnd(raw)
+		s.rpcHandleAgentSettled()
+	case "auto_retry_start":
+		s.rpcHandleAutoRetryStart(raw)
+	case "auto_retry_end":
+		s.rpcHandleAutoRetryEnd(raw)
 	case "extension_error":
-		errMsg, _ := raw["error"].(string)
-		extPath, _ := raw["extensionPath"].(string)
-		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("extension %s: %s", filepath.Base(extPath), errMsg)})
+		s.rpcHandleExtensionError(raw)
 	case "turn_end":
 		// A single prompt can produce multiple turns (assistant -> tools -> assistant).
-		// Do not mark the pi-connect turn complete until agent_end, otherwise the
-		// foreground handler sends an early "(empty response)" and the remaining
-		// assistant text is relayed later by the unsolicited reader.
-	case "compaction_start", "compaction_end":
+		// Only agent_settled completes the pi-connect turn.
+	case "compaction_start", "compaction_end", "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished":
 		s.rpcHandleCompactionEvent(eventType, raw)
+	case "queue_update":
+		// agent_settled remains authoritative; queue updates are liveness only.
+		slog.Debug("piRPCSession: queue state changed", "session_id", s.CurrentSessionID())
 	}
+}
+
+func (s *piRPCSession) rpcHandleExtensionError(raw map[string]any) {
+	errMsg, _ := raw["error"].(string)
+	extPath, _ := raw["extensionPath"].(string)
+	extErr := &rpcExtensionError{extension: filepath.Base(extPath), message: errMsg}
+
+	s.turnMu.Lock()
+	if s.turn.active || s.promptPending {
+		// EventError ends the engine's foreground wait even when nontransport.
+		// Defer errors tied to an ACK/active run to avoid a second settlement.
+		s.turn.pendingExtensionErr = extErr.Error()
+		s.turnMu.Unlock()
+		return
+	}
+	s.turn.finalizedSeq++
+	s.turnMu.Unlock()
+	s.emitLifecycle(core.Event{Type: core.EventError, Error: extErr})
 }
 
 func (s *piRPCSession) rpcHandleCompactionEvent(eventType string, raw map[string]any) {
@@ -330,22 +407,62 @@ func (s *piRPCSession) rpcHandleCompactionEvent(eventType string, raw map[string
 	case "compaction_end":
 		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
 			slog.Warn("piRPCSession: compaction failed", "session_id", s.CurrentSessionID(), "error", errMsg)
-			s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("context compaction failed: %s", errMsg)})
+			s.turnMu.Lock()
+			active := s.turn.active
+			hasValidAnswer := s.turn.committedSuccess || s.turn.attemptSucceeded
+			if active && !hasValidAnswer {
+				s.turn.finalErr = "context compaction failed: " + errMsg
+			}
+			s.turnMu.Unlock()
+			if active && hasValidAnswer {
+				// Threshold compaction runs after a valid answer. Its failure must
+				// not replace that answer with a failed turn.
+				s.tryEmit(core.Event{Type: core.EventThinking, Content: "Context compaction failed; answer preserved"})
+			}
+			if !active {
+				// Manual compact commands do not create an agent run/agent_settled.
+				s.emitLifecycle(core.Event{Type: core.EventError, Error: &rpcProviderError{message: "context compaction failed: " + errMsg}})
+			}
 			return
 		}
 		slog.Info("piRPCSession: compaction completed", "session_id", s.CurrentSessionID())
 		s.tryEmit(core.Event{Type: core.EventThinking, Content: "Context compaction completed"})
+	case "summarization_retry_scheduled":
+		s.tryEmit(core.Event{Type: core.EventThinking, Content: "Context compaction retry scheduled"})
+	case "summarization_retry_attempt_start":
+		s.tryEmit(core.Event{Type: core.EventThinking, Content: "Context compaction retry started"})
 	}
 }
 
-// rpcHandleAgentEnd emits EventResult{Done: true} once the whole agent run is
-// complete. RPC mode keeps the pi process alive, so the readLoop's terminal
-// EventResult only fires on session close, never per prompt.
+func (s *piRPCSession) rpcBeginAttempt() {
+	s.turnMu.Lock()
+	var extensionWarning string
+	if !s.turn.active {
+		seq := s.turn.finalizedSeq
+		extensionWarning = s.turn.pendingExtensionErr
+		deferredCustom := append([]string(nil), s.turn.deferredCustom...)
+		s.turn = rpcTurnState{active: true, finalizedSeq: seq, deferredCustom: deferredCustom}
+	}
+	s.turn.attemptOutput = ""
+	s.turn.streamed.Reset()
+	s.turn.attemptErr = ""
+	s.turn.attemptSucceeded = false
+	s.turn.attemptUsage = piUsage{}
+	s.turnMu.Unlock()
+	if extensionWarning != "" {
+		s.tryEmit(core.Event{Type: core.EventThinking, Content: extensionWarning})
+	}
+}
+
+// rpcHandleAgentEnd records one low-level run. It never emits EventResult or
+// EventError: willRetry, overflow compaction, or extension-queued continuation
+// can all follow before agent_settled.
 func (s *piRPCSession) rpcHandleAgentEnd(raw map[string]any) {
-	evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
-	sawSuccessfulAssistant := false
+	var output strings.Builder
+	var finalErr string
+	var sawSuccessfulAssistant bool
+	var attemptUsage piUsage
 	if messages, ok := raw["messages"].([]any); ok {
-		var b strings.Builder
 		for _, m := range messages {
 			msg, _ := m.(map[string]any)
 			if msg == nil {
@@ -355,44 +472,172 @@ func (s *piRPCSession) rpcHandleAgentEnd(raw map[string]any) {
 				continue
 			}
 			s.recordUsageFromMessage(msg)
-			if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+			if u, ok := parsePiUsage(msg["usage"]); ok {
+				attemptUsage = u
+			}
+			if errMsg := assistantError(msg); errMsg != "" {
+				finalErr = errMsg
 				if isRecoverablePiOverflow(errMsg) {
 					s.storePendingOverflowError(errMsg)
-					continue
 				}
-				s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
 				continue
 			}
 			if assistantMessageSucceeded(msg) {
+				finalErr = ""
 				sawSuccessfulAssistant = true
 				s.clearPendingOverflowError()
 			}
-			if content, ok := msg["content"].([]any); ok {
-				for _, c := range content {
-					item, _ := c.(map[string]any)
-					if item == nil {
-						continue
-					}
-					if t, _ := item["type"].(string); t != "text" {
-						continue
-					}
-					if text, ok := item["text"].(string); ok {
-						b.WriteString(text)
-					}
-				}
-			}
+			output.WriteString(assistantText(msg))
 		}
-		evt.Content = b.String()
 	}
-	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" && !sawSuccessfulAssistant {
-		s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
+
+	willRetry, _ := raw["willRetry"].(bool)
+	s.turnMu.Lock()
+	if !s.turn.active {
+		seq := s.turn.finalizedSeq
+		s.turn = rpcTurnState{active: true, finalizedSeq: seq}
+	}
+	if output.Len() > 0 {
+		s.turn.attemptOutput = output.String()
+	} else if s.turn.attemptOutput == "" {
+		s.turn.attemptOutput = s.turn.streamed.String()
+	}
+	if finalErr != "" {
+		s.turn.attemptErr = finalErr
+	}
+	if sawSuccessfulAssistant {
+		s.turn.attemptSucceeded = true
+	}
+	if attemptUsage.usedTokens() > 0 {
+		s.turn.attemptUsage = attemptUsage
+	}
+	if s.turn.attemptUsage.usedTokens() > 0 {
+		s.turn.attemptUsages = append(s.turn.attemptUsages, s.turn.attemptUsage)
+	}
+	if willRetry {
+		// Preserve completed assistant/tool-turn text from this run, but discard
+		// the final failed assistant call's uncommitted stream.
+		s.turn.committed.WriteString(output.String())
+		s.turn.committedSuccess = s.turn.committedSuccess || sawSuccessfulAssistant
+		s.turn.attemptOutput = ""
+		s.turn.streamed.Reset()
+		s.turn.attemptErr = ""
+		s.turn.finalErr = ""
+	} else if s.turn.attemptErr != "" {
+		s.turn.finalErr = s.turn.attemptErr
+		s.turn.attemptOutput = ""
+	} else {
+		s.turn.committed.WriteString(s.turn.attemptOutput)
+		s.turn.committedSuccess = s.turn.committedSuccess || s.turn.attemptSucceeded
+		s.turn.finalErr = ""
+		s.turn.attemptOutput = ""
+	}
+	s.turnMu.Unlock()
+}
+
+func (s *piRPCSession) rpcHandleAutoRetryStart(_ map[string]any) {
+	s.turnMu.Lock()
+	if !s.turn.active {
+		seq := s.turn.finalizedSeq
+		s.turn = rpcTurnState{active: true, finalizedSeq: seq}
+	}
+	// Be defensive with older producers that omit agent_end.willRetry.
+	if s.turn.finalErr != "" {
+		s.turn.finalErr = ""
+	}
+	s.turn.attemptOutput = ""
+	s.turn.streamed.Reset()
+	s.turn.attemptErr = ""
+	s.turn.attemptSucceeded = false
+	s.turnMu.Unlock()
+	s.tryEmit(core.Event{Type: core.EventThinking, Content: "Provider retry in progress"})
+}
+
+func (s *piRPCSession) rpcHandleAutoRetryEnd(raw map[string]any) {
+	if success, _ := raw["success"].(bool); success {
 		return
 	}
-	if usage := s.GetContextUsage(); usage != nil {
-		evt.InputTokens = usage.UsedTokens
-		evt.OutputTokens = usage.OutputTokens
+	if finalErr, _ := raw["finalError"].(string); finalErr != "" {
+		s.turnMu.Lock()
+		if s.turn.active {
+			s.turn.finalErr = finalErr
+		}
+		s.turnMu.Unlock()
 	}
-	s.tryEmit(evt)
+}
+
+func (s *piRPCSession) rpcHandleAgentSettled() {
+	s.turnMu.Lock()
+	if !s.turn.active {
+		s.turnMu.Unlock()
+		return
+	}
+	content := s.turn.committed.String()
+	if s.turn.finalErr == "" && s.turn.attemptOutput != "" {
+		content += s.turn.attemptOutput
+	}
+	errMsg := s.turn.finalErr
+	if errMsg == "" && content == "" && !s.turn.committedSuccess && !s.turn.attemptSucceeded {
+		errMsg = s.pendingOverflowErrorForEOF()
+	}
+	extensionWarning := s.turn.pendingExtensionErr
+	deferredCustom := append([]string(nil), s.turn.deferredCustom...)
+	s.turn.pendingExtensionErr = ""
+	s.turn.deferredCustom = nil
+	s.turn.active = false
+	s.turn.finalizedSeq++
+	s.turnMu.Unlock()
+
+	if extensionWarning != "" {
+		s.tryEmit(core.Event{Type: core.EventThinking, Content: extensionWarning})
+	}
+	if errMsg != "" {
+		if len(deferredCustom) > 0 {
+			// Core returns immediately on EventError and resyncs remaining events.
+			// Fold side notifications into the one settled error so none are lost.
+			errMsg += "\n\n" + strings.Join(deferredCustom, "\n")
+			deferredCustom = nil
+		}
+		s.emitLifecycle(core.Event{Type: core.EventError, Error: &rpcProviderError{message: errMsg}})
+	} else {
+		evt := core.Event{Type: core.EventResult, Content: content, SessionID: s.CurrentSessionID(), Done: true}
+		if usage := s.GetContextUsage(); usage != nil {
+			evt.InputTokens = usage.UsedTokens
+			evt.OutputTokens = usage.OutputTokens
+		}
+		s.emitLifecycle(evt)
+	}
+	for _, custom := range deferredCustom {
+		s.emitLifecycle(core.Event{Type: core.EventResult, Content: custom, Done: true, SessionID: s.CurrentSessionID()})
+	}
+}
+
+func assistantError(msg map[string]any) string {
+	if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+		return errMsg
+	}
+	if stopReason, _ := msg["stopReason"].(string); stopReason == "error" {
+		return "assistant provider error"
+	}
+	return ""
+}
+
+func assistantText(msg map[string]any) string {
+	content, _ := msg["content"].([]any)
+	var b strings.Builder
+	for _, c := range content {
+		item, _ := c.(map[string]any)
+		if item == nil {
+			continue
+		}
+		if typ, _ := item["type"].(string); typ != "text" {
+			continue
+		}
+		if text, ok := item["text"].(string); ok {
+			b.WriteString(text)
+		}
+	}
+	return b.String()
 }
 
 func (s *piRPCSession) rpcHandleMessageUpdate(raw map[string]any) {
@@ -404,7 +649,15 @@ func (s *piRPCSession) rpcHandleMessageUpdate(raw map[string]any) {
 	switch subType {
 	case "text_delta":
 		if delta, _ := ame["delta"].(string); delta != "" {
-			s.tryEmit(core.Event{Type: core.EventText, Content: delta})
+			// Buffer until agent_settled. Streaming failed-attempt text outward
+			// cannot be retracted safely when Pi retries.
+			s.turnMu.Lock()
+			if !s.turn.active {
+				seq := s.turn.finalizedSeq
+				s.turn = rpcTurnState{active: true, finalizedSeq: seq}
+			}
+			s.turn.streamed.WriteString(delta)
+			s.turnMu.Unlock()
 		}
 	case "thinking_delta":
 		if delta, _ := ame["delta"].(string); delta != "" {
@@ -470,15 +723,32 @@ func (s *piRPCSession) rpcHandleMessageEnd(raw map[string]any) {
 		s.tryEmit(core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncStr(output, 500)})
 	case "assistant":
 		s.recordUsageFromMessage(msg)
-		if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
+		s.turnMu.Lock()
+		if !s.turn.active {
+			seq := s.turn.finalizedSeq
+			s.turn = rpcTurnState{active: true, finalizedSeq: seq}
+		}
+		if u, ok := parsePiUsage(msg["usage"]); ok {
+			s.turn.attemptUsage = u
+		}
+		if errMsg := assistantError(msg); errMsg != "" {
+			s.turn.attemptErr = errMsg
+			s.turn.attemptOutput = ""
+			s.turnMu.Unlock()
 			if isRecoverablePiOverflow(errMsg) {
 				s.storePendingOverflowError(errMsg)
-				return
 			}
-			s.tryEmit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
 			return
 		}
+		text := assistantText(msg)
+		if text != "" {
+			s.turn.attemptOutput += text
+		}
+		s.turnMu.Unlock()
 		if assistantMessageSucceeded(msg) {
+			s.turnMu.Lock()
+			s.turn.attemptSucceeded = true
+			s.turnMu.Unlock()
 			s.clearPendingOverflowError()
 		}
 	}
@@ -668,6 +938,13 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 	// during a turn). Extension commands bypass this: they always go through
 	// `prompt` regardless of streaming.
 	isExt := isLikelyExtensionCommand(prompt)
+	var extensionSeq uint64
+	s.turnMu.Lock()
+	s.promptPending = true
+	if isExt {
+		extensionSeq = s.turn.finalizedSeq
+	}
+	s.turnMu.Unlock()
 	s.streamMu.Lock()
 	streaming := s.isStreaming
 	s.streamMu.Unlock()
@@ -689,6 +966,12 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 	}
 
 	resp, err := s.call(cmd)
+	s.turnMu.Lock()
+	s.promptPending = false
+	if err != nil || !resp.success {
+		s.turn.pendingExtensionErr = ""
+	}
+	s.turnMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("piRPCSession: prompt failed: %w", err)
 	}
@@ -697,6 +980,12 @@ func (s *piRPCSession) Send(prompt string, images []core.ImageAttachment, files 
 	}
 	if s.CurrentSessionID() == "" {
 		s.acquireSessionIDFromState("post_prompt")
+	}
+	if isExt {
+		// Extension commands can be fully handled during prompt preflight and
+		// ACK without starting an agent run; such commands never emit
+		// agent_settled. Complete only when no run/custom result appeared.
+		s.rpcFinalizeExtensionACK(extensionSeq)
 	}
 	return nil
 }
@@ -732,6 +1021,80 @@ func isLikelyExtensionCommand(msg string) bool {
 		return false
 	}
 	return true
+}
+
+func (s *piRPCSession) rpcFinalizeCustomMessage(content string) {
+	s.turnMu.Lock()
+	if s.turn.active || s.promptPending {
+		// Custom/subagent notifications are independent side-channel results.
+		// Defer them behind the authoritative active-turn settlement. promptPending
+		// closes the pre-agent_start race after Send has accepted a prompt.
+		s.turn.deferredCustom = append(s.turn.deferredCustom, content)
+		s.turnMu.Unlock()
+		return
+	}
+	s.turn.finalizedSeq++
+	s.turnMu.Unlock()
+	s.emitLifecycle(core.Event{Type: core.EventResult, Content: content, Done: true, SessionID: s.CurrentSessionID()})
+}
+
+func (s *piRPCSession) rpcFinalizeExtensionACK(before uint64) {
+	s.turnMu.Lock()
+	idle := !s.turn.active && s.turn.finalizedSeq == before
+	s.turnMu.Unlock()
+	if !idle {
+		return
+	}
+
+	// Prompt ACK is emitted immediately before a normal agent run starts, so
+	// local event state alone has a race. A subsequent protocol state query is
+	// ordered after prompt handling and distinguishes true extension-only ACKs
+	// from slash templates/commands that started an agent. This is capability
+	// state, not a settlement timer.
+	resp, err := s.callWithTimeout(map[string]any{"type": "get_state"}, 2*time.Second)
+	if err != nil || !resp.success {
+		if err == nil {
+			err = fmt.Errorf("get_state rejected: %s", resp.errMsg)
+		}
+		s.emitTransportFailure(fmt.Errorf("cannot confirm extension-only prompt completion: %w", err))
+		return
+	}
+	var state struct {
+		IsStreaming bool `json:"isStreaming"`
+	}
+	if err := json.Unmarshal(resp.data, &state); err != nil {
+		s.emitTransportFailure(fmt.Errorf("cannot decode extension completion state: %w", err))
+		return
+	}
+	if state.IsStreaming {
+		return
+	}
+
+	s.turnMu.Lock()
+	if s.turn.active || s.turn.finalizedSeq != before {
+		s.turnMu.Unlock()
+		return
+	}
+	extensionErr := s.turn.pendingExtensionErr
+	deferredCustom := append([]string(nil), s.turn.deferredCustom...)
+	s.turn.pendingExtensionErr = ""
+	s.turn.deferredCustom = nil
+	s.turn.finalizedSeq++
+	s.turnMu.Unlock()
+	if extensionErr != "" {
+		if len(deferredCustom) > 0 {
+			extensionErr += "\n\n" + strings.Join(deferredCustom, "\n")
+		}
+		s.emitLifecycle(core.Event{Type: core.EventError, Error: errors.New(extensionErr)})
+		return
+	}
+	if len(deferredCustom) == 0 {
+		s.emitLifecycle(core.Event{Type: core.EventResult, Done: true, SessionID: s.CurrentSessionID()})
+		return
+	}
+	for _, custom := range deferredCustom {
+		s.emitLifecycle(core.Event{Type: core.EventResult, Content: custom, Done: true, SessionID: s.CurrentSessionID()})
+	}
 }
 
 func (s *piRPCSession) acquireSessionIDFromState(reason string) {
@@ -831,14 +1194,13 @@ func (s *piRPCSession) tryEmit(evt core.Event) {
 	if s.events == nil {
 		return
 	}
-	if s.ctx != nil {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-		}
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	if cap(s.events) > 0 && len(s.events) >= cap(s.events)-1 {
+		// Keep one slot reserved for EventResult/EventError. Only progress may
+		// be coalesced/dropped under backpressure.
+		return
 	}
-
 	s.eventsMu.RLock()
 	defer s.eventsMu.RUnlock()
 	if s.eventsClosed {
@@ -848,6 +1210,37 @@ func (s *piRPCSession) tryEmit(evt core.Event) {
 	case s.events <- evt:
 	default:
 	}
+}
+
+func (s *piRPCSession) emitLifecycle(evt core.Event) {
+	if s.events == nil {
+		return
+	}
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	if s.eventsClosed {
+		return
+	}
+	if s.ctx == nil {
+		s.events <- evt
+		return
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
+}
+
+func (s *piRPCSession) emitTransportFailure(cause error) {
+	if cause == nil {
+		cause = errors.New("pi RPC transport failed")
+	}
+	s.transportOnce.Do(func() {
+		s.alive.Store(false)
+		s.emitLifecycle(core.Event{Type: core.EventError, Error: &rpcTransportError{cause: cause}})
+	})
 }
 
 func (s *piRPCSession) closeEvents() {
@@ -868,10 +1261,8 @@ func (s *piRPCSession) RespondPermission(_ string, _ core.PermissionResult) erro
 }
 
 func (s *piRPCSession) EventErrorIsTerminal(err error) bool {
-	if err == nil {
-		return false
-	}
-	return !strings.HasPrefix(err.Error(), "extension ")
+	var transportErr *rpcTransportError
+	return errors.As(err, &transportErr)
 }
 
 func (s *piRPCSession) Events() <-chan core.Event { return s.events }
@@ -885,6 +1276,7 @@ func (s *piRPCSession) Alive() bool { return s.alive.Load() }
 
 func (s *piRPCSession) Close() error {
 	s.closeOnce.Do(func() {
+		s.closing.Store(true)
 		s.alive.Store(false)
 		// Try a graceful shutdown by closing stdin first.
 		s.procMu.Lock()

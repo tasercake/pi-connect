@@ -68,7 +68,7 @@ make build
 
 ## Step 2: Install Pi
 
-pi-connect in this fork supports the Pi coding agent. Install and authenticate Pi before starting pi-connect.
+pi-connect in this fork supports the Pi coding agent. Install and authenticate Pi before starting pi-connect. RPC transport requires Pi 0.82.1 or newer because it uses the `agent_settled` lifecycle event; older versions are not given a timer-based fallback that could finalize during retry or compaction.
 
 Verify Pi works:
 
