@@ -391,6 +391,25 @@ func (s *interactiveState) markStopped() {
 	close(s.stopCh)
 }
 
+func contextUntilSignal(parent context.Context, signal <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-signal:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func sendAgentSession(ctx context.Context, session AgentSession, prompt string, images []ImageAttachment, files []FileAttachment) error {
+	if sender, ok := session.(ContextSendingSession); ok {
+		return sender.SendContext(ctx, prompt, images, files)
+	}
+	return session.Send(prompt, images, files)
+}
+
 // resolve safely closes the Resolved channel exactly once.
 func (pp *pendingPermission) resolve() {
 	pp.resolveOnce.Do(func() { close(pp.Resolved) })
@@ -2591,7 +2610,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- sendAgentSession(e.ctx, state.agentSession, promptContent, msg.Images, msg.Files)
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -3367,6 +3386,10 @@ var agentErrorHandlers = []agentErrorHandler{
 func (e *Engine) userFacingAgentError(err error) string {
 	if err == nil {
 		return e.i18n.Tf(MsgError, "agent error")
+	}
+	var outcomeUnknown OutcomeUnknownError
+	if errors.As(err, &outcomeUnknown) && outcomeUnknown.OutcomeUnknown() {
+		return e.i18n.T(MsgAgentOutcomeUnknown)
 	}
 	errMsg := strings.TrimSpace(err.Error())
 	for _, h := range agentErrorHandlers {
@@ -4346,7 +4369,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+					nextSend <- sendAgentSession(e.ctx, state.agentSession, queuedPrompt, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
 
@@ -4629,7 +4652,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
+			sendDone <- sendAgentSession(e.ctx, state.agentSession, prompt, queued.images, queued.files)
 		}()
 
 		var stopTyping func()
@@ -4718,7 +4741,7 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, nil, nil); err != nil {
+	if err := sendAgentSession(e.ctx, state.agentSession, text, nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
@@ -8056,6 +8079,9 @@ func sessionSupportsContextCompression(agent Agent, session AgentSession) bool {
 	if session == nil {
 		return false
 	}
+	if _, ok := session.(ContextCompactingSessionWithContext); ok {
+		return true
+	}
 	if _, ok := session.(ContextCompactingSession); ok {
 		return true
 	}
@@ -8121,6 +8147,27 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 
 	drainEvents(state.agentSession.Events())
 
+	if compactor, ok := state.agentSession.(ContextCompactingSessionWithContext); ok {
+		compactCtx, cancelCompact := contextUntilSignal(e.ctx, state.stopSignal())
+		err := compactor.CompactContextWithContext(compactCtx)
+		cancelCompact()
+		if err != nil {
+			if !auto {
+				e.reply(p, replyCtx, e.userFacingAgentError(err))
+			}
+			if !state.agentSession.Alive() {
+				e.cleanupInteractiveState(iKey)
+			}
+			return
+		}
+		drainEvents(state.agentSession.Events())
+		if !auto {
+			e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
+		}
+		e.drainQueuedMessagesAfterCompress(state, session, sessions, iKey, &compressUnlocked)
+		return
+	}
+
 	if compactor, ok := state.agentSession.(ContextCompactingSession); ok {
 		if err := compactor.CompactContext(); err != nil {
 			if !auto {
@@ -8148,7 +8195,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	}
 
 	cmd := compressor.CompressCommand()
-	if err := state.agentSession.Send(cmd, nil, nil); err != nil {
+	if err := sendAgentSession(e.ctx, state.agentSession, cmd, nil, nil); err != nil {
 		if !auto {
 			e.reply(p, replyCtx, e.userFacingAgentError(err))
 		}
@@ -12751,13 +12798,29 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 		}
 	}
 
-	if err := agentSession.Send(message, nil, nil); err != nil {
+	if err := sendAgentSession(ctx, agentSession, message, nil, nil); err != nil {
 		agentSession.Close()
 		return "", fmt.Errorf("send relay message: %w", err)
 	}
 
 	var textParts []string
-	for event := range agentSession.Events() {
+	events := agentSession.Events()
+	for {
+		var event Event
+		var ok bool
+		select {
+		case event, ok = <-events:
+			if !ok {
+				goto relayChannelClosed
+			}
+		case <-ctx.Done():
+			// Acceptance already succeeded. Let the turn settle in the background
+			// so its session remains resumable, but honor the relay deadline even
+			// when Pi emits no progress events.
+			go e.drainRelaySession(agentSession, session, relaySessionKey)
+			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+		}
+
 		switch event.Type {
 		case EventText:
 			if event.Content != "" {
@@ -12818,15 +12881,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 				UpdatedInput: event.ToolInputRaw,
 			})
 		}
-		if ctx.Err() != nil {
-			// Relay timed out. Let the agent finish its turn in the
-			// background so the session state is saved cleanly and the
-			// session remains resumable for the next relay call.
-			go e.drainRelaySession(agentSession, session, relaySessionKey)
-			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
-		}
 	}
 
+relayChannelClosed:
 	// Event channel closed without EventResult.
 	agentSession.Close()
 

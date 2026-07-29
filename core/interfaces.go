@@ -461,6 +461,26 @@ type ContextCompactingSession interface {
 	CompactContext() error
 }
 
+// ContextCompactingSessionWithContext is the cancellation-aware form used when
+// available. ContextCompactingSession remains for compatibility with adapters
+// that cannot yet cancel native compaction.
+type ContextCompactingSessionWithContext interface {
+	CompactContextWithContext(ctx context.Context) error
+}
+
+// ContextSendingSession lets an adapter bind command acceptance to the caller's
+// lifetime without changing the long-standing AgentSession interface.
+type ContextSendingSession interface {
+	SendContext(ctx context.Context, prompt string, images []ImageAttachment, files []FileAttachment) error
+}
+
+// OutcomeUnknownError marks a mutating request that may have been accepted
+// before cancellation or transport loss. Such requests must not be replayed.
+type OutcomeUnknownError interface {
+	error
+	OutcomeUnknown() bool
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files. The engine scans the
 // returned directories for *.md files and registers them as slash commands.

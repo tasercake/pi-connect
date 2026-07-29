@@ -168,6 +168,13 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 }
 
 func (s *piSession) CompactContext() error {
+	return s.CompactContextWithContext(s.ctx)
+}
+
+func (s *piSession) CompactContextWithContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -176,12 +183,12 @@ func (s *piSession) CompactContext() error {
 		return fmt.Errorf("piSession: cannot compact before session id is known")
 	}
 
-	rpc, err := newPiRPCSession(s.ctx, s.cmd, s.workDir, s.model, s.mode, s.thinking, sid, s.extraEnv)
+	rpc, err := newPiRPCSession(ctx, s.cmd, s.workDir, s.model, s.mode, s.thinking, sid, s.extraEnv)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rpc.Close() }()
-	return rpc.CompactContext()
+	return rpc.CompactContextWithContext(ctx)
 }
 
 func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
