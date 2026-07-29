@@ -91,6 +91,64 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	}
 }
 
+type contextBlockingRelaySession struct {
+	*controllableAgentSession
+	contextSeen chan context.Context
+}
+
+func (s *contextBlockingRelaySession) SendContext(ctx context.Context, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.contextSeen <- ctx
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestHandleRelay_ContextAwareAcceptanceHonorsCallerDeadline(t *testing.T) {
+	e := newTestEngine()
+	session := &contextBlockingRelaySession{
+		controllableAgentSession: newControllableSession("relay-session"),
+		contextSeen:              make(chan context.Context, 1),
+	}
+	e.agent = &controllableAgent{nextSession: session}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("HandleRelay() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("relay acceptance ignored deadline: %v", elapsed)
+	}
+	seen := <-session.contextSeen
+	if _, ok := seen.Deadline(); !ok {
+		t.Fatal("SendContext did not receive relay caller deadline")
+	}
+}
+
+func TestHandleRelay_SilentAcceptedTurnHonorsCallerDeadline(t *testing.T) {
+	e := newTestEngine()
+	session := newControllableSession("relay-session")
+	e.agent = &controllableAgent{nextSession: session}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := e.HandleRelay(ctx, "source", "chat-1", "hello")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("HandleRelay() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("silent accepted relay ignored deadline: %v", elapsed)
+	}
+	session.events <- Event{Type: EventResult, Content: "done"}
+	select {
+	case <-session.closed:
+	case <-time.After(time.Second):
+		t.Fatal("background relay drain did not close session")
+	}
+}
+
 func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	e := newTestEngine()
 	session := newControllableSession("relay-session")

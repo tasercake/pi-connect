@@ -535,11 +535,15 @@ func drainEvents(s *piSession) []core.Event {
 func newTestRPCSession() *piRPCSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &piRPCSession{
-		events:  make(chan core.Event, 64),
-		ctx:     ctx,
-		cancel:  cancel,
-		pending: make(map[string]chan rpcResponse),
+		events:       make(chan core.Event, 64),
+		ctx:          ctx,
+		cancel:       cancel,
+		pending:      make(map[string]*rpcPending),
+		writeGate:    make(chan struct{}, 1),
+		mutatingGate: make(chan struct{}, 1),
 	}
+	s.writeGate <- struct{}{}
+	s.mutatingGate <- struct{}{}
 	s.alive.Store(true)
 	return s
 }

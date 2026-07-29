@@ -141,6 +141,7 @@ const (
 	MsgToolAllowedNew              MsgKey = "tool_allowed_new"
 	MsgError                       MsgKey = "error"
 	MsgAgentTemporarilyUnavailable MsgKey = "agent_temporarily_unavailable"
+	MsgAgentOutcomeUnknown         MsgKey = "agent_outcome_unknown"
 	MsgSessionNotFound             MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession   MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession       MsgKey = "failed_to_delete_session"
@@ -728,6 +729,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ Agent 遇到暫時性的上游逾時。請稍後再試。",
 		LangJapanese:           "⚠️ エージェントで一時的な上流タイムアウトが発生しました。しばらくしてから再試行してください。",
 		LangSpanish:            "⚠️ El agente encontró un tiempo de espera temporal aguas arriba. Inténtalo de nuevo en un momento.",
+	},
+	MsgAgentOutcomeUnknown: {
+		LangEnglish:            "⚠️ No acceptance confirmation was received. The request may still have been accepted, so its outcome is unknown and it was not retried automatically.",
+		LangChinese:            "⚠️ 未收到接受确认。该请求仍可能已被接受，因此结果未知，且未自动重试。",
+		LangTraditionalChinese: "⚠️ 未收到接受確認。該請求仍可能已被接受，因此結果未知，且未自動重試。",
+		LangJapanese:           "⚠️ 受理確認を受信できませんでした。リクエストは受理済みの可能性があるため、結果は不明で、自動再試行は行われませんでした。",
+		LangSpanish:            "⚠️ No se recibió confirmación de aceptación. Es posible que la solicitud se haya aceptado, por lo que el resultado es desconocido y no se reintentó automáticamente.",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
