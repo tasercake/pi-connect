@@ -75,6 +75,7 @@ export default function GlobalSettings() {
   const [attachmentSend, setAttachmentSend] = useState('');
   const [logLevel, setLogLevel] = useState('info');
   const [idleTimeout, setIdleTimeout] = useState(120);
+  const [hardStallTimeout, setHardStallTimeout] = useState(0);
   const [thinkingMessages, setThinkingMessages] = useState(true);
   const [thinkingMaxLen, setThinkingMaxLen] = useState(300);
   const [toolMessages, setToolMessages] = useState(true);
@@ -92,6 +93,7 @@ export default function GlobalSettings() {
       setAttachmentSend(s.attachment_send || '');
       setLogLevel(s.log_level || 'info');
       setIdleTimeout(s.idle_timeout_mins ?? 120);
+      setHardStallTimeout(s.hard_stall_timeout_mins ?? 0);
       setThinkingMessages(s.thinking_messages ?? true);
       setThinkingMaxLen(s.thinking_max_len ?? 300);
       setToolMessages(s.tool_messages ?? true);
@@ -118,6 +120,7 @@ export default function GlobalSettings() {
         attachment_send: attachmentSend,
         log_level: logLevel,
         idle_timeout_mins: idleTimeout,
+        hard_stall_timeout_mins: hardStallTimeout,
         thinking_messages: thinkingMessages,
         thinking_max_len: thinkingMaxLen,
         tool_messages: toolMessages,
@@ -166,11 +169,18 @@ export default function GlobalSettings() {
             options={ATTACHMENT_OPTS.map((v) => ({ value: v, label: v || t('settings.default', 'default') }))}
           />
           <NumberInput
-            label={t('settings.idleTimeout', 'Idle timeout (min)')}
+            label={t('settings.idleTimeout', 'Soft stall threshold (min)')}
             value={idleTimeout}
             onChange={setIdleTimeout}
             min={0}
-            hint={t('settings.idleTimeoutHint', 'Auto-stop agent after N minutes of inactivity; 0 = disabled')}
+            hint={t('settings.idleTimeoutHint', 'After silence, probe the process/RPC state; 0 = disabled')}
+          />
+          <NumberInput
+            label={t('settings.hardStallTimeout', 'Hard stall ceiling (min)')}
+            value={hardStallTimeout}
+            onChange={setHardStallTimeout}
+            min={0}
+            hint={t('settings.hardStallTimeoutHint', 'Optional responsive-but-unchanged limit; 0 = disabled')}
           />
         </div>
       </Card>

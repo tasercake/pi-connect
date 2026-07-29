@@ -8867,47 +8867,45 @@ func TestResolveLocalDirPath_AbsoluteAllowed(t *testing.T) {
 
 // --- 2. idle_timeout ---
 
-func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
+func TestEventIdleTimeout_UnsupportedAdapterUsesExplicitAliveFallback(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("idle-test")
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	e.SetEventIdleTimeout(100 * time.Millisecond)
+	e.SetEventIdleTimeout(20 * time.Millisecond)
 
 	key := "test:idle-user"
-	state := &interactiveState{
-		agentSession: sess,
-		platform:     p,
-		replyCtx:     "ctx",
-	}
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
 
 	session := e.sessions.GetOrCreateActive(key)
 	session.TryLock()
-
 	done := make(chan struct{})
 	go func() {
 		e.processInteractiveEvents(state, session, e.sessions, key, "", time.Now(), nil, nil, nil)
 		close(done)
 	}()
 
+	// Unsupported probes do not silently turn healthy silence into death. Alive
+	// remains the explicit fallback signal and is checked every soft threshold.
+	time.Sleep(70 * time.Millisecond)
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("processInteractiveEvents did not return after idle timeout")
+		t.Fatal("unsupported live adapter was closed on silence")
+	default:
 	}
-
-	sent := p.getSent()
-	foundTimeout := false
-	for _, s := range sent {
-		if strings.Contains(s, "timed out") {
-			foundTimeout = true
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("event loop did not settle")
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "no response") || strings.Contains(sent, "recoverable progress") {
+			t.Fatalf("unexpected terminal stall message: %q", sent)
 		}
-	}
-	if !foundTimeout {
-		t.Fatalf("expected timeout error message, got %v", sent)
 	}
 }
 
@@ -8963,7 +8961,7 @@ func TestEventIdleTimeout_ResetOnEvent(t *testing.T) {
 	}
 }
 
-func TestEventIdleTimeout_HeartbeatResetsTimer(t *testing.T) {
+func TestEventIdleTimeout_HeartbeatIsLivenessNotTerminalProgress(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("idle-heartbeat")
 	agent := &controllableAgent{nextSession: sess}
@@ -9004,7 +9002,7 @@ func TestEventIdleTimeout_HeartbeatResetsTimer(t *testing.T) {
 	sent := p.getSent()
 	for _, s := range sent {
 		if strings.Contains(s, "timed out") {
-			t.Fatalf("should NOT have timed out after heartbeat events, got %v", sent)
+			t.Fatalf("heartbeat liveness fallback must not cause terminal timeout, got %v", sent)
 		}
 		if strings.Contains(s, "heartbeat") || strings.Contains(s, "pi_json_process_alive") {
 			t.Fatalf("heartbeat should be user-invisible, got %v", sent)

@@ -305,6 +305,52 @@ type TerminalEventErrorSession interface {
 	EventErrorIsTerminal(error) bool
 }
 
+// StallPhase is an adapter-reconciled foreground operation phase. Values are
+// intentionally transport-neutral so core can apply one watchdog policy.
+type StallPhase string
+
+const (
+	StallPhaseAwaitingAcceptance StallPhase = "awaiting_acceptance"
+	StallPhaseRunning            StallPhase = "running"
+	StallPhaseStreaming          StallPhase = "streaming"
+	StallPhaseTool               StallPhase = "tool"
+	StallPhaseCompacting         StallPhase = "compacting"
+	StallPhaseRetrying           StallPhase = "retrying_continuing"
+	StallPhaseSettled            StallPhase = "settled"
+	StallPhaseProcessDead        StallPhase = "process_dead"
+	StallPhaseTransportBroken    StallPhase = "transport_broken"
+	StallPhaseUnknown            StallPhase = "unknown"
+)
+
+// StallProbeSnapshot contains only control-plane metadata. Cursor must be an
+// opaque durable position; implementations must never include message bodies.
+type StallProbeSnapshot struct {
+	Phase               StallPhase
+	ProcessAlive        bool
+	TransportResponsive bool
+	Generation          uint64
+	ActivitySeq         uint64
+	PID                 int
+	Cursor              string
+	IsStreaming         bool
+	IsCompacting        bool
+	PendingMessageCount int
+	PromptPending       bool
+	LastEventType       string
+}
+
+// StallProbeSession is an optional, bounded, non-mutating reconciliation
+// capability. Implementations must honor ctx and permit concurrent event reads.
+type StallProbeSession interface {
+	ProbeStall(ctx context.Context) (StallProbeSnapshot, error)
+}
+
+// StallInterruptSession is an optional recovery capability. InterruptStall must
+// be safe to issue once, honor ctx, and must not submit or replay a prompt.
+type StallInterruptSession interface {
+	InterruptStall(ctx context.Context) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

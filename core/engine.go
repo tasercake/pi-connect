@@ -214,17 +214,23 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter       *RateLimiter
-	outgoingRL        *OutgoingRateLimiter
-	streamPreview     StreamPreviewCfg
-	instantReply      InstantReplyCfg
-	references        ReferenceRenderCfg
-	relayManager      *RelayManager
-	eventIdleTimeout  time.Duration
-	maxQueuedMessages int
-	dirHistory        *DirHistory
-	baseWorkDir       string
-	projectState      *ProjectStateStore
+	rateLimiter          *RateLimiter
+	outgoingRL           *OutgoingRateLimiter
+	streamPreview        StreamPreviewCfg
+	instantReply         InstantReplyCfg
+	references           ReferenceRenderCfg
+	relayManager         *RelayManager
+	eventIdleTimeout     time.Duration // soft foreground stall threshold
+	hardStallTimeout     time.Duration // 0 disables responsive-but-unchanged ceiling
+	stallProbeTimeout    time.Duration
+	stallProbeInterval   time.Duration
+	stallProbeFailures   int
+	stallGraceProbeCount int
+	stallClock           watchdogClock
+	maxQueuedMessages    int
+	dirHistory           *DirHistory
+	baseWorkDir          string
+	projectState         *ProjectStateStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -436,6 +442,11 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		stallProbeTimeout:     defaultStallProbeTimeout,
+		stallProbeInterval:    defaultStallProbeInterval,
+		stallProbeFailures:    defaultStallProbeFailures,
+		stallGraceProbeCount:  defaultStallGraceProbeCount,
+		stallClock:            realWatchdogClock{},
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 	}
@@ -917,10 +928,38 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 	e.streamPreview = cfg
 }
 
-// SetEventIdleTimeout sets the maximum time to wait between consecutive agent events.
-// 0 disables the timeout entirely.
+// SetEventIdleTimeout sets the soft foreground stall threshold. Silence alone
+// never tears down a live session. 0 disables stall observation entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetHardStallTimeout sets the optional ceiling for a responsive operation that
+// shows no event or durable-cursor progress. 0 (default) favors unattended work
+// and disables this ceiling; definite process/transport loss remains terminal.
+func (e *Engine) SetHardStallTimeout(d time.Duration) {
+	e.hardStallTimeout = d
+}
+
+// setStallWatchdogTimings is a test seam for deterministic tiny-duration tests.
+func (e *Engine) setStallWatchdogTimings(probeTimeout, probeInterval time.Duration, failures, graceProbes int) {
+	e.stallProbeTimeout = probeTimeout
+	e.stallProbeInterval = probeInterval
+	if failures > 0 {
+		e.stallProbeFailures = failures
+	}
+	if graceProbes > 0 {
+		e.stallGraceProbeCount = graceProbes
+	}
+}
+
+// setStallWatchdogClock is a test seam. The clock is used only by the
+// foreground watchdog deadline state machine, never for normal turn timing.
+func (e *Engine) setStallWatchdogClock(clock watchdogClock) {
+	if clock == nil {
+		clock = realWatchdogClock{}
+	}
+	e.stallClock = clock
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -3046,7 +3085,13 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 	}
 }
 
-const defaultEventIdleTimeout = 2 * time.Hour
+const (
+	defaultEventIdleTimeout     = 2 * time.Hour
+	defaultStallProbeTimeout    = 10 * time.Second
+	defaultStallProbeInterval   = time.Minute
+	defaultStallProbeFailures   = 3
+	defaultStallGraceProbeCount = 2
+)
 
 // cardToolEntry stores a tool call record for card content rendering.
 type cardToolEntry struct {
@@ -3485,6 +3530,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	workspaceDir := state.workspaceDir
+	agentSession := state.agentSession
 	replyAgent := state.agent
 	if replyAgent == nil {
 		replyAgent = e.agent
@@ -3528,16 +3574,83 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		e.send(state.platform, state.replyCtx, replyContent)
 	}
 
-	// Idle timeout: 0 = disabled
-	var idleTimer *time.Timer
+	// Foreground watchdog: idle_timeout is a soft observation threshold.
+	// Silence never tears down a live process without bounded reconciliation.
+	watchdogClock := e.stallClock
+	if watchdogClock == nil {
+		watchdogClock = realWatchdogClock{}
+	}
+	var idleTimer watchdogTimer
 	var idleCh <-chan time.Time
+	resetStallTimer := func(d time.Duration) {
+		if idleTimer == nil {
+			return
+		}
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.Ch():
+			default:
+			}
+		}
+		idleTimer.Reset(d)
+		idleCh = idleTimer.Ch()
+	}
 	if e.eventIdleTimeout > 0 {
-		idleTimer = time.NewTimer(e.eventIdleTimeout)
+		idleTimer = watchdogClock.NewTimer(e.eventIdleTimeout)
 		defer idleTimer.Stop()
-		idleCh = idleTimer.C
+		idleCh = idleTimer.Ch()
+	}
+	stallCtx, cancelStallControls := context.WithCancel(e.ctx)
+	defer cancelStallControls()
+	stallResults := make(chan stallControlResult, 1)
+	watchdogStartedAt := watchdogClock.Now()
+	stallDetector := newForegroundStallDetector(watchdogStartedAt, e.hardStallTimeout, e.stallProbeFailures, e.stallGraceProbeCount)
+	lastEventAt := watchdogStartedAt
+	lastEventType := "prompt_dispatched"
+	var stallControlCancel context.CancelFunc
+	var stallControlSeq uint64
+	stallControlActive := false
+	pendingWedgeCleanup := false
+	cancelStallControl := func() {
+		if stallControlCancel != nil {
+			stallControlCancel()
+			stallControlCancel = nil
+		}
+		if stallControlActive {
+			stallControlSeq++ // invalidate a late buffered result
+		}
+		stallControlActive = false
+	}
+	defer cancelStallControl()
+	terminalStall := func(message MsgKey, cause string) {
+		cp.Finalize(ProgressCardStateFailed)
+		sp.discard()
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		p := state.platform
+		queued := len(state.pendingMessages)
+		state.mu.Unlock()
+		cleanupID := fmt.Sprintf("stall-%d", watchdogClock.Now().UnixNano())
+		slog.Error("foreground stall terminal cleanup",
+			"session_key", sessionKey,
+			"operation_id", msgID,
+			"cause", cause,
+			"cleanup_id", cleanupID,
+			"phase", stallDetector.lastSnapshot.Phase,
+			"pid", stallDetector.lastSnapshot.PID,
+			"generation", stallDetector.lastSnapshot.Generation,
+			"activity_seq", stallDetector.lastSnapshot.ActivitySeq,
+			"last_event_age", watchdogClock.Now().Sub(lastEventAt),
+			"last_event_type", lastEventType,
+			"adapter_event_type", stallDetector.lastSnapshot.LastEventType,
+			"interrupt_issued", stallDetector.interrupted,
+			"queued_count", queued,
+		)
+		e.send(p, replyCtx, e.i18n.T(message))
+		e.cleanupInteractiveState(sessionKey, state)
 	}
 
-	events := state.agentSession.Events()
+	events := agentSession.Events()
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -3572,17 +3685,114 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			continue
 		case <-idleCh:
-			slog.Error("agent session idle timeout: no events for too long, killing session",
-				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
-			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			idleCh = nil
+			if pendingWedgeCleanup {
+				// Final linearization point: an already-buffered settlement/event
+				// always wins over verified-wedge cleanup.
+				select {
+				case event, ok = <-events:
+					if !ok {
+						goto channelClosed
+					}
+					pendingWedgeCleanup = false
+					goto eventReceived
+				default:
+					terminalStall(MsgAgentVerifiedStall, "probe_grace_exhausted")
+					return
+				}
+			}
+			if agentSession == nil || !agentSession.Alive() {
+				select {
+				case event, ok = <-events:
+					if !ok {
+						goto channelClosed
+					}
+					goto eventReceived
+				default:
+					terminalStall(MsgAgentTransportLost, "process_dead_at_soft_threshold")
+					return
+				}
+			}
+			stallDetector.attempt++
+			stallControlSeq++
+			stallControlActive = true
+			stallControlCancel = startStallProbe(stallCtx, agentSession, e.stallProbeTimeout, stallControlSeq, stallResults)
+			slog.Warn("foreground soft stall threshold reached; probing control plane",
+				"session_key", sessionKey,
+				"operation_id", msgID,
+				"soft_threshold", e.eventIdleTimeout,
+				"last_event_age", watchdogClock.Now().Sub(lastEventAt),
+				"last_event_type", lastEventType,
+				"probe_attempt", stallDetector.attempt)
+			continue
+		case result := <-stallResults:
+			if !stallControlActive || result.seq != stallControlSeq {
+				continue
+			}
+			if stallControlCancel != nil {
+				stallControlCancel()
+			}
+			stallControlCancel = nil
+			stallControlActive = false
+			if result.kind == stallControlInterrupt {
+				slog.Warn("foreground stall interrupt completed",
+					"session_key", sessionKey,
+					"operation_id", msgID,
+					"outcome", result.err == nil,
+					"latency", result.latency,
+					"error_class", stallControlErrorClass(result.err))
+				resetStallTimer(e.stallProbeInterval)
+				continue
+			}
 			state.mu.Lock()
-			state.eventsNeedResync = true
-			p := state.platform
+			queued := len(state.pendingMessages)
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-			e.cleanupInteractiveState(sessionKey, state)
-			return
+			logStallProbe(sessionKey, msgID, stallDetector, result, lastEventType, lastEventAt, watchdogClock.Now(), queued)
+			switch stallDetector.decide(watchdogClock.Now(), agentSession, result) {
+			case stallTerminalTransport:
+				select {
+				case event, ok = <-events:
+					if !ok {
+						goto channelClosed
+					}
+					goto eventReceived
+				default:
+					terminalStall(MsgAgentTransportLost, "verified_process_or_transport_loss")
+					return
+				}
+			case stallTerminalWedge:
+				// Give settlement one final deterministic observation interval.
+				// Timer branch prioritizes buffered events before cleanup.
+				pendingWedgeCleanup = true
+				resetStallTimer(e.stallProbeInterval)
+			case stallStartInterrupt:
+				select {
+				case event, ok = <-events:
+					if !ok {
+						goto channelClosed
+					}
+					goto eventReceived
+				default:
+				}
+				stallControlSeq++
+				stallControlActive = true
+				stallControlCancel = startStallInterrupt(stallCtx, agentSession, e.stallProbeTimeout, stallControlSeq, stallResults)
+			case stallObserveSoon:
+				if result.snapshot.Phase == StallPhaseSettled {
+					select {
+					case event, ok = <-events:
+						if !ok {
+							goto channelClosed
+						}
+						goto eventReceived
+					default:
+					}
+				}
+				resetStallTimer(e.stallProbeInterval)
+			case stallObserveSoft:
+				resetStallTimer(e.eventIdleTimeout)
+			}
+			continue
 		case <-e.ctx.Done():
 			state.mu.Lock()
 			state.eventsNeedResync = true
@@ -3590,6 +3800,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 		}
 
+	eventReceived:
 		if state.isStopped() {
 			sp.discard()
 			state.mu.Lock()
@@ -3598,15 +3809,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 		}
 
-		// Reset idle timer after receiving an event
-		if idleTimer != nil {
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
-			}
-			idleTimer.Reset(e.eventIdleTimeout)
+		// Real adapter events are foreground progress and win races with a probe.
+		// Synthetic process-alive heartbeats are only a liveness hint: treating
+		// them as operation progress would let a live-but-wedged adapter suppress
+		// control-plane reconciliation forever.
+		if event.Type != EventHeartbeat {
+			pendingWedgeCleanup = false
+			cancelStallControl()
+			lastEventAt = watchdogClock.Now()
+			lastEventType = string(event.Type)
+			stallDetector.eventProgress(lastEventAt)
+			resetStallTimer(e.eventIdleTimeout)
 		}
 
 		if !firstEventLogged {
@@ -4036,16 +4249,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// the user may take a long time to decide, and we don't want
 			// the idle timeout to kill the session during that wait.
 			if idleTimer != nil {
-				idleTimer.Stop()
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.Ch():
+					default:
+					}
+				}
+				idleCh = nil
 			}
 
 			<-pending.Resolved
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
 			// Restart idle timer after permission is resolved
-			if idleTimer != nil {
-				idleTimer.Reset(e.eventIdleTimeout)
-			}
+			resetStallTimer(e.eventIdleTimeout)
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
@@ -4383,6 +4600,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = 0
 				toolCount = 0
 				turnStart = time.Now()
+				watchdogStartedAt = watchdogClock.Now()
+				stallDetector.beginOperation(watchdogStartedAt)
+				pendingWedgeCleanup = false
+				lastEventAt = watchdogStartedAt
+				lastEventType = "queued_prompt_dispatched"
 				firstEventLogged = false
 				waitStart = time.Now()
 				// Reassign the local replyCtx parameter to the queued message's
@@ -4427,11 +4649,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if idleTimer != nil {
 					if !idleTimer.Stop() {
 						select {
-						case <-idleTimer.C:
+						case <-idleTimer.Ch():
 						default:
 						}
 					}
 					idleTimer.Reset(e.eventIdleTimeout)
+					idleCh = idleTimer.Ch()
 				}
 
 				slog.Info("processing queued message",

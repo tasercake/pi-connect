@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,33 @@ import (
 
 	"github.com/BurntSushi/toml"
 )
+
+func testIntPtr(v int) *int { return &v }
+
+func TestSaveGlobalSettingsRejectsNegativeHardStallTimeout(t *testing.T) {
+	var encoded bytes.Buffer
+	if err := toml.NewEncoder(&encoded).Encode(Config{Projects: []ProjectConfig{validProject("demo")}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := ConfigPath
+	ConfigPath = path
+	t.Cleanup(func() { ConfigPath = oldPath })
+	negative := -1
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{HardStallTimeoutMins: &negative}); err == nil || !strings.Contains(err.Error(), "hard_stall_timeout_mins") {
+		t.Fatalf("SaveGlobalSettings() error = %v, want hard-stall validation error", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "hard_stall_timeout_mins") {
+		t.Fatal("invalid hard-stall value was persisted")
+	}
+}
 
 func TestConfigValidate(t *testing.T) {
 	tests := []struct {
@@ -102,6 +130,22 @@ func TestConfigValidate(t *testing.T) {
 			cfg: Config{
 				Projects: []ProjectConfig{validProject("demo")},
 			},
+		},
+		{
+			name: "rejects negative soft stall threshold",
+			cfg: Config{
+				IdleTimeoutMins: testIntPtr(-1),
+				Projects:        []ProjectConfig{validProject("demo")},
+			},
+			wantErr: "idle_timeout_mins must be >= 0",
+		},
+		{
+			name: "rejects negative hard stall ceiling",
+			cfg: Config{
+				HardStallTimeoutMins: testIntPtr(-1),
+				Projects:             []ProjectConfig{validProject("demo")},
+			},
+			wantErr: "hard_stall_timeout_mins must be >= 0",
 		},
 		{
 			name: "rejects unsupported reference platform",

@@ -475,7 +475,8 @@ func main() {
 			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
-		// Wire idle timeout
+		// Wire operation-aware foreground stall watchdog. idle_timeout_mins is
+		// now the soft probe threshold; hard ceiling remains opt-in.
 		if cfg.IdleTimeoutMins != nil {
 			mins := *cfg.IdleTimeoutMins
 			if mins <= 0 {
@@ -483,6 +484,9 @@ func main() {
 			} else {
 				engine.SetEventIdleTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+		if cfg.HardStallTimeoutMins != nil && *cfg.HardStallTimeoutMins > 0 {
+			engine.SetHardStallTimeout(time.Duration(*cfg.HardStallTimeoutMins) * time.Minute)
 		}
 
 		// Wire queue depth
@@ -910,6 +914,10 @@ func main() {
 			if v, ok := updates["idle_timeout_mins"].(float64); ok {
 				iv := int(v)
 				u.IdleTimeoutMins = &iv
+			}
+			if v, ok := updates["hard_stall_timeout_mins"].(float64); ok {
+				iv := int(v)
+				u.HardStallTimeoutMins = &iv
 			}
 			if v, ok := updates["thinking_messages"].(bool); ok {
 				u.ThinkingMessages = &v
@@ -1410,6 +1418,23 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+
+	// Reload foreground watchdog thresholds. A missing soft threshold preserves
+	// the documented 120-minute default; the hard ceiling is opt-in.
+	if cfg.IdleTimeoutMins == nil || *cfg.IdleTimeoutMins <= 0 {
+		if cfg.IdleTimeoutMins == nil {
+			engine.SetEventIdleTimeout(2 * time.Hour)
+		} else {
+			engine.SetEventIdleTimeout(0)
+		}
+	} else {
+		engine.SetEventIdleTimeout(time.Duration(*cfg.IdleTimeoutMins) * time.Minute)
+	}
+	if cfg.HardStallTimeoutMins != nil && *cfg.HardStallTimeoutMins > 0 {
+		engine.SetHardStallTimeout(time.Duration(*cfg.HardStallTimeoutMins) * time.Minute)
+	} else {
+		engine.SetHardStallTimeout(0)
+	}
 
 	// Reload filter_external_sessions
 	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)

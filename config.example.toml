@@ -104,10 +104,23 @@ level = "info" # debug, info, warn, error
 # thinking_messages = false  # Override only this field; others inherit from global
 # tool_messages = false
 
-# Agent idle timeout: max minutes between consecutive agent events before
-# considering the session stuck. Set to 0 to disable the timeout entirely.
-# Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。
+# Foreground soft-stall threshold. After this many minutes without an adapter
+# event, pi-connect performs bounded process/RPC/durable-cursor health probes.
+# Silence alone does not close a live session. Set to 0 to disable observation.
+# 前台软停滞阈值。无适配器事件达到此时间后，pi-connect 会执行有界的进程、RPC
+# 和持久游标健康探测；仅静默不会关闭仍存活的会话。设为 0 禁用观察。
 # idle_timeout_mins = 120  # default: 120 (2 hours) / 默认 120（2 小时）
+
+# Optional ceiling for a responsive operation whose durable cursor and event
+# stream remain unchanged. 0/default disables the ceiling to favor legitimate
+# unattended multi-hour work. When enabled, expiry enters bounded hard-grace
+# probes and at most one safe abort; awaiting prompt acceptance is never aborted
+# or replayed. It applies only to adapters with stall-probe support; unsupported
+# adapters remain observe-only. Definite process/transport death remains terminal regardless.
+# 响应正常但持久游标和事件流不变时的可选上限。0/默认表示禁用，以支持合法的多小时
+# 无人值守任务。启用后会进入有界硬宽限探测并至多安全中断一次；等待提示接受时绝不
+# 中断或重放。明确的进程/传输死亡始终为终止条件。
+# hard_stall_timeout_mins = 0  # default: 0 (disabled) / 默认 0（禁用）
 
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
