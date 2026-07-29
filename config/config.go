@@ -87,30 +87,31 @@ type Config struct {
 	AttachmentSend string `toml:"attachment_send"`
 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
 	// engines behave as if those flags were false. Per-project quiet overrides when set.
-	Quiet              *bool                   `toml:"quiet,omitempty"`
-	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
-	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
-	Projects           []ProjectConfig         `toml:"projects"`
-	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log                LogConfig               `toml:"log"`
-	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech             SpeechConfig            `toml:"speech"`
-	TTS                TTSConfig               `toml:"tts"`
-	Display            DisplayConfig           `toml:"display"`
-	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
-	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Cron               CronConfig              `toml:"cron"`
-	Queue              QueueConfig             `toml:"queue"`
-	Webhook            WebhookConfig           `toml:"webhook"`
-	Bridge             BridgeConfig            `toml:"bridge"`
-	Management         ManagementConfig        `toml:"management"`
-	Hooks              []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	Quiet                *bool                   `toml:"quiet,omitempty"`
+	Providers            []ProviderConfig        `toml:"providers"`                      // global shared providers
+	ProviderPresetsURL   string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
+	Projects             []ProjectConfig         `toml:"projects"`
+	Commands             []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases              []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords          []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                  LogConfig               `toml:"log"`
+	Language             string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech               SpeechConfig            `toml:"speech"`
+	TTS                  TTSConfig               `toml:"tts"`
+	Display              DisplayConfig           `toml:"display"`
+	StreamPreview        StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	InstantReply         InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
+	RateLimit            RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit    OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay                RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron                 CronConfig              `toml:"cron"`
+	Queue                QueueConfig             `toml:"queue"`
+	Webhook              WebhookConfig           `toml:"webhook"`
+	Bridge               BridgeConfig            `toml:"bridge"`
+	Management           ManagementConfig        `toml:"management"`
+	Hooks                []HookConfig            `toml:"hooks"`
+	IdleTimeoutMins      *int                    `toml:"idle_timeout_mins,omitempty"`       // soft foreground stall threshold; 0 disables; default 120
+	HardStallTimeoutMins *int                    `toml:"hard_stall_timeout_mins,omitempty"` // responsive unchanged ceiling; 0 disables; default 0
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -725,6 +726,12 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
+	}
+	if c.IdleTimeoutMins != nil && *c.IdleTimeoutMins < 0 {
+		return fmt.Errorf("config: idle_timeout_mins must be >= 0")
+	}
+	if c.HardStallTimeoutMins != nil && *c.HardStallTimeoutMins < 0 {
+		return fmt.Errorf("config: hard_stall_timeout_mins must be >= 0")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -3058,6 +3065,11 @@ func GetGlobalSettings() map[string]any {
 	} else {
 		result["idle_timeout_mins"] = 120
 	}
+	if cfg.HardStallTimeoutMins != nil {
+		result["hard_stall_timeout_mins"] = *cfg.HardStallTimeoutMins
+	} else {
+		result["hard_stall_timeout_mins"] = 0
+	}
 	// Display
 	if cfg.Display.ThinkingMessages != nil {
 		result["thinking_messages"] = *cfg.Display.ThinkingMessages
@@ -3112,19 +3124,20 @@ func GetGlobalSettings() map[string]any {
 
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
-	Language           *string `json:"language"`
-	AttachmentSend     *string `json:"attachment_send"`
-	LogLevel           *string `json:"log_level"`
-	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
-	ThinkingMessages   *bool   `json:"thinking_messages"`
-	ThinkingMaxLen     *int    `json:"thinking_max_len"`
-	ToolMessages       *bool   `json:"tool_messages"`
-	ToolMaxLen         *int    `json:"tool_max_len"`
-	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
-	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
-	RateLimitMax       *int    `json:"rate_limit_max_messages"`
-	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
-	QueueMaxDepth      *int    `json:"queue_max_depth"`
+	Language             *string `json:"language"`
+	AttachmentSend       *string `json:"attachment_send"`
+	LogLevel             *string `json:"log_level"`
+	IdleTimeoutMins      *int    `json:"idle_timeout_mins"`
+	HardStallTimeoutMins *int    `json:"hard_stall_timeout_mins"`
+	ThinkingMessages     *bool   `json:"thinking_messages"`
+	ThinkingMaxLen       *int    `json:"thinking_max_len"`
+	ToolMessages         *bool   `json:"tool_messages"`
+	ToolMaxLen           *int    `json:"tool_max_len"`
+	StreamPreviewOn      *bool   `json:"stream_preview_enabled"`
+	StreamPreviewIntMs   *int    `json:"stream_preview_interval_ms"`
+	RateLimitMax         *int    `json:"rate_limit_max_messages"`
+	RateLimitWindow      *int    `json:"rate_limit_window_secs"`
+	QueueMaxDepth        *int    `json:"queue_max_depth"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -3154,6 +3167,9 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.IdleTimeoutMins != nil {
 		cfg.IdleTimeoutMins = u.IdleTimeoutMins
 	}
+	if u.HardStallTimeoutMins != nil {
+		cfg.HardStallTimeoutMins = u.HardStallTimeoutMins
+	}
 	if u.ThinkingMessages != nil {
 		cfg.Display.ThinkingMessages = u.ThinkingMessages
 	}
@@ -3180,6 +3196,9 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.QueueMaxDepth != nil {
 		cfg.Queue.MaxDepth = u.QueueMaxDepth
+	}
+	if err := cfg.validate(); err != nil {
+		return err
 	}
 	return saveConfig(cfg)
 }

@@ -63,6 +63,13 @@ type piRPCSession struct {
 	alive                  atomic.Bool
 	closing                atomic.Bool
 	suppressTransportEvent atomic.Bool
+	generation             atomic.Uint64
+
+	healthMu          sync.Mutex
+	healthPhase       core.StallPhase
+	lastProtocolEvent string
+	healthActivitySeq uint64
+	isCompacting      bool
 
 	startOnce sync.Once
 	startErr  error
@@ -253,6 +260,7 @@ func newPiRPCSession(ctx context.Context, cmd, workDir, model, mode, thinking, r
 		)
 	}
 	s.alive.Store(true)
+	s.healthPhase = core.StallPhaseSettled
 	if resumeID != "" && resumeID != core.ContinueSession {
 		s.sessionID.Store(resumeID)
 	}
@@ -313,6 +321,7 @@ func (s *piRPCSession) doStart(startCtx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("piRPCSession: start: %w", err)
 	}
+	s.generation.Add(1)
 
 	s.procMu.Lock()
 	s.proc = cmd
@@ -423,8 +432,10 @@ func (s *piRPCSession) dispatchLine(line []byte) {
 func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 	s.updateUsageFromEvent(raw)
 	eventType, _ := raw["type"].(string)
+	s.noteProtocolEvent(eventType)
 	switch eventType {
 	case "message_update":
+		s.setHealthPhase(core.StallPhaseStreaming, false)
 		s.rpcHandleMessageUpdate(raw)
 	case "message_end":
 		s.rpcHandleMessageEnd(raw)
@@ -433,6 +444,7 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 			s.rpcFinalizeCustomMessage(content)
 		}
 	case "agent_start":
+		s.setHealthPhase(core.StallPhaseRunning, false)
 		s.streamMu.Lock()
 		s.isStreaming = true
 		s.streamMu.Unlock()
@@ -442,13 +454,16 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		// compact, or continue queued work after it.
 		s.rpcHandleAgentEnd(raw)
 	case "agent_settled":
+		s.setHealthPhase(core.StallPhaseSettled, false)
 		s.streamMu.Lock()
 		s.isStreaming = false
 		s.streamMu.Unlock()
 		s.rpcHandleAgentSettled()
 	case "auto_retry_start":
+		s.setHealthPhase(core.StallPhaseRetrying, false)
 		s.rpcHandleAutoRetryStart(raw)
 	case "auto_retry_end":
+		s.setHealthPhase(core.StallPhaseRunning, false)
 		s.rpcHandleAutoRetryEnd(raw)
 	case "extension_error":
 		s.rpcHandleExtensionError(raw)
@@ -456,7 +471,19 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		// A single prompt can produce multiple turns (assistant -> tools -> assistant).
 		// Only agent_settled completes the pi-connect turn.
 	case "compaction_start", "compaction_end", "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished":
+		switch eventType {
+		case "compaction_start":
+			s.setHealthPhase(core.StallPhaseCompacting, true)
+		case "summarization_retry_scheduled", "summarization_retry_attempt_start":
+			s.setHealthPhase(core.StallPhaseRetrying, true)
+		case "compaction_end", "summarization_retry_finished":
+			s.setHealthPhase(core.StallPhaseRunning, false)
+		}
 		s.rpcHandleCompactionEvent(eventType, raw)
+	case "tool_execution_start", "tool_execution_update":
+		s.setHealthPhase(core.StallPhaseTool, false)
+	case "tool_execution_end":
+		s.setHealthPhase(core.StallPhaseRunning, false)
 	case "queue_update":
 		// agent_settled remains authoritative; queue updates are liveness only.
 		slog.Debug("piRPCSession: queue state changed", "session_id", s.CurrentSessionID())
@@ -1036,6 +1063,7 @@ func (s *piRPCSession) SendContext(ctx context.Context, prompt string, images []
 	var extensionSeq uint64
 	s.turnMu.Lock()
 	s.promptPending = true
+	s.setHealthPhase(core.StallPhaseAwaitingAcceptance, false)
 	if isExt {
 		extensionSeq = s.turn.finalizedSeq
 	}
@@ -1068,11 +1096,20 @@ func (s *piRPCSession) SendContext(ctx context.Context, prompt string, images []
 	}
 	s.turnMu.Unlock()
 	if err != nil {
+		if !s.Alive() {
+			s.setHealthPhase(core.StallPhaseTransportBroken, false)
+		}
 		return fmt.Errorf("piRPCSession: prompt command: %w", err)
 	}
 	if !resp.success {
+		s.setHealthPhase(core.StallPhaseSettled, false)
 		return fmt.Errorf("piRPCSession: pi rejected prompt: %s", resp.errMsg)
 	}
+	s.healthMu.Lock()
+	if s.healthPhase == core.StallPhaseAwaitingAcceptance {
+		s.healthPhase = core.StallPhaseRunning
+	}
+	s.healthMu.Unlock()
 	if s.CurrentSessionID() == "" {
 		s.acquireSessionIDFromState("post_prompt")
 	}
@@ -1670,6 +1707,7 @@ func (s *piRPCSession) emitTransportFailure(cause error) {
 	s.transportOnce.Do(func() {
 		transportErr := &rpcTransportError{cause: cause}
 		s.alive.Store(false)
+		s.setHealthPhase(core.StallPhaseTransportBroken, false)
 		// Claim waiters before closing stdin. This makes pending-map ownership
 		// the outcome linearization point and lets a blocked writer unwind after
 		// its caller has been selected as the sole error reporter.
@@ -1721,10 +1759,194 @@ func (s *piRPCSession) CurrentSessionID() string {
 
 func (s *piRPCSession) Alive() bool { return s.alive.Load() }
 
+func (s *piRPCSession) noteProtocolEvent(eventType string) {
+	if eventType == "" {
+		return
+	}
+	s.healthMu.Lock()
+	s.lastProtocolEvent = eventType
+	s.healthActivitySeq++
+	s.healthMu.Unlock()
+}
+
+func (s *piRPCSession) setHealthPhase(phase core.StallPhase, compacting bool) {
+	s.healthMu.Lock()
+	s.healthPhase = phase
+	s.isCompacting = compacting
+	s.healthMu.Unlock()
+}
+
+// ProbeStall performs bounded read-only reconciliation. get_state supplies
+// operation flags; a bounded tail read of its sessionFile supplies an opaque
+// durable leaf/file cursor without transporting or logging message bodies.
+func (s *piRPCSession) ProbeStall(ctx context.Context) (core.StallProbeSnapshot, error) {
+	snapshot := core.StallProbeSnapshot{
+		ProcessAlive: s.Alive(),
+		Generation:   s.generation.Load(),
+	}
+	s.procMu.Lock()
+	if s.proc != nil && s.proc.Process != nil {
+		snapshot.PID = s.proc.Process.Pid
+	}
+	s.procMu.Unlock()
+	if !snapshot.ProcessAlive {
+		snapshot.Phase = core.StallPhaseProcessDead
+		return snapshot, nil
+	}
+
+	s.healthMu.Lock()
+	snapshot.Phase = s.healthPhase
+	snapshot.ActivitySeq = s.healthActivitySeq
+	snapshot.IsCompacting = s.isCompacting
+	snapshot.LastEventType = s.lastProtocolEvent
+	s.healthMu.Unlock()
+	s.turnMu.Lock()
+	snapshot.PromptPending = s.promptPending
+	turnActive := s.turn.active
+	s.turnMu.Unlock()
+
+	resp, err := s.callWithTimeoutContext(ctx, map[string]any{"type": "get_state"}, 0)
+	if err != nil {
+		if !s.Alive() {
+			snapshot.ProcessAlive = false
+			snapshot.Phase = core.StallPhaseTransportBroken
+		}
+		return snapshot, err
+	}
+	if !resp.success {
+		return snapshot, fmt.Errorf("get_state rejected: %s", resp.errMsg)
+	}
+	var state struct {
+		IsStreaming         bool   `json:"isStreaming"`
+		IsCompacting        bool   `json:"isCompacting"`
+		SessionFile         string `json:"sessionFile"`
+		MessageCount        int    `json:"messageCount"`
+		PendingMessageCount int    `json:"pendingMessageCount"`
+	}
+	if err := json.Unmarshal(resp.data, &state); err != nil {
+		return snapshot, fmt.Errorf("decode get_state: %w", err)
+	}
+	snapshot.TransportResponsive = true
+	snapshot.IsStreaming = state.IsStreaming
+	snapshot.IsCompacting = state.IsCompacting
+	snapshot.PendingMessageCount = state.PendingMessageCount
+	if snapshot.PromptPending {
+		snapshot.Phase = core.StallPhaseAwaitingAcceptance
+	} else if state.IsCompacting {
+		snapshot.Phase = core.StallPhaseCompacting
+	} else if state.IsStreaming {
+		switch snapshot.Phase {
+		case core.StallPhaseTool, core.StallPhaseRetrying:
+		default:
+			snapshot.Phase = core.StallPhaseStreaming
+		}
+	} else if !turnActive {
+		snapshot.Phase = core.StallPhaseSettled
+	}
+	cursor, err := boundedDurableCursor(ctx, state.SessionFile, state.MessageCount)
+	if err != nil {
+		// get_state responsiveness is still useful, but durable reconciliation
+		// failure must count as a failed probe rather than healthy silence.
+		return snapshot, fmt.Errorf("read durable cursor: %w", err)
+	}
+	snapshot.Cursor = cursor
+	return snapshot, nil
+}
+
+// InterruptStall serializes Pi's native abort through the prompt/compact
+// mutation gate and never submits or replays user input.
+func (s *piRPCSession) InterruptStall(ctx context.Context) error {
+	if err := s.acquireMutating(ctx, "abort"); err != nil {
+		return fmt.Errorf("admit stalled-operation abort: %w", err)
+	}
+	defer s.releaseMutating()
+
+	// Revalidate after acquiring the mutation gate. Settlement or a queued turn
+	// may have won while core was scheduling recovery. Never abort unknown prompt
+	// acceptance, an idle/new generation, or manual compaction (Pi RPC abort does
+	// not cancel manual compaction).
+	s.turnMu.Lock()
+	promptPending := s.promptPending
+	s.turnMu.Unlock()
+	s.healthMu.Lock()
+	phase := s.healthPhase
+	s.healthMu.Unlock()
+	if promptPending {
+		return nil
+	}
+	switch phase {
+	case core.StallPhaseRunning, core.StallPhaseStreaming, core.StallPhaseTool, core.StallPhaseRetrying:
+	default:
+		return nil
+	}
+
+	resp, err := s.callWithTimeoutContext(ctx, map[string]any{"type": "abort"}, 0)
+	if err != nil {
+		return fmt.Errorf("abort stalled operation: %w", err)
+	}
+	if !resp.success {
+		return fmt.Errorf("abort stalled operation rejected: %s", resp.errMsg)
+	}
+	return nil
+}
+
+func boundedDurableCursor(ctx context.Context, path string, messageCount int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if path == "" {
+		return fmt.Sprintf("messages:%d", messageCount), nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	const tailLimit int64 = 64 * 1024
+	size := info.Size()
+	start := size - tailLimit
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, size-start)
+	if len(buf) > 0 {
+		if _, err := f.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	lines := bytes.Split(buf, []byte{'\n'})
+	leaf := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 || (start > 0 && i == 0) {
+			continue
+		}
+		var entry struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(line, &entry) == nil && entry.ID != "" {
+			leaf = entry.ID
+			break
+		}
+	}
+	return fmt.Sprintf("messages:%d:size:%d:leaf:%s", messageCount, size, leaf), nil
+}
+
 func (s *piRPCSession) Close() error {
 	s.closeOnce.Do(func() {
 		s.closing.Store(true)
 		s.alive.Store(false)
+		s.setHealthPhase(core.StallPhaseProcessDead, false)
 		// Try a graceful shutdown by closing stdin first.
 		s.procMu.Lock()
 		stdin := s.stdin

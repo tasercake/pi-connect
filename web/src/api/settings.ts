@@ -5,6 +5,7 @@ export interface GlobalSettings {
   attachment_send: string;
   log_level: string;
   idle_timeout_mins: number;
+  hard_stall_timeout_mins: number;
   thinking_messages: boolean;
   thinking_max_len: number;
   tool_messages: boolean;

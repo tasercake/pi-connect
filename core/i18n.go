@@ -142,6 +142,8 @@ const (
 	MsgError                       MsgKey = "error"
 	MsgAgentTemporarilyUnavailable MsgKey = "agent_temporarily_unavailable"
 	MsgAgentOutcomeUnknown         MsgKey = "agent_outcome_unknown"
+	MsgAgentVerifiedStall          MsgKey = "agent_verified_stall"
+	MsgAgentTransportLost          MsgKey = "agent_transport_lost"
 	MsgSessionNotFound             MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession   MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession       MsgKey = "failed_to_delete_session"
@@ -736,6 +738,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 未收到接受確認。該請求仍可能已被接受，因此結果未知，且未自動重試。",
 		LangJapanese:           "⚠️ 受理確認を受信できませんでした。リクエストは受理済みの可能性があるため、結果は不明で、自動再試行は行われませんでした。",
 		LangSpanish:            "⚠️ No se recibió confirmación de aceptación. Es posible que la solicitud se haya aceptado, por lo que el resultado es desconocido y no se reintentó automáticamente.",
+	},
+	MsgAgentVerifiedStall: {
+		LangEnglish:            "❌ Agent operation was closed after repeated health checks found no recoverable progress. No prompt was replayed; acceptance may be unknown.",
+		LangChinese:            "❌ 多次健康检查均未发现可恢复进展，Agent 操作已关闭。未重放提示；接受状态可能未知。",
+		LangTraditionalChinese: "❌ 多次健康檢查均未發現可恢復進展，Agent 操作已關閉。未重放提示；接受狀態可能未知。",
+		LangJapanese:           "❌ 複数回のヘルスチェックで回復可能な進捗を確認できなかったため、エージェント操作を終了しました。プロンプトは再送しておらず、受理状態は不明な可能性があります。",
+		LangSpanish:            "❌ La operación del agente se cerró después de que varias comprobaciones no encontraran progreso recuperable. No se repitió el prompt; la aceptación puede ser desconocida.",
+	},
+	MsgAgentTransportLost: {
+		LangEnglish:            "❌ Agent transport or process was lost. The operation was closed and no prompt was replayed.",
+		LangChinese:            "❌ Agent 传输或进程已丢失。操作已关闭，且未重放提示。",
+		LangTraditionalChinese: "❌ Agent 傳輸或進程已中斷。操作已關閉，且未重放提示。",
+		LangJapanese:           "❌ エージェントの通信またはプロセスが失われました。操作を終了し、プロンプトは再送していません。",
+		LangSpanish:            "❌ Se perdió el transporte o proceso del agente. La operación se cerró y no se repitió el prompt.",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
