@@ -172,6 +172,10 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
+	// Keep pi-connect alive when one child in its control group is OOM-killed.
+	// KillMode retains normal whole-group stop semantics.
+	sb.WriteString("OOMPolicy=continue\n")
+	sb.WriteString("KillMode=control-group\n")
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_SIZE=%d\"\n", cfg.LogMaxSize)
 	if cfg.EnvPATH != "" {

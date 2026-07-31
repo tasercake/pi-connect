@@ -208,6 +208,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	runtimeLifecycle, err := core.NewRuntimeLifecycleStore(cfg.DataDir)
+	if err != nil {
+		slog.Error("runtime lifecycle store unavailable", "error", err)
+		os.Exit(1)
+	}
+
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
@@ -272,6 +278,7 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		engine.SetRuntimeLifecycleStore(runtimeLifecycle)
 		showCtx := true
 		if proj.ShowContextIndicator != nil {
 			showCtx = *proj.ShowContextIndicator
@@ -715,6 +722,13 @@ func main() {
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
 
+	if len(cfg.Projects) == 1 {
+		if err := runtimeLifecycle.AssignUnscopedAlerts(cfg.Projects[0].Name); err != nil {
+			slog.Error("runtime lifecycle legacy alert migration failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	// Start cron scheduler
 	cronStore, err := core.NewCronStore(cfg.DataDir)
 	if err != nil {
@@ -1017,14 +1031,6 @@ func main() {
 
 	slog.Info("pi-connect is running", "projects", len(engines))
 
-	// After startup, check if we were restarted and send success notification
-	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
-		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
-		for _, e := range engines {
-			e.SendRestartNotification(notify.Platform, notify.SessionKey)
-		}
-	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -1032,8 +1038,21 @@ func main() {
 	select {
 	case <-sigCh:
 	case req := <-core.RestartCh:
+		// Preserve compatibility with older management clients that did not send
+		// project. Infer only when routing is unambiguous; never guess in a
+		// multi-project deployment.
+		if req.Project == "" && len(cfg.Projects) == 1 {
+			req.Project = cfg.Projects[0].Name
+		}
 		restartReq = &req
-		slog.Info("restart requested via /restart command", "session", req.SessionKey, "platform", req.Platform)
+		// Persist before shutdown. Platform teardown may be slow or interrupted;
+		// the next process must still retain the success notification.
+		if req.Project != "" && req.Platform != "" && req.SessionKey != "" {
+			if err := runtimeLifecycle.EnqueueRestart(req); err != nil {
+				slog.Error("restart: save notify failed", "error", err)
+			}
+		}
+		slog.Info("restart requested via /restart command", "project", req.Project, "session", req.SessionKey, "platform", req.Platform)
 	}
 
 	slog.Info("shutting down...")
@@ -1064,9 +1083,6 @@ func main() {
 	instanceLock.Release()
 
 	if restartReq != nil {
-		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
-			slog.Error("restart: save notify failed", "error", err)
-		}
 		execPath, err := os.Executable()
 		if err != nil {
 			slog.Error("restart: cannot determine executable path", "error", err)

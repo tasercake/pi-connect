@@ -66,6 +66,7 @@ var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by confi
 
 // RestartRequest carries info needed to send a post-restart notification.
 type RestartRequest struct {
+	Project    string `json:"project,omitempty"`
 	SessionKey string `json:"session_key"`
 	Platform   string `json:"platform"`
 }
@@ -75,62 +76,39 @@ type replyFooterUsageCache struct {
 	fetchedAt time.Time
 }
 
-// SaveRestartNotify persists restart info so the new process can send
-// a "restart successful" message after startup.
+// SaveRestartNotify durably enqueues restart success delivery. The alert is
+// acknowledged only after a later process sends it successfully.
 func SaveRestartNotify(dataDir string, req RestartRequest) error {
 	dir := filepath.Join(dataDir, "run")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		slog.Warn("SaveRestartNotify: mkdir failed", "dir", dir, "error", err)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("save restart notification: %w", err)
 	}
-	data, _ := json.Marshal(req)
-	return os.WriteFile(filepath.Join(dir, "restart_notify"), data, 0o644)
-}
-
-// ConsumeRestartNotify reads and deletes the restart notification file.
-// Returns nil if no notification is pending.
-func ConsumeRestartNotify(dataDir string) *RestartRequest {
-	p := filepath.Join(dataDir, "run", "restart_notify")
-	data, err := os.ReadFile(p)
+	data, err := json.Marshal(req)
 	if err != nil {
-		return nil
+		return fmt.Errorf("save restart notification: %w", err)
 	}
-	os.Remove(p)
-	var req RestartRequest
-	if json.Unmarshal(data, &req) != nil {
-		return nil
-	}
-	return &req
+	return AtomicWriteFile(filepath.Join(dir, "restart_notify"), data, 0o600)
 }
 
-// SendRestartNotification sends a "restart successful" message to the
-// platform/session that initiated the restart.
+// ConsumeRestartNotify remains for source compatibility. Restart alerts now
+// stay in the durable lifecycle outbox until successful delivery.
+func ConsumeRestartNotify(string) *RestartRequest { return nil }
+
+// SendRestartNotification durably enqueues restart success delivery. Delivery
+// starts only after the matching platform reports readiness.
 func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
-	for _, p := range e.platforms {
-		if p.Name() != platformName {
-			continue
-		}
-		rc, ok := p.(ReplyContextReconstructor)
-		if !ok {
-			slog.Debug("restart notify: platform does not support ReconstructReplyCtx", "platform", platformName)
-			return
-		}
-		rctx, err := rc.ReconstructReplyCtx(sessionKey)
-		if err != nil {
-			slog.Debug("restart notify: reconstruct failed", "error", err)
-			return
-		}
-		text := e.i18n.T(MsgRestartSuccess)
-		if CurrentVersion != "" {
-			text += fmt.Sprintf(" (%s)", CurrentVersion)
-		}
-		if err := e.waitOutgoing(p); err != nil {
-			slog.Debug("restart notify: outgoing wait cancelled or limited", "platform", platformName, "error", err)
-			return
-		}
-		if err := p.Send(e.ctx, rctx, text); err != nil {
-			slog.Debug("restart notify: send failed", "error", err)
-		}
+	if e.runtimeLifecycle == nil || platformName == "" || sessionKey == "" {
 		return
+	}
+	if err := e.runtimeLifecycle.enqueueRestartReady(RestartRequest{Project: e.name, Platform: platformName, SessionKey: sessionKey}); err != nil {
+		slog.Error("restart notification enqueue failed", "project", e.name, "platform", platformName, "error", err)
+		return
+	}
+	for _, p := range e.platforms {
+		if p.Name() == platformName && e.isPlatformReady(p) {
+			e.startLifecycleDelivery(p)
+			return
+		}
 	}
 }
 
@@ -261,7 +239,10 @@ type Engine struct {
 
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
+	lifecycleWorkers    map[Platform]bool
+	lifecycleWorkersWG  sync.WaitGroup
 	stopping            bool
+	runtimeLifecycle    *RuntimeLifecycleStore
 	replyFooterMu       sync.Mutex
 	replyFooterUsage    replyFooterUsageCache
 
@@ -329,6 +310,14 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
+
+	// Durable crash-recovery lease. Contains routing/lifecycle metadata only.
+	runtimeLeaseID     string
+	deliverySessionKey string
+	operationID        string
+	turnInFlight       bool
+	turnOutcomeUnknown bool
+	leaseStartedAt     time.Time
 }
 
 type pendingProviderAddState struct {
@@ -438,6 +427,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
 		platformReady:         make(map[Platform]bool),
+		lifecycleWorkers:      make(map[Platform]bool),
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
@@ -1502,6 +1492,11 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	return nil
 }
 
+// SetRuntimeLifecycleStore enables durable live-process leases and lifecycle alerts.
+func (e *Engine) SetRuntimeLifecycleStore(store *RuntimeLifecycleStore) {
+	e.runtimeLifecycle = store
+}
+
 func (e *Engine) Start() error {
 	var startErrs []error
 	readyCount := 0
@@ -1553,6 +1548,20 @@ func (e *Engine) Stop() error {
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
 
+	// Lifecycle delivery may be inside Platform.Send. Let context-aware sends
+	// unwind before Platform.Stop tears down their clients; bound wait so a
+	// broken platform implementation cannot deadlock daemon shutdown.
+	lifecycleDone := make(chan struct{})
+	go func() {
+		e.lifecycleWorkersWG.Wait()
+		close(lifecycleDone)
+	}()
+	select {
+	case <-lifecycleDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("lifecycle alert workers did not stop before platform teardown")
+	}
+
 	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error
 	for _, p := range e.platforms {
@@ -1570,6 +1579,10 @@ func (e *Engine) Stop() error {
 	e.interactiveMu.Unlock()
 
 	for key, state := range states {
+		// Intentional shutdown owns this process now. Remove lease before a
+		// potentially slow Close so interruption during graceful teardown cannot
+		// be misclassified as a runtime crash on next startup.
+		e.removeRuntimeLease(state)
 		if state.agentSession != nil {
 			slog.Debug("engine.Stop: closing agent session", "session", key)
 			state.agentSession.Close()
@@ -1620,6 +1633,7 @@ func (e *Engine) onPlatformReady(p Platform) {
 	}
 	slog.Info("platform ready", "project", e.name, "platform", p.Name())
 	e.initPlatformCapabilities(p)
+	e.startLifecycleDelivery(p)
 }
 
 func (e *Engine) markPlatformReady(p Platform) bool {
@@ -1648,6 +1662,116 @@ func (e *Engine) markPlatformUnavailable(p Platform) bool {
 	}
 	e.platformReady[p] = false
 	return true
+}
+
+func (e *Engine) startLifecycleDelivery(p Platform) {
+	if e.runtimeLifecycle == nil {
+		return
+	}
+	e.platformLifecycleMu.Lock()
+	if e.stopping || !e.platformReady[p] || e.lifecycleWorkers[p] {
+		e.platformLifecycleMu.Unlock()
+		return
+	}
+	e.lifecycleWorkers[p] = true
+	e.lifecycleWorkersWG.Add(1)
+	e.platformLifecycleMu.Unlock()
+
+	go func() {
+		defer e.lifecycleWorkersWG.Done()
+		var alert lifecycleAlert
+		claimed := false
+		rescheduleOnReadyRace := false
+		defer func() {
+			if claimed {
+				e.runtimeLifecycle.releaseAlert(alert.ID)
+			}
+			e.platformLifecycleMu.Lock()
+			delete(e.lifecycleWorkers, p)
+			readyAgain := rescheduleOnReadyRace && !e.stopping && e.platformReady[p]
+			e.platformLifecycleMu.Unlock()
+			// Readiness may flip false→true after this worker decides to exit but
+			// before its registry entry is removed. Re-arm only for that race; an
+			// ordinary empty outbox must not spin workers.
+			if readyAgain {
+				e.startLifecycleDelivery(p)
+			}
+		}()
+		backoff := lifecycleRetryInitial
+		for {
+			if e.ctx.Err() != nil {
+				return
+			}
+			if !e.isPlatformReady(p) {
+				rescheduleOnReadyRace = true
+				return
+			}
+			if !claimed {
+				var ok bool
+				alert, ok = e.runtimeLifecycle.claimNextAlert(e.name, p.Name())
+				if !ok {
+					return
+				}
+				claimed = true
+			}
+			rc, ok := p.(ReplyContextReconstructor)
+			if !ok {
+				slog.Error("lifecycle alert delivery unsupported", "project", e.name, "platform", p.Name())
+				return
+			}
+			replyCtx, err := rc.ReconstructReplyCtx(alert.SessionKey)
+			if err == nil {
+				if waitErr := e.waitOutgoing(p); waitErr != nil {
+					err = waitErr
+				} else {
+					text := e.lifecycleAlertText(alert)
+					err = p.Send(e.ctx, replyCtx, text)
+				}
+			}
+			if err == nil {
+				if ackErr := e.runtimeLifecycle.ackAlert(alert.ID); ackErr != nil {
+					slog.Error("lifecycle alert ack failed", "project", e.name, "platform", p.Name(), "error", ackErr)
+				} else {
+					claimed = false
+					backoff = lifecycleRetryInitial
+					continue
+				}
+			} else {
+				if attemptErr := e.runtimeLifecycle.recordAttempt(alert.ID); attemptErr != nil {
+					slog.Warn("lifecycle alert attempt persistence failed", "project", e.name, "platform", p.Name(), "error", attemptErr)
+				}
+				slog.Warn("lifecycle alert delivery failed; will retry", "project", e.name, "platform", p.Name(), "error", err, "backoff", backoff)
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-timer.C:
+			case <-e.ctx.Done():
+				timer.Stop()
+				return
+			}
+			backoff *= 2
+			if backoff > lifecycleRetryMax {
+				backoff = lifecycleRetryMax
+			}
+		}
+	}()
+}
+
+func (e *Engine) isPlatformReady(p Platform) bool {
+	e.platformLifecycleMu.Lock()
+	defer e.platformLifecycleMu.Unlock()
+	return !e.stopping && e.platformReady[p]
+}
+
+func (e *Engine) lifecycleAlertText(alert lifecycleAlert) string {
+	if alert.Kind == "restart" {
+		text := e.i18n.T(MsgRestartSuccess)
+		if CurrentVersion != "" {
+			text += fmt.Sprintf(" (%s)", CurrentVersion)
+		}
+		return text
+	}
+	return fmt.Sprintf(e.i18n.T(MsgRuntimeCrashRecovered), alert.LostProcesses)
 }
 
 func (e *Engine) initPlatformCapabilities(p Platform) {
@@ -2643,6 +2767,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
 	state.mu.Unlock()
+	operationID := msg.MessageID
+	if operationID == "" {
+		operationID = fmt.Sprintf("turn-%d", turnStart.UnixNano())
+	}
+	e.setRuntimeTurn(state, operationID, true, false)
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
 	// Send until the prompt turn finishes; they may emit
@@ -2652,7 +2781,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		sendDone <- sendAgentSession(e.ctx, state.agentSession, promptContent, msg.Images, msg.Files)
 	}()
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, operationID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -2789,6 +2918,82 @@ func (e *Engine) workspaceContext(workspace, sessionKey string) (Agent, *Session
 	return wsAgent, wsSessions, interactiveKey, effectiveDir, nil
 }
 
+func (e *Engine) persistRuntimeLease(state *interactiveState) {
+	if e.runtimeLifecycle == nil || state == nil {
+		return
+	}
+	state.mu.Lock()
+	lease := RuntimeLease{
+		ID:             state.runtimeLeaseID,
+		Project:        e.name,
+		SessionKey:     state.deliverySessionKey,
+		OperationID:    state.operationID,
+		TurnInFlight:   state.turnInFlight,
+		OutcomeUnknown: state.turnOutcomeUnknown,
+		StartedAt:      state.leaseStartedAt,
+	}
+	if state.platform != nil {
+		lease.Platform = state.platform.Name()
+	}
+	if state.agentSession != nil {
+		lease.AgentSessionID = state.agentSession.CurrentSessionID()
+	}
+	state.mu.Unlock()
+	if lease.ID == "" || lease.Platform == "" || lease.SessionKey == "" {
+		return
+	}
+	if err := e.runtimeLifecycle.UpsertLease(lease); err != nil {
+		slog.Error("runtime lease persist failed", "project", e.name, "session", lease.SessionKey, "error", err)
+	}
+}
+
+func persistLearnedAgentSessionID(session *Session, sessions *SessionManager, agentSession AgentSession, agentName string) bool {
+	if session == nil || sessions == nil || agentSession == nil {
+		return false
+	}
+	newID := agentSession.CurrentSessionID()
+	if newID == "" || !session.CompareAndSetAgentSessionID(newID, agentName) {
+		return false
+	}
+	pendingName := session.GetName()
+	if pendingName != "" && pendingName != "session" && pendingName != "default" {
+		sessions.SetSessionName(newID, pendingName)
+	}
+	sessions.Save()
+	return true
+}
+
+func (e *Engine) setRuntimeTurn(state *interactiveState, operationID string, inFlight, outcomeUnknown bool) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.operationID = operationID
+	state.turnInFlight = inFlight
+	state.turnOutcomeUnknown = outcomeUnknown
+	state.mu.Unlock()
+	e.persistRuntimeLease(state)
+}
+
+func (e *Engine) removeRuntimeLease(state *interactiveState) {
+	if e.runtimeLifecycle == nil || state == nil {
+		return
+	}
+	state.mu.Lock()
+	id := state.runtimeLeaseID
+	state.mu.Unlock()
+	if err := e.runtimeLifecycle.RemoveLease(id); err != nil {
+		// Keep ID attached so a later expected-cleanup path can retry removal.
+		slog.Error("runtime lease removal failed", "project", e.name, "error", err)
+		return
+	}
+	state.mu.Lock()
+	if state.runtimeLeaseID == id {
+		state.runtimeLeaseID = ""
+	}
+	state.mu.Unlock()
+}
+
 // getOrCreateInteractiveStateWith accepts an optional agent override for multi-workspace mode.
 // adoptPendingFromPlaceholder copies pendingMessages from an existing placeholder
 // state to newState so queued messages are not lost when the map entry is replaced.
@@ -2836,8 +3041,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		)
 		e.stopUnsolicitedReader(state)
 		state.markStopped()
-		// Close synchronously to prevent race condition where old agent
-		// continues outputting while new agent starts (issue #327).
+		// Recycling is intentional. Remove crash evidence before potentially slow
+		// Close, then stop synchronously so old output cannot overlap replacement.
+		e.removeRuntimeLease(state)
 		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
 		delete(e.interactiveStates, sessionKey)
 		ok = false // prevent reading stale settings below
@@ -2944,15 +3150,21 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	newState := &interactiveState{
-		agentSession:     agentSession,
-		platform:         p,
-		replyCtx:         replyCtx,
-		agent:            agent,
-		eventsNeedResync: true,
+		agentSession:       agentSession,
+		platform:           p,
+		replyCtx:           replyCtx,
+		agent:              agent,
+		eventsNeedResync:   true,
+		deliverySessionKey: ccKey,
+		leaseStartedAt:     time.Now().UTC(),
+	}
+	if e.runtimeLifecycle != nil {
+		newState.runtimeLeaseID = e.runtimeLifecycle.NewLeaseID(e.name, sessionKey)
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
 	e.interactiveStates[sessionKey] = state
+	e.persistRuntimeLease(state)
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
 
@@ -3017,10 +3229,11 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	}
 
-	// Close the agent session BEFORE deleting from the map.
-	// This prevents race conditions where /stop during cleanup sees
-	// an empty map and reports "No execution in progress" while
-	// the agent session Close() is still blocking (up to 130s).
+	// Cleanup is now intentional and owns this process. Remove durable crash
+	// evidence before a potentially slow Close so interruption during expected
+	// teardown cannot create a false recovery alert. Keep state in map until
+	// Close finishes so /stop still reports execution in progress.
+	e.removeRuntimeLease(state)
 	if agentSession != nil {
 		e.closeAgentSessionWithTimeout(sessionKey, agentSession)
 	}
@@ -3232,8 +3445,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 		case event, ok := <-events:
 			if !ok {
-				// Channel closed — agent process exited. Log any buffered
-				// tool/text context so it isn't lost silently.
+				// Cancellation and channel closure can become ready together.
+				// Re-check intent before classifying closure as a process crash.
+				if ctx.Err() != nil || e.ctx.Err() != nil || state.isStopped() {
+					return
+				}
 				if len(toolsUsed) > 0 || len(textParts) > 0 {
 					slog.Warn("unsolicited reader: agent channel closed mid-turn",
 						"session", sessionKey,
@@ -3242,7 +3458,19 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 				state.mu.Lock()
 				state.eventsNeedResync = true
+				p := state.platform
+				replyCtx := state.replyCtx
+				operationID := state.operationID
+				if state.unsolicitedDone == done {
+					state.unsolicitedCancel = nil
+					state.unsolicitedDone = nil
+				}
 				state.mu.Unlock()
+				e.setRuntimeTurn(state, operationID, turnActive, turnActive)
+				e.send(p, replyCtx, e.i18n.T(MsgAgentUnexpectedExit))
+				e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited unexpectedly"))
+				cancel()
+				e.cleanupInteractiveState(sessionKey, state)
 				return
 			}
 
@@ -3275,6 +3503,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 				slog.Info("unsolicited events detected, relaying to platform",
 					"session", sessionKey)
+				e.setRuntimeTurn(state, fmt.Sprintf("unsolicited-%d", time.Now().UnixNano()), true, false)
 			}
 
 			state.mu.Lock()
@@ -3306,6 +3535,15 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventResult:
+				state.mu.Lock()
+				currentAgent := state.agent
+				state.mu.Unlock()
+				agentName := e.agent.Name()
+				if currentAgent != nil {
+					agentName = currentAgent.Name()
+				}
+				persistLearnedAgentSessionID(session, sessions, agentSession, agentName)
+				e.setRuntimeTurn(state, "", false, false)
 				fullResponse := event.Content
 				if fullResponse == "" && len(textParts) > 0 {
 					fullResponse = strings.Join(textParts, "")
@@ -3667,6 +3905,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
+				var outcomeUnknown OutcomeUnknownError
+				unknown := errors.As(err, &outcomeUnknown) && outcomeUnknown.OutcomeUnknown()
+				e.setRuntimeTurn(state, msgID, unknown, unknown)
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				sp.discard()
 				if stopTyping != nil {
@@ -3683,6 +3924,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.send(p, replyCtx, e.userFacingAgentError(err))
 				return
 			}
+			state.mu.Lock()
+			currentAgentSession := state.agentSession
+			currentAgent := state.agent
+			state.mu.Unlock()
+			agentName := e.agent.Name()
+			if currentAgent != nil {
+				agentName = currentAgent.Name()
+			}
+			persistLearnedAgentSessionID(session, sessions, currentAgentSession, agentName)
+			e.persistRuntimeLease(state)
 			continue
 		case <-idleCh:
 			idleCh = nil
@@ -4266,25 +4517,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
-			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
-			// event.SessionID may be empty in some cases, causing the agent_session_id
-			// to not be persisted to disk, breaking session resume on next startup.
-			if state != nil && state.agentSession != nil {
-				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
-					if session.CompareAndSetAgentSessionID(currentID, e.agent.Name()) {
-						pendingName := session.GetName()
-						if pendingName != "" && pendingName != "session" && pendingName != "default" {
-							sessions.SetSessionName(currentID, pendingName)
-						}
-					}
-					sessions.Save()
-				}
-			}
-
-			// Mark clean exit so unsolicited reader preserves buffered events.
 			state.mu.Lock()
+			currentAgentSession := state.agentSession
+			currentAgent := state.agent
 			state.eventsNeedResync = false
 			state.mu.Unlock()
+			agentName := e.agent.Name()
+			if currentAgent != nil {
+				agentName = currentAgent.Name()
+			}
+			persistLearnedAgentSessionID(session, sessions, currentAgentSession, agentName)
+			e.setRuntimeTurn(state, msgID, false, false)
 
 			fullResponse := event.Content
 			// When tool progress is hidden, segmentStart stays 0 and textParts
@@ -4686,6 +4929,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			terminalError := eventErrorIsTerminal(state.agentSession, event.Error)
+			e.setRuntimeTurn(state, msgID, terminalError, terminalError)
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -4710,7 +4955,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Only drop queued messages if the agent session is terminal/dead.
 			// Some agents emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
-			if eventErrorIsTerminal(state.agentSession, event.Error) {
+			if terminalError {
 				e.notifyDroppedQueuedMessages(state, event.Error)
 				e.cleanupInteractiveState(sessionKey, state)
 			} else if state.agentSession == nil || !state.agentSession.Alive() {
@@ -4721,12 +4966,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 channelClosed:
-	// Channel closed - process exited unexpectedly
-	slog.Warn("agent process exited", "session_key", sessionKey)
+	// Closed channels are expected during engine/session cancellation. Avoid a
+	// false user alert when shutdown wins a select race with channel closure.
+	if e.ctx.Err() != nil || state.isStopped() {
+		sp.discard()
+		return
+	}
+	slog.Warn("agent process exited unexpectedly", "session_key", sessionKey)
+	e.setRuntimeTurn(state, msgID, true, true)
 	state.mu.Lock()
 	state.eventsNeedResync = true
+	p := state.platform
 	state.mu.Unlock()
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
+	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited unexpectedly"))
+	e.send(p, replyCtx, e.i18n.T(MsgAgentUnexpectedExit))
 	e.cleanupInteractiveState(sessionKey, state)
 
 	if len(textParts) > 0 {
@@ -4872,6 +5125,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		drainEvents(state.agentSession.Events())
 
 		session.AddHistory("user", queued.content)
+		operationID := queued.messageID
+		if operationID == "" {
+			operationID = fmt.Sprintf("queued-%d", time.Now().UnixNano())
+		}
+		e.setRuntimeTurn(state, operationID, true, false)
 
 		sendDone := make(chan error, 1)
 		go func() {
@@ -4884,7 +5142,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, operationID, time.Now(), stopTyping, sendDone, queued.replyCtx)
 	}
 }
 
@@ -12505,6 +12763,7 @@ func (e *Engine) cmdUpgradeConfirm(p Platform, msg *Message) {
 	// Auto-restart to apply the update
 	select {
 	case RestartCh <- RestartRequest{
+		Project:    e.name,
 		SessionKey: msg.SessionKey,
 		Platform:   p.Name(),
 	}:
@@ -12530,6 +12789,7 @@ func (e *Engine) cmdRestart(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRestarting))
 	select {
 	case RestartCh <- RestartRequest{
+		Project:    e.name,
 		SessionKey: msg.SessionKey,
 		Platform:   p.Name(),
 	}:

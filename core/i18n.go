@@ -144,6 +144,8 @@ const (
 	MsgAgentOutcomeUnknown         MsgKey = "agent_outcome_unknown"
 	MsgAgentVerifiedStall          MsgKey = "agent_verified_stall"
 	MsgAgentTransportLost          MsgKey = "agent_transport_lost"
+	MsgAgentUnexpectedExit         MsgKey = "agent_unexpected_exit"
+	MsgRuntimeCrashRecovered       MsgKey = "runtime_crash_recovered"
 	MsgSessionNotFound             MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession   MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession       MsgKey = "failed_to_delete_session"
@@ -752,6 +754,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ Agent 傳輸或進程已中斷。操作已關閉，且未重放提示。",
 		LangJapanese:           "❌ エージェントの通信またはプロセスが失われました。操作を終了し、プロンプトは再送していません。",
 		LangSpanish:            "❌ Se perdió el transporte o proceso del agente. La operación se cerró y no se repitió el prompt.",
+	},
+	MsgAgentUnexpectedExit: {
+		LangEnglish:            "❌ The managed agent process exited unexpectedly. Any active operation may be incomplete; no prompt was replayed. The saved session remains resumable.",
+		LangChinese:            "❌ 托管的 Agent 进程意外退出。进行中的操作可能未完成；未重放提示。已保存的会话仍可恢复。",
+		LangTraditionalChinese: "❌ 受管理的 Agent 程序意外結束。進行中的操作可能未完成；未重放提示。已儲存的會話仍可恢復。",
+		LangJapanese:           "❌ 管理対象のエージェントプロセスが予期せず終了しました。実行中の操作は未完了の可能性があります。プロンプトは再送しておらず、保存済みセッションは再開できます。",
+		LangSpanish:            "❌ El proceso administrado del agente terminó inesperadamente. La operación activa puede estar incompleta; no se repitió el prompt. La sesión guardada sigue siendo reanudable.",
+	},
+	MsgRuntimeCrashRecovered: {
+		LangEnglish:            "⚠️ pi-connect restarted unexpectedly and lost %d managed Pi process(es). Active turns may be incomplete and their outcome may be unknown. No prompts were replayed. Saved sessions remain resumable.",
+		LangChinese:            "⚠️ pi-connect 意外重启，并丢失了 %d 个托管的 Pi 进程。进行中的轮次可能未完成，结果可能未知。未重放任何提示。已保存的会话仍可恢复。",
+		LangTraditionalChinese: "⚠️ pi-connect 意外重新啟動，並遺失了 %d 個受管理的 Pi 程序。進行中的輪次可能未完成，結果可能未知。未重放任何提示。已儲存的會話仍可恢復。",
+		LangJapanese:           "⚠️ pi-connect が予期せず再起動し、管理対象の Pi プロセス %d 件が失われました。実行中のターンは未完了で結果不明の可能性があります。プロンプトは再送していません。保存済みセッションは再開できます。",
+		LangSpanish:            "⚠️ pi-connect se reinició inesperadamente y perdió %d proceso(s) administrado(s) de Pi. Los turnos activos pueden estar incompletos y su resultado puede ser desconocido. No se repitieron prompts. Las sesiones guardadas siguen siendo reanudables.",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",

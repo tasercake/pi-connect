@@ -79,7 +79,7 @@ type piRPCSession struct {
 	proc   *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
-	stderr *bytes.Buffer
+	stderr *boundedStderrBuffer
 
 	// transport state.
 	writeGate chan struct{} // serializes stdin writes and permits cancellation while queued
@@ -315,7 +315,7 @@ func (s *piRPCSession) doStart(startCtx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("piRPCSession: stdout pipe: %w", err)
 	}
-	var stderrBuf bytes.Buffer
+	var stderrBuf boundedStderrBuffer
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
@@ -330,32 +330,19 @@ func (s *piRPCSession) doStart(startCtx context.Context) error {
 	s.stderr = &stderrBuf
 	s.procMu.Unlock()
 
+	// readLoop drains stdout before calling Wait. os/exec documents that Wait
+	// closes pipes after observing process exit, so a concurrent Wait can discard
+	// buffered ACK/agent_settled frames and break acceptance/settlement semantics.
 	s.wg.Add(1)
-	go s.readLoop()
+	go s.readLoop(cmd)
 
 	s.acquireSessionIDFromStateContext(startCtx, "startup")
-
-	// Reaper only owns process state. readLoop owns the single transport-failure
-	// event, avoiding duplicate stderr/EOF errors racing into the engine.
-	go func() {
-		err := cmd.Wait()
-		s.alive.Store(false)
-		stderrMsg := strings.TrimSpace(stderrBuf.String())
-		if err != nil && stderrMsg != "" {
-			slog.Error("piRPCSession: process exited", "error", err, "stderr", truncStr(stderrMsg, 300))
-		} else if err != nil {
-			slog.Warn("piRPCSession: process exited", "error", err)
-		}
-		// readLoop exclusively owns transport completion after draining stdout.
-		// Do not fail pending calls here: ACK/agent_settled frames may still be
-		// buffered even though Wait has observed process exit.
-	}()
 
 	return nil
 }
 
 // readLoop drains stdout, demuxing responses, events, and UI requests.
-func (s *piRPCSession) readLoop() {
+func (s *piRPCSession) readLoop(cmd *exec.Cmd) {
 	defer s.wg.Done()
 	s.procMu.Lock()
 	stdout := s.stdout
@@ -382,15 +369,29 @@ func (s *piRPCSession) readLoop() {
 	if scanErr != nil {
 		slog.Debug("piRPCSession: stdout scanner closed", "error", scanErr)
 	}
+	// stdout reached EOF: all protocol frames have been drained, so Wait can
+	// safely finalize ProcessState and stderr without truncating the pipe.
+	waitErr := cmd.Wait()
+	s.alive.Store(false)
 	if s.closing.Load() || s.ctx.Err() != nil {
 		return
 	}
-	cause := scanErr
-	if cause == nil {
-		// stderr is still owned by cmd.Wait's writer here; reading its buffer
-		// would race process teardown. Reaper logs details after Wait completes.
-		cause = errors.New("pi RPC stdout closed unexpectedly")
+
+	s.procMu.Lock()
+	stderr := ""
+	if s.stderr != nil {
+		stderr = s.stderr.String()
 	}
+	s.procMu.Unlock()
+	metadataErr := waitErr
+	if metadataErr == nil {
+		metadataErr = errors.New("exit status 0")
+	}
+	cause := newUnexpectedProcessExitError("pi RPC", cmd, metadataErr, stderr)
+	if scanErr != nil {
+		cause = fmt.Errorf("%w; stdout read error: %v", cause, scanErr)
+	}
+	slog.Warn("piRPCSession: transport exited", "error", cause)
 	s.emitTransportFailure(cause)
 }
 

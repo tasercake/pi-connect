@@ -239,6 +239,17 @@ func TestPiRPCActualProcessFailureIsTerminal(t *testing.T) {
 		if event.Type != core.EventError || event.Error == nil || !s.EventErrorIsTerminal(event.Error) {
 			t.Fatalf("process failure event = %+v, want terminal transport error", event)
 		}
+		msg := event.Error.Error()
+		for _, want := range []string{"pid ", "exit code 9", "rpc crashed"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("process failure %q missing %q", msg, want)
+			}
+		}
+		select {
+		case duplicate := <-s.Events():
+			t.Fatalf("duplicate terminal event: %+v", duplicate)
+		case <-time.After(100 * time.Millisecond):
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for process failure")
 	}
