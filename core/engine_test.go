@@ -5447,6 +5447,7 @@ type controllableAgentSession struct {
 	report          *UsageReport
 	contextUsage    *ContextUsage
 	usageErr        error
+	closeEventsOnce sync.Once
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -5475,9 +5476,12 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 }
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
+func (s *controllableAgentSession) closeEvents() {
+	s.closeEventsOnce.Do(func() { close(s.events) })
+}
 func (s *controllableAgentSession) Close() error {
 	s.alive = false
-	close(s.events)
+	s.closeEvents()
 	select {
 	case <-s.closed:
 	default:
@@ -6436,6 +6440,51 @@ func (p *permSignalInlinePlatform) SendWithButtons(ctx context.Context, replyCtx
 		}
 	}
 	return nil
+}
+
+func TestProcessInteractiveEvents_UnexpectedChannelCloseNotifiesOnceAndCleans(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("closed-fg")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "test:closed-fg:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	sess.closeEvents()
+
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgAgentUnexpectedExit) {
+		t.Fatalf("sent = %v, want one unexpected-exit alert", sent)
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("unexpected close did not clean interactive state")
+	}
+}
+
+func TestProcessInteractiveEvents_IntentionalCloseDoesNotAlert(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("closed-intentional")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	key := "test:closed-intentional:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	state.markStopped()
+	sess.closeEvents()
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("intentional close sent alerts: %v", sent)
+	}
 }
 
 func TestProcessInteractiveEvents_TerminalEventErrorClosesStateAndNotifiesQueued(t *testing.T) {
@@ -11752,6 +11801,9 @@ func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
 	default:
 		t.Error("expected unsolicited reader goroutine to have exited (done channel not closed)")
 	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("intentional unsolicited cancellation sent alerts: %v", sent)
+	}
 }
 
 // TestUnsolicitedReader_SetsResyncOnChannelClose verifies that when the agent
@@ -11771,15 +11823,19 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 		replyCtx:         "ctx",
 		eventsNeedResync: false,
 	}
+	key := "test:close:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
 
-	e.startUnsolicitedReader(state, session, sessions, "test:close:u1", "")
+	e.startUnsolicitedReader(state, session, sessions, key, "")
 
 	state.mu.Lock()
 	doneCh := state.unsolicitedDone
 	state.mu.Unlock()
 
 	// Close the events channel (simulates agent process exit).
-	close(sess.events)
+	sess.closeEvents()
 
 	// Wait for reader to detect the close.
 	select {
@@ -11793,6 +11849,16 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 	state.mu.Unlock()
 	if !resync {
 		t.Error("expected eventsNeedResync=true after channel close")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgAgentUnexpectedExit) {
+		t.Fatalf("sent = %v, want one unexpected-exit alert", sent)
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("idle unexpected close did not clean interactive state")
 	}
 }
 
@@ -11914,7 +11980,7 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 
 	sess := newControllableSession("unsol-perm")
 	permRecorder := &permRecordingSession{
-		controllableAgentSession: *sess,
+		controllableAgentSession: sess,
 	}
 
 	sessions := e.sessions
@@ -11966,7 +12032,7 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 
 // permRecordingSession wraps controllableAgentSession and records permission responses.
 type permRecordingSession struct {
-	controllableAgentSession
+	*controllableAgentSession
 	mu             sync.Mutex
 	permCalls      int
 	lastPermResult PermissionResult

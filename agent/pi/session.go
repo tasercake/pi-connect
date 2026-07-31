@@ -23,6 +23,39 @@ import (
 
 var piJSONHeartbeatInterval = time.Minute
 
+const maxCapturedStderrBytes = 16 * 1024
+
+type boundedStderrBuffer struct {
+	buf       bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedStderrBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := maxCapturedStderrBytes - b.buf.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	if remaining < len(p) {
+		b.truncated = true
+	}
+	return n, nil
+}
+
+func (b *boundedStderrBuffer) String() string {
+	if !b.truncated {
+		return b.buf.String()
+	}
+	return b.buf.String() + "\n[stderr truncated]"
+}
+
+type stderrStringer interface {
+	String() string
+}
+
 const (
 	attachmentMaxTotalBytes = int64(1 << 30) // 1 GiB
 	attachmentMaxAge        = 7 * 24 * time.Hour
@@ -154,7 +187,7 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 		return fmt.Errorf("piSession: stdout pipe: %w", err)
 	}
 
-	var stderrBuf bytes.Buffer
+	var stderrBuf boundedStderrBuffer
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
@@ -191,27 +224,10 @@ func (s *piSession) CompactContextWithContext(ctx context.Context) error {
 	return rpc.CompactContextWithContext(ctx)
 }
 
-func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
+func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf stderrStringer) {
 	defer s.wg.Done()
 	stopHeartbeat := s.startJSONHeartbeat()
 	defer stopHeartbeat()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("piSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
-				if s.terminalError.Load() || !s.alive.Load() {
-					return
-				}
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-					return
-				}
-			}
-		}
-	}()
 
 	// Pi's JSON events are small (typically <1KB each). A 10MB Scanner buffer
 	// is more than sufficient — no need for the bufio.Reader approach used by
@@ -234,22 +250,37 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		s.handleEvent(raw)
 	}
 
-	if err := scanner.Err(); err != nil {
-		if s.terminalError.Load() || !s.alive.Load() {
-			return
-		}
-		slog.Error("piSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
-		}
-	}
+	scanErr := scanner.Err()
+	// Wait only after stdout is fully drained. This makes process status the
+	// authoritative terminal boundary and prevents a late deferred Wait error
+	// from following an already-emitted successful result.
+	waitErr := cmd.Wait()
 
-	// Stop synthetic liveness events before emitting EventResult, so no stale
-	// heartbeat can arrive after the final result for this turn.
+	// Stop synthetic liveness events before emitting a terminal event, so no
+	// stale heartbeat can arrive after the result/error for this turn.
 	stopHeartbeat()
+
+	if s.terminalError.Load() || !s.alive.Load() {
+		s.resetResponseState()
+		return
+	}
+	if scanErr != nil {
+		terminalErr := fmt.Errorf("read stdout: %w", scanErr)
+		if waitErr != nil {
+			terminalErr = fmt.Errorf("%w; stdout read error: %v", newUnexpectedProcessExitError("pi JSON", cmd, waitErr, stderrBuf.String()), scanErr)
+		}
+		slog.Error("piSession: scanner error", "error", terminalErr)
+		s.emitTerminalError(terminalErr)
+		s.resetResponseState()
+		return
+	}
+	if waitErr != nil {
+		processErr := newUnexpectedProcessExitError("pi JSON", cmd, waitErr, stderrBuf.String())
+		slog.Error("piSession: process failed", "error", processErr)
+		s.emitTerminalError(processErr)
+		s.resetResponseState()
+		return
+	}
 
 	if errMsg := s.pendingOverflowErrorForEOF(); errMsg != "" {
 		s.emitTerminalError(fmt.Errorf("%s", errMsg))
@@ -257,16 +288,7 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		return
 	}
 
-	// Assistant-level Pi JSON errors are terminal for this adapter. The engine
-	// has already received EventError and will not keep consuming this channel
-	// when eventsNeedResync=true, so do not enqueue a synthetic final result that
-	// can block stdout cleanup behind a full events channel.
-	if s.terminalError.Load() || !s.alive.Load() {
-		s.resetResponseState()
-		return
-	}
-
-	// Emit EventResult when the process finishes.
+	// Emit EventResult only after a successful process exit.
 	sid := s.CurrentSessionID()
 	evt := core.Event{
 		Type:         core.EventResult,
@@ -283,6 +305,34 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 	case s.events <- evt:
 	case <-s.ctx.Done():
 	}
+}
+
+func newUnexpectedProcessExitError(label string, cmd *exec.Cmd, waitErr error, stderr string) error {
+	parts := make([]string, 0, 4)
+	if cmd != nil && cmd.Process != nil {
+		parts = append(parts, fmt.Sprintf("pid %d", cmd.Process.Pid))
+	}
+	if cmd != nil && cmd.ProcessState != nil {
+		if code := cmd.ProcessState.ExitCode(); code >= 0 {
+			parts = append(parts, fmt.Sprintf("exit code %d", code))
+		}
+	}
+	waitText := strings.TrimSpace(waitErr.Error())
+	if waitText != "" && (cmd == nil || cmd.ProcessState == nil || cmd.ProcessState.ExitCode() < 0) {
+		parts = append(parts, waitText)
+	}
+	lower := strings.ToLower(waitText)
+	if strings.Contains(lower, "signal: killed") || strings.Contains(lower, "signal 9") || strings.Contains(lower, "sigkill") {
+		parts = append(parts, "SIGKILL may indicate OOM or an external kill")
+	}
+	stderr = strings.TrimSpace(stderr)
+	if stderr != "" {
+		parts = append(parts, "stderr: "+truncStr(stderr, 2048))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "unknown process failure")
+	}
+	return fmt.Errorf("%s process exited unexpectedly (%s)", label, strings.Join(parts, "; "))
 }
 
 func (s *piSession) startJSONHeartbeat() func() {

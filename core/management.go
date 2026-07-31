@@ -421,6 +421,7 @@ func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
+		Project    string `json:"project"`
 		SessionKey string `json:"session_key"`
 		Platform   string `json:"platform"`
 	}
@@ -430,7 +431,7 @@ func (m *ManagementServer) handleRestart(w http.ResponseWriter, r *http.Request)
 	}
 
 	select {
-	case RestartCh <- RestartRequest{SessionKey: body.SessionKey, Platform: body.Platform}:
+	case RestartCh <- RestartRequest{Project: body.Project, SessionKey: body.SessionKey, Platform: body.Platform}:
 		mgmtOK(w, "restart initiated")
 	default:
 		mgmtError(w, http.StatusConflict, "restart already in progress")
