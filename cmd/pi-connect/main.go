@@ -1668,19 +1668,7 @@ func buildHeartbeatConfig(hc config.HeartbeatConfig) core.HeartbeatConfig {
 }
 
 func resolveAutoCompress(proj *config.ProjectConfig) (bool, int, time.Duration) {
-	if proj == nil {
-		return false, 0, 0
-	}
-	if proj.AutoCompress.Enabled != nil && !*proj.AutoCompress.Enabled {
-		return false, 0, 0
-	}
-	enabled := proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled
-	defaultMaxTokens := 12000
-	if proj.AutoCompress.Enabled == nil && strings.EqualFold(proj.Agent.Type, "pi") {
-		enabled = true
-		defaultMaxTokens = 200000
-	}
-	if !enabled {
+	if proj == nil || proj.AutoCompress.Enabled == nil || !*proj.AutoCompress.Enabled {
 		return false, 0, 0
 	}
 	minGap := 30 * time.Minute
@@ -1689,7 +1677,7 @@ func resolveAutoCompress(proj *config.ProjectConfig) (bool, int, time.Duration) 
 	}
 	maxTokens := derefInt(proj.AutoCompress.MaxTokens)
 	if maxTokens <= 0 {
-		maxTokens = defaultMaxTokens
+		maxTokens = 12000
 	}
 	return true, maxTokens, minGap
 }
