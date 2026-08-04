@@ -255,16 +255,16 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Auto-Compress / 自动压缩
 # =============================================================================
-# Automatically trigger /compress when estimated token usage exceeds threshold.
-# 当估算 token 超过阈值时自动触发 /compress。
-#
-# Pi projects default to enabled when this block is omitted (max_tokens = 200000).
-# Set enabled = false to opt out.
-# Pi 项目在省略此块时默认启用（max_tokens = 200000）。设置 enabled = false 可退出。
+# Opt-in: automatically trigger /compress when estimated token usage exceeds threshold.
+# Disabled unless enabled = true. Pi relies on its native context compaction by default;
+# enable this only if you also want pi-connect's estimated-token trigger.
+# 选择启用：当估算 token 超过阈值时自动触发 /compress。
+# 除非设置 enabled = true，否则禁用。Pi 默认依赖其原生上下文压缩；
+# 仅当还需要 pi-connect 的估算 token 触发机制时才启用此功能。
 #
 # [projects.auto_compress]
 # enabled = true
-# max_tokens = 12000     # estimated token threshold to trigger compression (Pi omitted default: 200000)
+# max_tokens = 12000     # estimated token threshold to trigger compression (default 12000)
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
 
 # =============================================================================

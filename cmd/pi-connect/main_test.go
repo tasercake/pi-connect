@@ -110,30 +110,37 @@ func TestResolveAutoCompress(t *testing.T) {
 		wantGap    time.Duration
 	}{
 		{
-			name:       "pi omitted defaults enabled high threshold",
-			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}},
-			wantEnable: true,
-			wantMax:    200000,
-			wantGap:    30 * time.Minute,
+			name: "nil project disables",
 		},
 		{
-			name:       "pi explicit false disables",
-			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{Enabled: boolPtr(false)}},
-			wantEnable: false,
+			name: "pi omitted disables",
+			proj: &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}},
 		},
 		{
-			name:       "pi explicit false disables without removed agent",
-			proj:       &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{Enabled: boolPtr(false)}},
-			wantEnable: false,
+			name: "non-pi omitted disables",
+			proj: &config.ProjectConfig{Agent: config.AgentConfig{Type: "claude"}},
 		},
 		{
-			name: "explicit true honors values",
+			name: "pi explicit false disables",
+			proj: &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{Enabled: boolPtr(false)}},
+		},
+		{
+			name: "pi explicit true honors values",
 			proj: &config.ProjectConfig{Agent: config.AgentConfig{Type: "pi"}, AutoCompress: config.AutoCompressConfig{
 				Enabled: boolPtr(true), MaxTokens: intPtr(42), MinGapMins: intPtr(7),
 			}},
 			wantEnable: true,
 			wantMax:    42,
 			wantGap:    7 * time.Minute,
+		},
+		{
+			name: "non-pi explicit true uses defaults",
+			proj: &config.ProjectConfig{Agent: config.AgentConfig{Type: "claude"}, AutoCompress: config.AutoCompressConfig{
+				Enabled: boolPtr(true),
+			}},
+			wantEnable: true,
+			wantMax:    12000,
+			wantGap:    30 * time.Minute,
 		},
 	}
 
