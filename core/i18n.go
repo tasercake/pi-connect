@@ -581,15 +581,16 @@ const (
 	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
 	MsgBackgroundAutoDenied    MsgKey = "background_auto_denied"
 
-	MsgForumTopicPhotos         MsgKey = "forum_topic_photos"
-	MsgForumTopicPhoto          MsgKey = "forum_topic_photo"
-	MsgForumTopicDocument       MsgKey = "forum_topic_document"
-	MsgForumTopicAudio          MsgKey = "forum_topic_audio"
-	MsgForumTopicLocation       MsgKey = "forum_topic_location"
-	MsgForumTopicNewRequest     MsgKey = "forum_topic_new_request"
-	MsgForumTopicNamingFailed   MsgKey = "forum_topic_naming_failed"
-	MsgForumTopicCreationFailed MsgKey = "forum_topic_creation_failed"
-	MsgForumTopicBindingFailed  MsgKey = "forum_topic_binding_failed"
+	MsgForumTopicPhotos           MsgKey = "forum_topic_photos"
+	MsgForumTopicPhoto            MsgKey = "forum_topic_photo"
+	MsgForumTopicDocument         MsgKey = "forum_topic_document"
+	MsgForumTopicAudio            MsgKey = "forum_topic_audio"
+	MsgForumTopicLocation         MsgKey = "forum_topic_location"
+	MsgForumTopicNewRequest       MsgKey = "forum_topic_new_request"
+	MsgForumTopicNamingFailed     MsgKey = "forum_topic_naming_failed"
+	MsgForumTopicCreationFailed   MsgKey = "forum_topic_creation_failed"
+	MsgForumTopicBindingFailed    MsgKey = "forum_topic_binding_failed"
+	MsgForumTopicOriginLinkFailed MsgKey = "forum_topic_origin_link_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -655,6 +656,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "話題已建立，但無法連接工作階段。請重試。",
 		LangJapanese:           "トピックは作成されましたが、セッションを接続できませんでした。もう一度お試しください。",
 		LangSpanish:            "El tema se creó, pero no se pudo conectar la sesión. Inténtalo de nuevo.",
+	},
+	MsgForumTopicOriginLinkFailed: {
+		LangEnglish:            "The topic was created, but the original message link could not be added. Please try again.",
+		LangChinese:            "话题已创建，但无法添加原消息链接。请重试。",
+		LangTraditionalChinese: "話題已建立，但無法新增原始訊息連結。請重試。",
+		LangJapanese:           "トピックは作成されましたが、元のメッセージへのリンクを追加できませんでした。もう一度お試しください。",
+		LangSpanish:            "El tema se creó, pero no se pudo añadir el enlace al mensaje original. Inténtalo de nuevo.",
 	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
