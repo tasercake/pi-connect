@@ -74,6 +74,10 @@ type = "pi"
 [projects.agent.options]
 work_dir = "/path/to/your/project"
 mode = "default"
+# Optional: use a small/cheap model for General-topic title generation.
+# OpenAI Codex defaults to Spark; other providers use the normal agent model.
+topic_title_model = "openai-codex/gpt-5.3-codex-spark"
+topic_title_timeout_seconds = 20
 
 [[projects.platforms]]
 type = "telegram"
@@ -192,11 +196,23 @@ as part of the Telegram session key, so each topic has its own independent
 conversation context.
 
 In a forum-enabled supergroup, each accepted message sent to the General topic
-creates a new, message-named topic. pi-connect replies to the original General
-message with a link, then handles the request in the new topic. The bot must be
-an administrator with **Manage Topics** permission. Messages already inside a
-non-General topic continue in that topic. Standard groups and direct messages
-keep their existing behavior.
+starts Pi processing and a separate, tool-free LLM title call in parallel. The
+Telegram topic is created only after the LLM returns a valid concise name. Agent
+output waits for that topic, while backend processing can start immediately.
+After creation, pi-connect binds the Pi session to the topic, replies to the
+original General message with a link, and sends agent output only inside the new
+topic. If title generation fails or times out, no topic is created.
+
+The title call uses `topic_title_model` when configured. Choose a small, cheap,
+or free model supported by your Pi provider. For an `openai-codex/*` agent,
+pi-connect defaults to `openai-codex/gpt-5.3-codex-spark`, which uses the same
+ChatGPT subscription. Other providers default to the agent's normal model. The
+title call has no tools, extensions, skills, project context, or persisted Pi
+session.
+
+The bot must be an administrator with **Manage Topics** permission. Messages
+already inside a non-General topic continue in that topic. Standard groups and
+direct messages keep their existing behavior.
 
 ---
 
