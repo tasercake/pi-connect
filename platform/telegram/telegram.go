@@ -77,6 +77,7 @@ type telegramBot interface {
 	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
 	FileDownloadLink(f *models.File) string
 	SetMessageReaction(ctx context.Context, params *tgbot.SetMessageReactionParams) (bool, error)
+	CreateForumTopic(ctx context.Context, params *tgbot.CreateForumTopicParams) (*models.ForumTopic, error)
 }
 
 type backoffTimer interface {
@@ -434,7 +435,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			return
 		}
 		base.Images = []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}}
-		p.dispatchMessage(&base, msg)
+		p.dispatchMessage(ctx, &base, msg)
 		return
 	}
 
@@ -445,7 +446,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			slog.Error("telegram: download voice failed", "error", err)
 			return
 		}
-		p.dispatchMessage(&core.Message{
+		p.dispatchMessage(ctx, &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			MessageID:  strconv.Itoa(msg.ID),
@@ -475,7 +476,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 				format = parts[1]
 			}
 		}
-		p.dispatchMessage(&core.Message{
+		p.dispatchMessage(ctx, &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			MessageID:  strconv.Itoa(msg.ID),
@@ -521,13 +522,13 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			return
 		}
 		base.Files = []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}}
-		p.dispatchMessage(&base, msg)
+		p.dispatchMessage(ctx, &base, msg)
 		return
 	}
 
 	if msg.Location != nil {
 		slog.Info("telegram: location received", "user", userName, "latitude", msg.Location.Latitude, "longitude", msg.Location.Longitude)
-		p.dispatchMessage(&core.Message{
+		p.dispatchMessage(ctx, &core.Message{
 			SessionKey: sessionKey, Platform: "telegram",
 			UserID: userID, UserName: userName, ChatName: chatName,
 			MessageID:  strconv.Itoa(msg.ID),
@@ -550,7 +551,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	text := stripBotMention(msg.Text, botName)
 	slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
-	p.dispatchMessage(&core.Message{
+	p.dispatchMessage(ctx, &core.Message{
 		SessionKey: sessionKey, Platform: "telegram",
 		UserID: userID, UserName: userName, ChatName: chatName,
 		Content:    text,
@@ -638,7 +639,7 @@ func (p *Platform) flushMediaGroup(key mediaGroupKey) {
 		}
 	}
 
-	p.dispatchMessage(&out, items[baseIdx].message)
+	p.dispatchMessage(context.Background(), &out, items[baseIdx].message)
 }
 
 func (p *Platform) cancelMediaGroups() {
@@ -652,7 +653,138 @@ func (p *Platform) cancelMediaGroups() {
 	}
 }
 
-func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
+const telegramForumTopicNameLimit = 128
+
+func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Message, tgMsg *models.Message) bool {
+	if !isGeneralForumMessage(tgMsg) {
+		return true
+	}
+
+	bot, err := p.connectedBot("create forum topic")
+	if err != nil {
+		slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		return false
+	}
+
+	name := forumTopicName(msg, tgMsg)
+	topic, err := bot.CreateForumTopic(ctx, &tgbot.CreateForumTopicParams{
+		ChatID: tgMsg.Chat.ID,
+		Name:   name,
+	})
+	if err != nil || topic == nil || topic.MessageThreadID <= 1 {
+		if err == nil {
+			err = fmt.Errorf("invalid topic response")
+		}
+		slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		p.sendTopicCreationFailure(ctx, bot, tgMsg)
+		return false
+	}
+
+	threadID := topic.MessageThreadID
+	msg.SessionKey = p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
+	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, threadID)
+	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID}
+
+	link := forumTopicLink(tgMsg.Chat, threadID)
+	linkText := name + "\n" + link
+	if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: tgMsg.Chat.ID,
+		Text:   linkText,
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: tgMsg.ID,
+		},
+	}); err != nil {
+		slog.Error("telegram: send forum topic link failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+		return false
+	}
+
+	return true
+}
+
+func isGeneralForumMessage(msg *models.Message) bool {
+	if msg == nil || !msg.Chat.IsForum || msg.Chat.Type != models.ChatTypeSupergroup {
+		return false
+	}
+	return msg.MessageThreadID == 0 || msg.MessageThreadID == 1
+}
+
+func forumTopicName(msg *core.Message, tgMsg *models.Message) string {
+	name := strings.Join(strings.Fields(msg.Content), " ")
+	if name == "" {
+		i18n := core.NewI18n(telegramMessageLanguage(msg.Content, tgMsg))
+		switch {
+		case len(msg.Images) > 1:
+			name = i18n.T(core.MsgForumTopicPhotos)
+		case len(msg.Images) == 1:
+			name = i18n.T(core.MsgForumTopicPhoto)
+		case len(msg.Files) > 0 && msg.Files[0].FileName != "":
+			name = msg.Files[0].FileName
+		case len(msg.Files) > 0 || tgMsg.Document != nil:
+			name = i18n.T(core.MsgForumTopicDocument)
+		case msg.Audio != nil:
+			name = i18n.T(core.MsgForumTopicAudio)
+		case msg.Location != nil:
+			name = i18n.T(core.MsgForumTopicLocation)
+		default:
+			name = i18n.T(core.MsgForumTopicNewRequest)
+		}
+	}
+
+	runes := []rune(name)
+	if len(runes) > telegramForumTopicNameLimit {
+		name = string(runes[:telegramForumTopicNameLimit-1]) + "…"
+	}
+	return name
+}
+
+func telegramMessageLanguage(content string, tgMsg *models.Message) core.Language {
+	if strings.TrimSpace(content) != "" {
+		return core.DetectLanguage(content)
+	}
+	if tgMsg == nil || tgMsg.From == nil {
+		return core.LangEnglish
+	}
+
+	code := strings.ToLower(strings.ReplaceAll(tgMsg.From.LanguageCode, "_", "-"))
+	switch {
+	case strings.HasPrefix(code, "zh-tw"), strings.HasPrefix(code, "zh-hk"), strings.HasPrefix(code, "zh-mo"), strings.Contains(code, "hant"):
+		return core.LangTraditionalChinese
+	case strings.HasPrefix(code, "zh"):
+		return core.LangChinese
+	case strings.HasPrefix(code, "ja"):
+		return core.LangJapanese
+	case strings.HasPrefix(code, "es"):
+		return core.LangSpanish
+	default:
+		return core.LangEnglish
+	}
+}
+
+func forumTopicLink(chat models.Chat, threadID int) string {
+	if chat.Username != "" {
+		return fmt.Sprintf("https://t.me/%s/%d", strings.TrimPrefix(chat.Username, "@"), threadID)
+	}
+	internalID := strings.TrimPrefix(strconv.FormatInt(chat.ID, 10), "-100")
+	return fmt.Sprintf("https://t.me/c/%s/%d", internalID, threadID)
+}
+
+func (p *Platform) sendTopicCreationFailure(ctx context.Context, bot telegramBot, msg *models.Message) {
+	if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: msg.Chat.ID,
+		Text:   core.NewI18n(telegramMessageLanguage(strings.TrimSpace(msg.Text+" "+msg.Caption), msg)).T(core.MsgForumTopicCreationFailed),
+		ReplyParameters: &models.ReplyParameters{
+			MessageID: msg.ID,
+		},
+	}); err != nil {
+		slog.Error("telegram: send topic creation failure failed", "error", err, "chat_id", msg.Chat.ID, "message_id", msg.ID)
+	}
+}
+
+func (p *Platform) dispatchMessage(ctx context.Context, msg *core.Message, tgMsg *models.Message) {
+	if !p.routeGeneralForumMessage(ctx, msg, tgMsg) {
+		return
+	}
+
 	// Enrich with platform-specific context (reply quotes, location text, etc.)
 	var extras []string
 	if replyText := enrichReplyContent(tgMsg); replyText != "" {
@@ -1105,10 +1237,14 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if err != nil {
 		return err
 	}
+	var replyTo *models.ReplyParameters
+	if rc.messageID != 0 {
+		replyTo = &models.ReplyParameters{MessageID: rc.messageID}
+	}
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
-		replyTo:      &models.ReplyParameters{MessageID: rc.messageID},
+		replyTo:      replyTo,
 		logMethod:    "Reply",
 		logChunkInfo: true,
 	})
