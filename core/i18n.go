@@ -580,9 +580,66 @@ const (
 	MsgWsInitDirNotFound       MsgKey = "ws_init_dir_not_found"
 	MsgWsInitInvalidTarget     MsgKey = "ws_init_invalid_target"
 	MsgBackgroundAutoDenied    MsgKey = "background_auto_denied"
+
+	MsgForumTopicPhotos         MsgKey = "forum_topic_photos"
+	MsgForumTopicPhoto          MsgKey = "forum_topic_photo"
+	MsgForumTopicDocument       MsgKey = "forum_topic_document"
+	MsgForumTopicAudio          MsgKey = "forum_topic_audio"
+	MsgForumTopicLocation       MsgKey = "forum_topic_location"
+	MsgForumTopicNewRequest     MsgKey = "forum_topic_new_request"
+	MsgForumTopicCreationFailed MsgKey = "forum_topic_creation_failed"
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgForumTopicPhotos: {
+		LangEnglish:            "Photos",
+		LangChinese:            "照片",
+		LangTraditionalChinese: "照片",
+		LangJapanese:           "写真",
+		LangSpanish:            "Fotos",
+	},
+	MsgForumTopicPhoto: {
+		LangEnglish:            "Photo",
+		LangChinese:            "照片",
+		LangTraditionalChinese: "照片",
+		LangJapanese:           "写真",
+		LangSpanish:            "Foto",
+	},
+	MsgForumTopicDocument: {
+		LangEnglish:            "Document",
+		LangChinese:            "文档",
+		LangTraditionalChinese: "文件",
+		LangJapanese:           "ドキュメント",
+		LangSpanish:            "Documento",
+	},
+	MsgForumTopicAudio: {
+		LangEnglish:            "Audio message",
+		LangChinese:            "音频消息",
+		LangTraditionalChinese: "音訊訊息",
+		LangJapanese:           "音声メッセージ",
+		LangSpanish:            "Mensaje de audio",
+	},
+	MsgForumTopicLocation: {
+		LangEnglish:            "Location",
+		LangChinese:            "位置",
+		LangTraditionalChinese: "位置",
+		LangJapanese:           "位置情報",
+		LangSpanish:            "Ubicación",
+	},
+	MsgForumTopicNewRequest: {
+		LangEnglish:            "New request",
+		LangChinese:            "新请求",
+		LangTraditionalChinese: "新請求",
+		LangJapanese:           "新しいリクエスト",
+		LangSpanish:            "Nueva solicitud",
+	},
+	MsgForumTopicCreationFailed: {
+		LangEnglish:            "Could not create a topic. Check that the bot can manage topics.",
+		LangChinese:            "无法创建话题。请检查机器人是否有管理话题的权限。",
+		LangTraditionalChinese: "無法建立話題。請檢查機器人是否有管理話題的權限。",
+		LangJapanese:           "トピックを作成できませんでした。ボットにトピック管理権限があることを確認してください。",
+		LangSpanish:            "No se pudo crear el tema. Comprueba que el bot pueda administrar temas.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

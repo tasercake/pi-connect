@@ -189,8 +189,14 @@ level=INFO msg="pi-connect is running" projects=1
 
 Telegram topics include a `message_thread_id`. pi-connect uses that thread ID
 as part of the Telegram session key, so each topic has its own independent
-conversation context. This applies to forum topics in groups and private chat
-topics when Telegram includes `message_thread_id`.
+conversation context.
+
+In a forum-enabled supergroup, each accepted message sent to the General topic
+creates a new, message-named topic. pi-connect replies to the original General
+message with a link, then handles the request in the new topic. The bot must be
+an administrator with **Manage Topics** permission. Messages already inside a
+non-General topic continue in that topic. Standard groups and direct messages
+keep their existing behavior.
 
 ---
 
