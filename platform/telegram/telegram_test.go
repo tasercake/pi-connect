@@ -85,6 +85,7 @@ type stubTelegramBot struct {
 	createForumTopicCalls int
 
 	sendErr                error
+	sendMessageErrByCall   map[int]error
 	createForumTopicErr    error
 	createdForumTopic      *models.ForumTopic
 	getFileErr             error
@@ -104,15 +105,20 @@ func newStubTelegramBot() *stubTelegramBot {
 func (b *stubTelegramBot) SendMessage(_ context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendMessageCalls++
+	call := b.sendMessageCalls
 	paramsCopy := *params
 	if params.ReplyParameters != nil {
 		replyCopy := *params.ReplyParameters
 		paramsCopy.ReplyParameters = &replyCopy
 	}
 	b.sendMessageParams = append(b.sendMessageParams, &paramsCopy)
+	callErr := b.sendErr
+	if err := b.sendMessageErrByCall[call]; err != nil {
+		callErr = err
+	}
 	b.mu.Unlock()
-	if b.sendErr != nil {
-		return nil, b.sendErr
+	if callErr != nil {
+		return nil, callErr
 	}
 	return &models.Message{ID: 99}, nil
 }
@@ -1054,12 +1060,18 @@ func TestHandleMessageGeneralForumTopicDefersCreationUntilLLMTitle(t *testing.T)
 	if route.SessionKey != "telegram:-1001234567890:77:7" || route.ChannelKey != "-1001234567890:77" {
 		t.Fatalf("route = %#v, want dedicated topic", route)
 	}
-	if calls := stubBot.SendMessageCallCount(); calls != 0 {
-		t.Fatalf("handoff published before core binding = %d", calls)
+	if calls := stubBot.SendMessageCallCount(); calls != 1 {
+		t.Fatalf("messages before core binding = %d, want only original-message link", calls)
+	}
+	stubBot.mu.Lock()
+	originLink := stubBot.sendMessageParams[0]
+	stubBot.mu.Unlock()
+	if originLink.MessageThreadID != 77 || originLink.Text != "https://t.me/testforum/10" || originLink.ReplyParameters != nil {
+		t.Fatalf("first topic message = %#v, want original-message link", originLink)
 	}
 	got.DeferredRoute.Bound <- nil
 
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 1 })
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
 	if stubBot.createForumTopicCalls != 1 {
@@ -1068,10 +1080,10 @@ func TestHandleMessageGeneralForumTopicDefersCreationUntilLLMTitle(t *testing.T)
 	if got := stubBot.createForumTopicParams[0]; got.ChatID != int64(-1001234567890) || got.Name != "Investigate flaky tests" {
 		t.Fatalf("CreateForumTopic params = %#v", got)
 	}
-	if len(stubBot.sendMessageParams) != 1 {
-		t.Fatalf("SendMessage calls = %d, want topic link reply", len(stubBot.sendMessageParams))
+	if len(stubBot.sendMessageParams) != 2 {
+		t.Fatalf("SendMessage calls = %d, want origin link and topic handoff", len(stubBot.sendMessageParams))
 	}
-	linkReply := stubBot.sendMessageParams[0]
+	linkReply := stubBot.sendMessageParams[1]
 	if linkReply.MessageThreadID != 0 {
 		t.Fatalf("topic link MessageThreadID = %d, want omitted for General", linkReply.MessageThreadID)
 	}
@@ -1131,9 +1143,12 @@ func TestGeneralForumReplyWaitsForTopicAndUsesFinalThread(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("deferred reply did not unblock")
 	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 3 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
+	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "https://t.me/c/123/10" {
+		t.Fatalf("first topic message = %#v, want original-message link", first)
+	}
 	foundAgentReply := false
 	for _, params := range stubBot.sendMessageParams {
 		if params.Text == "agent result" {
@@ -1229,10 +1244,13 @@ func TestHandleMessageGeneralForumTopicWithoutUsernameUsesPrivateLink(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("route did not resolve")
 	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 1 })
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if got := stubBot.sendMessageParams[0].Text; got != "Private forum request\nhttps://t.me/c/9876543210/77" {
+	if got := stubBot.sendMessageParams[0]; got.Text != "https://t.me/c/9876543210/11" || got.MessageThreadID != 77 {
+		t.Fatalf("original-message link = %#v", got)
+	}
+	if got := stubBot.sendMessageParams[1].Text; got != "Private forum request\nhttps://t.me/c/9876543210/77" {
 		t.Fatalf("topic link text = %q", got)
 	}
 }
@@ -1390,10 +1408,58 @@ func TestHandleMessageGeneralForumTopicCreationFailureDispatchesEarlyThenFailsRo
 	}
 }
 
+func TestHandleMessageOriginalLinkFailureDoesNotBindSession(t *testing.T) {
+	handled := make(chan *core.Message, 1)
+	stubBot := newStubTelegramBot()
+	stubBot.sendMessageErrByCall = map[int]error{1: errors.New("send failed")}
+	p := &Platform{
+		groupReplyAll: true,
+		bot:           stubBot,
+		selfUser:      &models.User{ID: 42, Username: "mybot"},
+		titleGenerator: func(context.Context, string) (string, error) {
+			return "Friendly greeting", nil
+		},
+		handler: func(_ core.Platform, msg *core.Message) { handled <- msg },
+	}
+	p.handleMessage(context.Background(), &models.Message{
+		ID: 10, MessageThreadID: 1, Text: "hello", Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
+	})
+
+	var msg *core.Message
+	select {
+	case msg = <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("message was not dispatched early")
+	}
+	select {
+	case result := <-msg.DeferredRoute.Result:
+		if result.Err == nil {
+			t.Fatal("route was bound despite original-link failure")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed route did not resolve")
+	}
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "https://t.me/c/123/10" {
+		t.Fatalf("attempted original-message link = %#v", first)
+	}
+	failure := stubBot.sendMessageParams[1]
+	if failure.ReplyParameters == nil || failure.ReplyParameters.MessageID != 10 {
+		t.Fatalf("failure ReplyParameters = %#v, want reply to message 10", failure.ReplyParameters)
+	}
+	if failure.Text != "The topic was created, but the original message link could not be added. Please try again." {
+		t.Fatalf("failure text = %q", failure.Text)
+	}
+}
+
 func TestHandleMessageGeneralForumTopicLinkFailureKeepsEarlyDispatch(t *testing.T) {
 	var handled atomic.Int32
 	stubBot := newStubTelegramBot()
-	stubBot.sendErr = errors.New("send failed")
+	stubBot.sendMessageErrByCall = map[int]error{2: errors.New("send failed")}
 	p := &Platform{
 		groupReplyAll: true,
 		bot:           stubBot,
@@ -1421,7 +1487,7 @@ func TestHandleMessageGeneralForumTopicLinkFailureKeepsEarlyDispatch(t *testing.
 	waitForTelegramTest(t, time.Second, func() bool {
 		stubBot.mu.Lock()
 		defer stubBot.mu.Unlock()
-		return stubBot.createForumTopicCalls == 1 && len(stubBot.sendMessageParams) == 1
+		return stubBot.createForumTopicCalls == 1 && len(stubBot.sendMessageParams) == 2
 	})
 }
 

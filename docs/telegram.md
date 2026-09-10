@@ -199,9 +199,11 @@ In a forum-enabled supergroup, each accepted message sent to the General topic
 starts Pi processing and a separate, tool-free LLM title call in parallel. The
 Telegram topic is created only after the LLM returns a valid concise name. Agent
 output waits for that topic, while backend processing can start immediately.
-After creation, pi-connect binds the Pi session to the topic, replies to the
-original General message with a link, and sends agent output only inside the new
-topic. If title generation fails or times out, no topic is created.
+After creation, pi-connect posts a link to the original General message as the
+first bot message in the new topic. It then binds the Pi session to the topic,
+replies to the original General message with a topic link, and sends agent
+output only inside the new topic. If title generation fails or times out, no
+topic is created.
 
 The title call uses `topic_title_model` when configured. Choose a small, cheap,
 or free model supported by your Pi provider. For an `openai-codex/*` agent,

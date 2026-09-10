@@ -807,6 +807,15 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 		}
 
 		threadID := topic.MessageThreadID
+		if err := p.sendOriginalMessageLink(ctx, bot, tgMsg, threadID); err != nil {
+			err = fmt.Errorf("send original message link: %w", err)
+			slog.Error("telegram: send original message link failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+			resultCh <- core.DeferredRouteResult{Err: err}
+			target.resolve(replyContext{}, err)
+			p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicOriginLinkFailed)
+			return
+		}
+
 		finalSessionKey := p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
 		finalChannelKey := buildChannelKey(tgMsg.Chat.ID, threadID)
 		p.setPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID, msg.SessionKey)
@@ -837,7 +846,7 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 		p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
 		target.resolve(replyContext{chatID: tgMsg.Chat.ID, threadID: threadID}, nil)
 
-		link := forumTopicLink(tgMsg.Chat, threadID)
+		link := telegramMessageLink(tgMsg.Chat, threadID)
 		if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
 			ChatID: tgMsg.Chat.ID,
 			Text:   name + "\n" + link,
@@ -935,12 +944,21 @@ func telegramMessageLanguage(content string, tgMsg *models.Message) core.Languag
 	}
 }
 
-func forumTopicLink(chat models.Chat, threadID int) string {
+func telegramMessageLink(chat models.Chat, messageID int) string {
 	if chat.Username != "" {
-		return fmt.Sprintf("https://t.me/%s/%d", strings.TrimPrefix(chat.Username, "@"), threadID)
+		return fmt.Sprintf("https://t.me/%s/%d", strings.TrimPrefix(chat.Username, "@"), messageID)
 	}
 	internalID := strings.TrimPrefix(strconv.FormatInt(chat.ID, 10), "-100")
-	return fmt.Sprintf("https://t.me/c/%s/%d", internalID, threadID)
+	return fmt.Sprintf("https://t.me/c/%s/%d", internalID, messageID)
+}
+
+func (p *Platform) sendOriginalMessageLink(ctx context.Context, bot telegramBot, msg *models.Message, threadID int) error {
+	_, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID:          msg.Chat.ID,
+		MessageThreadID: threadID,
+		Text:            telegramMessageLink(msg.Chat, msg.ID),
+	})
+	return err
 }
 
 func (p *Platform) sendTopicCreationFailure(ctx context.Context, bot telegramBot, msg *models.Message) {
