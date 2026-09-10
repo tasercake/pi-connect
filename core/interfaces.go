@@ -48,6 +48,19 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// ConversationTitleGenerator is an optional agent capability for generating a
+// short title with a lightweight, isolated LLM call.
+type ConversationTitleGenerator interface {
+	GenerateConversationTitle(ctx context.Context, content string) (string, error)
+}
+
+// ConversationTitleGeneratorSetter is an optional platform capability. The
+// engine injects the active agent's title generator before starting the
+// platform, keeping platform adapters independent from agent implementations.
+type ConversationTitleGeneratorSetter interface {
+	SetConversationTitleGenerator(func(context.Context, string) (string, error))
+}
+
 // FormattingInstructionProvider is an optional interface for platforms that
 // provide platform-specific formatting instructions for the agent system prompt
 // (e.g., Slack mrkdwn vs standard Markdown).

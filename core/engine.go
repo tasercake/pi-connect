@@ -237,6 +237,10 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	deferredRouteMu      sync.RWMutex
+	deferredRouteAliases map[string]string // final interactive key → provisional interactive key
+	deferredDeliveryKeys map[string]string // provisional session key → final delivery key
+
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	lifecycleWorkers    map[Platform]bool
@@ -426,6 +430,8 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		deferredRouteAliases:  make(map[string]string),
+		deferredDeliveryKeys:  make(map[string]string),
 		platformReady:         make(map[Platform]bool),
 		lifecycleWorkers:      make(map[Platform]bool),
 		startedAt:             time.Now(),
@@ -1506,6 +1512,13 @@ func (e *Engine) Start() error {
 		if async, ok := p.(AsyncRecoverablePlatform); ok {
 			async.SetLifecycleHandler(e)
 		}
+		if setter, ok := p.(ConversationTitleGeneratorSetter); ok {
+			if generator, ok := e.agent.(ConversationTitleGenerator); ok {
+				setter.SetConversationTitleGenerator(generator.GenerateConversationTitle)
+			} else {
+				setter.SetConversationTitleGenerator(nil)
+			}
+		}
 		if err := p.Start(e.handleMessage); err != nil {
 			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
 			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
@@ -2005,6 +2018,133 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 	return cancel
 }
 
+func (e *Engine) resolveDeferredRouteAlias(interactiveKey string) string {
+	e.deferredRouteMu.RLock()
+	defer e.deferredRouteMu.RUnlock()
+	if provisional, ok := e.deferredRouteAliases[interactiveKey]; ok {
+		return provisional
+	}
+	return interactiveKey
+}
+
+func (e *Engine) resolveDeferredDeliveryKey(sessionKey string) string {
+	e.deferredRouteMu.RLock()
+	defer e.deferredRouteMu.RUnlock()
+	if final, ok := e.deferredDeliveryKeys[sessionKey]; ok {
+		return final
+	}
+	return sessionKey
+}
+
+func finalDeferredInteractiveKey(provisionalInteractiveKey, provisionalSessionKey, finalSessionKey string) string {
+	if strings.HasSuffix(provisionalInteractiveKey, provisionalSessionKey) {
+		return strings.TrimSuffix(provisionalInteractiveKey, provisionalSessionKey) + finalSessionKey
+	}
+	return finalSessionKey
+}
+
+func (e *Engine) watchDeferredRoute(route *DeferredRoute, provisionalSessionKey, provisionalInteractiveKey, platformName, sourceWorkspaceChannelKey string, sessions *SessionManager, session *Session) {
+	go func() {
+		var result DeferredRouteResult
+		select {
+		case result = <-route.Result:
+		case <-e.ctx.Done():
+			return
+		}
+
+		bindingErr := result.Err
+		if bindingErr == nil {
+			bindingErr = sessions.RebindUserKey(provisionalSessionKey, result.SessionKey)
+		}
+		if bindingErr == nil {
+			e.copyDeferredWorkspaceBinding(platformName, sourceWorkspaceChannelKey, result.ChannelKey)
+			finalInteractiveKey := finalDeferredInteractiveKey(provisionalInteractiveKey, provisionalSessionKey, result.SessionKey)
+			e.deferredRouteMu.Lock()
+			e.deferredRouteAliases[finalInteractiveKey] = provisionalInteractiveKey
+			e.deferredDeliveryKeys[provisionalSessionKey] = result.SessionKey
+			e.deferredRouteMu.Unlock()
+
+			if e.cronScheduler != nil {
+				for _, job := range e.cronScheduler.store.ListBySessionKey(provisionalSessionKey) {
+					if err := e.cronScheduler.UpdateJob(job.ID, "session_key", result.SessionKey); err != nil {
+						slog.Warn("deferred route: migrate cron target failed", "job", job.ID, "error", err)
+					}
+				}
+			}
+
+			e.interactiveMu.Lock()
+			state := e.interactiveStates[provisionalInteractiveKey]
+			e.interactiveMu.Unlock()
+			if state != nil {
+				state.mu.Lock()
+				state.deliverySessionKey = result.SessionKey
+				state.mu.Unlock()
+				e.persistRuntimeLease(state)
+			}
+			slog.Info("deferred session route bound", "from", provisionalSessionKey, "to", result.SessionKey, "title", result.Title)
+		} else {
+			slog.Error("deferred session route failed", "session", provisionalSessionKey, "error", bindingErr)
+			e.ackDeferredRoute(route, bindingErr)
+			e.abortDeferredRoute(provisionalInteractiveKey, sessions, session)
+			return
+		}
+
+		e.ackDeferredRoute(route, nil)
+	}()
+}
+
+func (e *Engine) ackDeferredRoute(route *DeferredRoute, err error) {
+	if route.Bound == nil {
+		return
+	}
+	select {
+	case route.Bound <- err:
+	case <-e.ctx.Done():
+	}
+}
+
+func (e *Engine) copyDeferredWorkspaceBinding(platformName, sourceChannelKey, finalPlatformChannelKey string) {
+	if !e.multiWorkspace || e.workspaceBindings == nil || sourceChannelKey == "" || finalPlatformChannelKey == "" {
+		return
+	}
+	binding, bindingScope := e.workspaceBindings.LookupEffective("project:"+e.name, sourceChannelKey)
+	if binding == nil {
+		return
+	}
+	finalChannelKey := workspaceChannelKey(platformName, finalPlatformChannelKey)
+	e.workspaceBindings.Bind(bindingScope, finalChannelKey, binding.ChannelName, binding.Workspace)
+}
+
+func (e *Engine) abortDeferredRoute(interactiveKey string, sessions *SessionManager, session *Session) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		hasAgentSession := false
+		if state != nil {
+			state.mu.Lock()
+			hasAgentSession = state.agentSession != nil
+			state.mu.Unlock()
+		}
+		if hasAgentSession {
+			e.stopInteractiveSessionSilently(interactiveKey)
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if session != nil {
+		sessions.DeleteByID(session.ID)
+	}
+}
+
 func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
@@ -2197,6 +2337,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
+	interactiveKey = e.resolveDeferredRouteAlias(interactiveKey)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
@@ -2233,6 +2374,9 @@ sessionLocked:
 	// processor so messages arriving during session startup can be queued
 	// instead of dropped (issue #565).
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+	if msg.DeferredRoute != nil {
+		e.watchDeferredRoute(msg.DeferredRoute, msg.SessionKey, interactiveKey, msg.Platform, effectiveWorkspaceChannelKey(msg), sessions, session)
+	}
 
 	slog.Info("processing message",
 		"platform", msg.Platform,
@@ -3155,7 +3299,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		replyCtx:           replyCtx,
 		agent:              agent,
 		eventsNeedResync:   true,
-		deliverySessionKey: ccKey,
+		deliverySessionKey: e.resolveDeferredDeliveryKey(ccKey),
 		leaseStartedAt:     time.Now().UTC(),
 	}
 	if e.runtimeLifecycle != nil {
@@ -13783,25 +13927,25 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
-		return e.agent, e.sessions, msg.SessionKey, "", nil
+		return e.agent, e.sessions, e.resolveDeferredRouteAlias(msg.SessionKey), "", nil
 	}
 	channelID := effectiveChannelID(msg)
 	channelKey := effectiveWorkspaceChannelKey(msg)
 	if channelKey == "" || channelID == "" {
-		return e.agent, e.sessions, msg.SessionKey, "", nil
+		return e.agent, e.sessions, e.resolveDeferredRouteAlias(msg.SessionKey), "", nil
 	}
 	workspace, _, err := e.resolveWorkspace(p, channelID)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
 	if workspace == "" {
-		return e.agent, e.sessions, msg.SessionKey, "", nil
+		return e.agent, e.sessions, e.resolveDeferredRouteAlias(msg.SessionKey), "", nil
 	}
 	agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, msg.SessionKey)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
-	return agent, sessions, interactiveKey, effectiveDir, nil
+	return agent, sessions, e.resolveDeferredRouteAlias(interactiveKey), effectiveDir, nil
 }
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
@@ -13856,7 +14000,7 @@ func (e *Engine) workspaceFromLiveState(sessionKey string) string {
 func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	// Single-workspace fast path: no scan, no binding lookup, no lock.
 	if !e.multiWorkspace || e.workspaceBindings == nil {
-		return sessionKey
+		return e.resolveDeferredRouteAlias(sessionKey)
 	}
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
@@ -13888,20 +14032,20 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 //     time, so we recover the workspace prefix from there.
 func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if !e.multiWorkspace || e.workspaceBindings == nil {
-		return sessionKey
+		return e.resolveDeferredRouteAlias(sessionKey)
 	}
 	if _, ok := e.interactiveStates[sessionKey]; ok {
-		return sessionKey
+		return e.resolveDeferredRouteAlias(sessionKey)
 	}
 	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
+			return e.resolveDeferredRouteAlias(normalizeWorkspacePath(b.Workspace) + ":" + sessionKey)
 		}
 	}
 	if found := findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey); found != "" {
-		return found
+		return e.resolveDeferredRouteAlias(found)
 	}
-	return sessionKey
+	return e.resolveDeferredRouteAlias(sessionKey)
 }
 
 // findInteractiveKeyForSession scans the live interactiveStates map for an

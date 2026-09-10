@@ -2,6 +2,7 @@ package pi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tasercake/pi-connect/core"
 )
@@ -25,14 +27,16 @@ func init() {
 // turn. Set transport="json" in options to use the legacy one-process-per-Send
 // `pi --mode json -p` transport.
 type Agent struct {
-	cmd        string // path to pi binary
-	workDir    string
-	model      string
-	mode       string // "default" | "yolo"
-	thinking   string // reasoning effort: off, minimal, low, medium, high, xhigh
-	transport  string // "rpc" (default) | "json"
-	sessionEnv []string
-	mu         sync.Mutex
+	cmd          string // path to pi binary
+	workDir      string
+	model        string
+	mode         string // "default" | "yolo"
+	thinking     string // reasoning effort: off, minimal, low, medium, high, xhigh
+	transport    string // "rpc" (default) | "json"
+	titleModel   string
+	titleTimeout time.Duration
+	sessionEnv   []string
+	mu           sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -56,12 +60,35 @@ func New(opts map[string]any) (core.Agent, error) {
 	transport, _ := opts["transport"].(string)
 	transport = normalizeTransport(transport)
 
+	titleModel, _ := opts["topic_title_model"].(string)
+	if titleModel == "" && strings.HasPrefix(model, "openai-codex/") {
+		// Spark is the smallest ChatGPT Codex model and has no separate API bill.
+		titleModel = "openai-codex/gpt-5.3-codex-spark"
+	}
+	titleTimeout := 20 * time.Second
+	switch value := opts["topic_title_timeout_seconds"].(type) {
+	case int:
+		if value > 0 {
+			titleTimeout = time.Duration(value) * time.Second
+		}
+	case int64:
+		if value > 0 {
+			titleTimeout = time.Duration(value) * time.Second
+		}
+	case float64:
+		if value > 0 {
+			titleTimeout = time.Duration(value * float64(time.Second))
+		}
+	}
+
 	return &Agent{
-		cmd:       cmd,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		transport: transport,
+		cmd:          cmd,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		transport:    transport,
+		titleModel:   titleModel,
+		titleTimeout: titleTimeout,
 	}, nil
 }
 
@@ -125,6 +152,78 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		return newPiRPCSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
 	}
 	return newPiSession(ctx, a.cmd, a.workDir, model, mode, thinking, sessionID, extraEnv)
+}
+
+// GenerateConversationTitle runs an isolated, tool-free Pi call. It reuses Pi's
+// configured provider credentials while avoiding session and project context.
+func (a *Agent) GenerateConversationTitle(ctx context.Context, content string) (string, error) {
+	a.mu.Lock()
+	cmdPath := a.cmd
+	workDir := a.workDir
+	model := a.titleModel
+	if model == "" {
+		model = a.model
+	}
+	timeout := a.titleTimeout
+	a.mu.Unlock()
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+
+	inputRunes := []rune(strings.TrimSpace(content))
+	if len(inputRunes) > 6000 {
+		inputRunes = inputRunes[:6000]
+	}
+	if len(inputRunes) == 0 {
+		return "", fmt.Errorf("pi: conversation title input is empty")
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	args := []string{
+		"--print",
+		"--no-session",
+		"--no-tools",
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+		"--no-context-files",
+		"--thinking", "off",
+		"--system-prompt", "Create a concise Telegram forum topic title for the user's request. Return only the title, with no quotes, markdown, explanation, or trailing punctuation. Use the user's language. Keep it specific and under 80 characters.",
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, string(inputRunes))
+
+	command := exec.CommandContext(callCtx, cmdPath, args...)
+	command.Dir = workDir
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	if err != nil {
+		if callCtx.Err() != nil {
+			return "", fmt.Errorf("pi: generate conversation title: %w", callCtx.Err())
+		}
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		if len(detail) > 300 {
+			detail = detail[:300]
+		}
+		if detail != "" {
+			return "", fmt.Errorf("pi: generate conversation title: %w: %s", err, detail)
+		}
+		return "", fmt.Errorf("pi: generate conversation title: %w", err)
+	}
+
+	title := strings.TrimSpace(stdout.String())
+	if title == "" {
+		return "", fmt.Errorf("pi: generated empty conversation title")
+	}
+	return title, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

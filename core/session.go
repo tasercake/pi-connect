@@ -376,6 +376,41 @@ func (sm *SessionManager) ActiveSessionID(userKey string) string {
 	return sm.activeSession[userKey]
 }
 
+// RebindUserKey moves all session state from a provisional user key to its
+// final platform key. It refuses to overwrite an existing destination.
+func (sm *SessionManager) RebindUserKey(fromKey, toKey string) error {
+	if fromKey == "" || toKey == "" {
+		return fmt.Errorf("session: rebind keys must not be empty")
+	}
+	if fromKey == toKey {
+		return nil
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	ids, ok := sm.userSessions[fromKey]
+	if !ok {
+		return fmt.Errorf("session: provisional key %q not found", fromKey)
+	}
+	if _, exists := sm.userSessions[toKey]; exists {
+		return fmt.Errorf("session: destination key %q already exists", toKey)
+	}
+
+	sm.userSessions[toKey] = ids
+	delete(sm.userSessions, fromKey)
+	if activeID, exists := sm.activeSession[fromKey]; exists {
+		sm.activeSession[toKey] = activeID
+		delete(sm.activeSession, fromKey)
+	}
+	if meta, exists := sm.userMeta[fromKey]; exists {
+		sm.userMeta[toKey] = meta
+		delete(sm.userMeta, fromKey)
+	}
+	sm.saveLocked()
+	return nil
+}
+
 // SetSessionName sets a custom display name for an agent session.
 func (sm *SessionManager) SetSessionName(agentSessionID, name string) {
 	sm.mu.Lock()

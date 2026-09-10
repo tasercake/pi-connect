@@ -15,6 +15,56 @@ import (
 	"github.com/tasercake/pi-connect/core"
 )
 
+func TestGenerateConversationTitleUsesIsolatedToolFreePiCall(t *testing.T) {
+	dir := t.TempDir()
+	cmdPath := filepath.Join(dir, "fake-pi")
+	argsPath := filepath.Join(dir, "args.txt")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TITLE_ARGS_FILE\"\nprintf 'startup warning\\n' >&2\nprintf 'Investigate flaky tests\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TITLE_ARGS_FILE", argsPath)
+
+	agent, err := New(map[string]any{
+		"cmd":               cmdPath,
+		"work_dir":          dir,
+		"model":             "large-model",
+		"topic_title_model": "tiny-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	title, err := agent.(*Agent).GenerateConversationTitle(context.Background(), "Please investigate flaky tests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Investigate flaky tests" {
+		t.Fatalf("title = %q", title)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argText := string(args)
+	for _, want := range []string{"--print", "--no-session", "--no-tools", "--no-extensions", "--no-context-files", "--thinking", "off", "--model", "tiny-model", "Please investigate flaky tests"} {
+		if !strings.Contains(argText, want+"\n") {
+			t.Errorf("arguments missing %q:\n%s", want, argText)
+		}
+	}
+}
+
+func TestGenerateConversationTitleTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	cmdPath := filepath.Join(dir, "slow-pi")
+	if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agent := &Agent{cmd: cmdPath, workDir: dir, titleTimeout: 10 * time.Millisecond}
+	_, err := agent.GenerateConversationTitle(context.Background(), "Name this request")
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+}
+
 // ── normalizeTransport ───────────────────────────────────────
 
 func TestNormalizeTransport(t *testing.T) {
@@ -86,6 +136,16 @@ func TestNew_DefaultValues(t *testing.T) {
 	}
 	if a.transport != "rpc" {
 		t.Errorf("transport = %q, want \"rpc\"", a.transport)
+	}
+}
+
+func TestNew_DefaultsCodexTitleGenerationToSpark(t *testing.T) {
+	agent, err := New(map[string]any{"cmd": "echo", "model": "openai-codex/gpt-5.6-sol"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.(*Agent).titleModel; got != "openai-codex/gpt-5.3-codex-spark" {
+		t.Fatalf("titleModel = %q", got)
 	}
 }
 

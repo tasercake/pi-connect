@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -33,6 +34,35 @@ type replyContext struct {
 	chatID    int64
 	threadID  int
 	messageID int
+	deferred  *deferredReplyTarget
+}
+
+type deferredReplyTarget struct {
+	once  sync.Once
+	ready chan struct{}
+	rctx  replyContext
+	err   error
+}
+
+func newDeferredReplyTarget() *deferredReplyTarget {
+	return &deferredReplyTarget{ready: make(chan struct{})}
+}
+
+func (d *deferredReplyTarget) resolve(rctx replyContext, err error) {
+	d.once.Do(func() {
+		d.rctx = rctx
+		d.err = err
+		close(d.ready)
+	})
+}
+
+func (d *deferredReplyTarget) wait(ctx context.Context) (replyContext, error) {
+	select {
+	case <-d.ready:
+		return d.rctx, d.err
+	case <-ctx.Done():
+		return replyContext{}, ctx.Err()
+	}
 }
 
 type mediaGroupKey struct {
@@ -40,6 +70,12 @@ type mediaGroupKey struct {
 	threadID     int
 	userID       int64
 	mediaGroupID string
+}
+
+type pendingTopicRouteKey struct {
+	chatID   int64
+	threadID int
+	userID   int64
 }
 
 type pendingMediaGroup struct {
@@ -153,10 +189,14 @@ type Platform struct {
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+	titleGenerator      func(context.Context, string) (string, error)
 
 	mediaGroupMu       sync.Mutex
 	mediaGroupDebounce time.Duration
 	mediaGroups        map[mediaGroupKey]*pendingMediaGroup
+
+	pendingTopicMu     sync.RWMutex
+	pendingTopicRoutes map[pendingTopicRouteKey]string
 }
 
 const (
@@ -199,6 +239,18 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "telegram" }
+
+func (p *Platform) SetConversationTitleGenerator(generator func(context.Context, string) (string, error)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.titleGenerator = generator
+}
+
+func (p *Platform) conversationTitleGenerator() func(context.Context, string) (string, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.titleGenerator
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
@@ -379,6 +431,9 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		threadID = msg.MessageThreadID
 	}
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
+	if provisional := p.pendingTopicSessionKey(msg.Chat.ID, threadID, msg.From.ID); provisional != "" {
+		sessionKey = provisional
+	}
 	channelKey := buildChannelKey(msg.Chat.ID, threadID)
 
 	userID := strconv.FormatInt(msg.From.ID, 10)
@@ -402,7 +457,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
-	if p.enableReactions {
+	if p.enableReactions && !isGeneralForumMessage(msg) {
 		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
 	}
 	botName := p.botUsername()
@@ -655,6 +710,38 @@ func (p *Platform) cancelMediaGroups() {
 
 const telegramForumTopicNameLimit = 128
 
+func (p *Platform) pendingTopicRouteKey(chatID int64, threadID int, userID int64) pendingTopicRouteKey {
+	if p.shareSessionInChannel {
+		userID = 0
+	}
+	return pendingTopicRouteKey{chatID: chatID, threadID: threadID, userID: userID}
+}
+
+func (p *Platform) setPendingTopicRoute(chatID int64, threadID int, userID int64, sessionKey string) {
+	key := p.pendingTopicRouteKey(chatID, threadID, userID)
+	p.pendingTopicMu.Lock()
+	if p.pendingTopicRoutes == nil {
+		p.pendingTopicRoutes = make(map[pendingTopicRouteKey]string)
+	}
+	p.pendingTopicRoutes[key] = sessionKey
+	p.pendingTopicMu.Unlock()
+}
+
+func (p *Platform) pendingTopicSessionKey(chatID int64, threadID int, userID int64) string {
+	key := p.pendingTopicRouteKey(chatID, threadID, userID)
+	p.pendingTopicMu.RLock()
+	sessionKey := p.pendingTopicRoutes[key]
+	p.pendingTopicMu.RUnlock()
+	return sessionKey
+}
+
+func (p *Platform) clearPendingTopicRoute(chatID int64, threadID int, userID int64) {
+	key := p.pendingTopicRouteKey(chatID, threadID, userID)
+	p.pendingTopicMu.Lock()
+	delete(p.pendingTopicRoutes, key)
+	p.pendingTopicMu.Unlock()
+}
+
 func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Message, tgMsg *models.Message) bool {
 	if !isGeneralForumMessage(tgMsg) {
 		return true
@@ -662,41 +749,105 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 
 	bot, err := p.connectedBot("create forum topic")
 	if err != nil {
-		slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		slog.Error("telegram: prepare forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		return false
+	}
+	titleGenerator := p.conversationTitleGenerator()
+	if titleGenerator == nil {
+		err := fmt.Errorf("conversation title generator is unavailable")
+		slog.Error("telegram: prepare forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicNamingFailed)
 		return false
 	}
 
-	name := forumTopicName(msg, tgMsg)
-	topic, err := bot.CreateForumTopic(ctx, &tgbot.CreateForumTopicParams{
-		ChatID: tgMsg.Chat.ID,
-		Name:   name,
-	})
-	if err != nil || topic == nil || topic.MessageThreadID <= 1 {
+	provisionalID := fmt.Sprintf("pending-%d", tgMsg.ID)
+	msg.SessionKey = fmt.Sprintf("telegram:%d:%s", tgMsg.Chat.ID, provisionalID)
+	if !p.shareSessionInChannel {
+		msg.SessionKey += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
+	}
+	// Use the source General topic for initial workspace resolution. The engine
+	// copies any existing binding to the final topic when it binds the route.
+	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, tgMsg.MessageThreadID)
+
+	target := newDeferredReplyTarget()
+	msg.ReplyCtx = replyContext{deferred: target}
+	resultCh := make(chan core.DeferredRouteResult, 1)
+	boundCh := make(chan error, 1)
+	msg.DeferredRoute = &core.DeferredRoute{Result: resultCh, Bound: boundCh}
+	titleInput := forumTopicNamingInput(msg, tgMsg)
+
+	go func() {
+		name, err := titleGenerator(ctx, titleInput)
 		if err == nil {
-			err = fmt.Errorf("invalid topic response")
+			name, err = normalizeGeneratedForumTopicName(name)
 		}
-		slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
-		p.sendTopicCreationFailure(ctx, bot, tgMsg)
-		return false
-	}
+		if err != nil {
+			err = fmt.Errorf("generate forum topic name: %w", err)
+			slog.Error("telegram: generate forum topic name failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+			resultCh <- core.DeferredRouteResult{Err: err}
+			target.resolve(replyContext{}, err)
+			p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicNamingFailed)
+			return
+		}
 
-	threadID := topic.MessageThreadID
-	msg.SessionKey = p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
-	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, threadID)
-	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID}
+		topic, err := bot.CreateForumTopic(ctx, &tgbot.CreateForumTopicParams{
+			ChatID: tgMsg.Chat.ID,
+			Name:   name,
+		})
+		if err != nil || topic == nil || topic.MessageThreadID <= 1 {
+			if err == nil {
+				err = fmt.Errorf("invalid topic response")
+			}
+			err = fmt.Errorf("create forum topic: %w", err)
+			slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+			resultCh <- core.DeferredRouteResult{Err: err}
+			target.resolve(replyContext{}, err)
+			p.sendTopicCreationFailure(ctx, bot, tgMsg)
+			return
+		}
 
-	link := forumTopicLink(tgMsg.Chat, threadID)
-	linkText := name + "\n" + link
-	if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID: tgMsg.Chat.ID,
-		Text:   linkText,
-		ReplyParameters: &models.ReplyParameters{
-			MessageID: tgMsg.ID,
-		},
-	}); err != nil {
-		slog.Error("telegram: send forum topic link failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
-		return false
-	}
+		threadID := topic.MessageThreadID
+		finalSessionKey := p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
+		finalChannelKey := buildChannelKey(tgMsg.Chat.ID, threadID)
+		p.setPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID, msg.SessionKey)
+		resultCh <- core.DeferredRouteResult{
+			SessionKey: finalSessionKey,
+			ChannelKey: finalChannelKey,
+			Title:      name,
+		}
+
+		// Normal agent turns acknowledge immediately after the core session is
+		// rebound. Early-return commands have no backend session to bind, so a
+		// short timeout lets their deferred reply continue in the created topic.
+		select {
+		case bindErr := <-boundCh:
+			if bindErr != nil {
+				p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
+				target.resolve(replyContext{}, bindErr)
+				p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicBindingFailed)
+				return
+			}
+		case <-time.After(2 * time.Second):
+			slog.Debug("telegram: deferred route had no backend binding", "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+		case <-ctx.Done():
+			p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
+			target.resolve(replyContext{}, ctx.Err())
+			return
+		}
+		p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
+		target.resolve(replyContext{chatID: tgMsg.Chat.ID, threadID: threadID}, nil)
+
+		link := forumTopicLink(tgMsg.Chat, threadID)
+		if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
+			ChatID: tgMsg.Chat.ID,
+			Text:   name + "\n" + link,
+			ReplyParameters: &models.ReplyParameters{
+				MessageID: tgMsg.ID,
+			},
+		}); err != nil {
+			slog.Error("telegram: send forum topic link failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+		}
+	}()
 
 	return true
 }
@@ -708,33 +859,57 @@ func isGeneralForumMessage(msg *models.Message) bool {
 	return msg.MessageThreadID == 0 || msg.MessageThreadID == 1
 }
 
-func forumTopicName(msg *core.Message, tgMsg *models.Message) string {
-	name := strings.Join(strings.Fields(msg.Content), " ")
-	if name == "" {
-		i18n := core.NewI18n(telegramMessageLanguage(msg.Content, tgMsg))
-		switch {
-		case len(msg.Images) > 1:
-			name = i18n.T(core.MsgForumTopicPhotos)
-		case len(msg.Images) == 1:
-			name = i18n.T(core.MsgForumTopicPhoto)
-		case len(msg.Files) > 0 && msg.Files[0].FileName != "":
-			name = msg.Files[0].FileName
-		case len(msg.Files) > 0 || tgMsg.Document != nil:
-			name = i18n.T(core.MsgForumTopicDocument)
-		case msg.Audio != nil:
-			name = i18n.T(core.MsgForumTopicAudio)
-		case msg.Location != nil:
-			name = i18n.T(core.MsgForumTopicLocation)
-		default:
-			name = i18n.T(core.MsgForumTopicNewRequest)
+func forumTopicNamingInput(msg *core.Message, tgMsg *models.Message) string {
+	input := strings.Join(strings.Fields(msg.Content), " ")
+	if input != "" {
+		return input
+	}
+
+	i18n := core.NewI18n(telegramMessageLanguage(msg.Content, tgMsg))
+	switch {
+	case len(msg.Images) > 1:
+		return i18n.T(core.MsgForumTopicPhotos)
+	case len(msg.Images) == 1:
+		return i18n.T(core.MsgForumTopicPhoto)
+	case len(msg.Files) > 0 && msg.Files[0].FileName != "":
+		return i18n.T(core.MsgForumTopicDocument) + ": " + msg.Files[0].FileName
+	case len(msg.Files) > 0 || tgMsg.Document != nil:
+		return i18n.T(core.MsgForumTopicDocument)
+	case msg.Audio != nil:
+		return i18n.T(core.MsgForumTopicAudio)
+	case msg.Location != nil:
+		return i18n.T(core.MsgForumTopicLocation)
+	default:
+		return i18n.T(core.MsgForumTopicNewRequest)
+	}
+}
+
+func normalizeGeneratedForumTopicName(raw string) (string, error) {
+	var name string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			name = line
+			break
 		}
+	}
+	name = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, name))
+	name = strings.Trim(name, " \t\"'`*_#")
+	name = strings.Join(strings.Fields(name), " ")
+	if name == "" {
+		return "", fmt.Errorf("generated topic name is empty")
 	}
 
 	runes := []rune(name)
 	if len(runes) > telegramForumTopicNameLimit {
 		name = string(runes[:telegramForumTopicNameLimit-1]) + "…"
 	}
-	return name
+	return name, nil
 }
 
 func telegramMessageLanguage(content string, tgMsg *models.Message) core.Language {
@@ -769,14 +944,18 @@ func forumTopicLink(chat models.Chat, threadID int) string {
 }
 
 func (p *Platform) sendTopicCreationFailure(ctx context.Context, bot telegramBot, msg *models.Message) {
+	p.sendTopicFailure(ctx, bot, msg, core.MsgForumTopicCreationFailed)
+}
+
+func (p *Platform) sendTopicFailure(ctx context.Context, bot telegramBot, msg *models.Message, key core.MsgKey) {
 	if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID: msg.Chat.ID,
-		Text:   core.NewI18n(telegramMessageLanguage(strings.TrimSpace(msg.Text+" "+msg.Caption), msg)).T(core.MsgForumTopicCreationFailed),
+		Text:   core.NewI18n(telegramMessageLanguage(strings.TrimSpace(msg.Text+" "+msg.Caption), msg)).T(key),
 		ReplyParameters: &models.ReplyParameters{
 			MessageID: msg.ID,
 		},
 	}); err != nil {
-		slog.Error("telegram: send topic creation failure failed", "error", err, "chat_id", msg.Chat.ID, "message_id", msg.ID)
+		slog.Error("telegram: send topic failure failed", "error", err, "chat_id", msg.Chat.ID, "message_id", msg.ID)
 	}
 }
 
@@ -1228,10 +1407,21 @@ func isCommand(msg *models.Message) bool {
 	return false
 }
 
-func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+func resolveReplyContext(ctx context.Context, rctx any) (replyContext, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+		return replyContext{}, fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+	if rc.deferred != nil {
+		return rc.deferred.wait(ctx)
+	}
+	return rc, nil
+}
+
+func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return err
 	}
 	bot, err := p.connectedBot("reply")
 	if err != nil {
@@ -1252,9 +1442,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 // Send sends a new message (not a reply)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return err
 	}
 	bot, err := p.connectedBot("send")
 	if err != nil {
@@ -1269,9 +1459,9 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 }
 
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return err
 	}
 	bot, err := p.connectedBot("send image")
 	if err != nil {
@@ -1295,9 +1485,9 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 }
 
 func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return err
 	}
 	bot, err := p.connectedBot("send file")
 	if err != nil {
@@ -1322,9 +1512,9 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 // SendAudio sends synthesized audio back to Telegram.
 // It prefers voice messages and falls back to audio files for mp3/m4a on sendVoice failure.
 func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format string) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("telegram: SendAudio: invalid reply context type %T", rctx)
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return err
 	}
 
 	sendData := audio
@@ -1409,9 +1599,9 @@ func telegramAudioFileExt(format string) string {
 
 // SendWithButtons sends a message with an inline keyboard.
 func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return err
 	}
 	bot, err := p.connectedBot("send with buttons")
 	if err != nil {
@@ -1521,9 +1711,9 @@ type telegramPreviewHandle struct {
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	rc, err := resolveReplyContext(ctx, rctx)
+	if err != nil {
+		return nil, err
 	}
 	bot, err := p.connectedBot("send preview")
 	if err != nil {
@@ -1615,7 +1805,8 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 // until the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok {
+	if !ok || rc.deferred != nil {
+		// Never block agent startup while a Telegram topic is being named.
 		return func() {}
 	}
 
