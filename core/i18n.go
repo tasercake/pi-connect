@@ -591,6 +591,7 @@ const (
 	MsgForumTopicCreationFailed   MsgKey = "forum_topic_creation_failed"
 	MsgForumTopicBindingFailed    MsgKey = "forum_topic_binding_failed"
 	MsgForumTopicOriginLinkFailed MsgKey = "forum_topic_origin_link_failed"
+	MsgForumTopicReplyingTo       MsgKey = "forum_topic_replying_to"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -663,6 +664,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "話題已建立，但無法新增原始訊息連結。請重試。",
 		LangJapanese:           "トピックは作成されましたが、元のメッセージへのリンクを追加できませんでした。もう一度お試しください。",
 		LangSpanish:            "El tema se creó, pero no se pudo añadir el enlace al mensaje original. Inténtalo de nuevo.",
+	},
+	MsgForumTopicReplyingTo: {
+		LangEnglish:            "Replying to:",
+		LangChinese:            "回复：",
+		LangTraditionalChinese: "回覆：",
+		LangJapanese:           "返信先：",
+		LangSpanish:            "En respuesta a:",
 	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",

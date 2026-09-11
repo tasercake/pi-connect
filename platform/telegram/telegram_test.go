@@ -1066,8 +1066,11 @@ func TestHandleMessageGeneralForumTopicDefersCreationUntilLLMTitle(t *testing.T)
 	stubBot.mu.Lock()
 	originLink := stubBot.sendMessageParams[0]
 	stubBot.mu.Unlock()
-	if originLink.MessageThreadID != 77 || originLink.Text != "https://t.me/testforum/10" || originLink.ReplyParameters != nil {
+	if originLink.MessageThreadID != 77 || originLink.Text != "<a href=\"https://t.me/testforum/10\">Replying to:</a>\nplease investigate why the tests are flaky" || originLink.ParseMode != models.ParseModeHTML || originLink.ReplyParameters != nil {
 		t.Fatalf("first topic message = %#v, want original-message link", originLink)
+	}
+	if originLink.LinkPreviewOptions == nil || originLink.LinkPreviewOptions.IsDisabled == nil || !*originLink.LinkPreviewOptions.IsDisabled {
+		t.Fatalf("first topic message link preview = %#v, want disabled", originLink.LinkPreviewOptions)
 	}
 	got.DeferredRoute.Bound <- nil
 
@@ -1146,7 +1149,7 @@ func TestGeneralForumReplyWaitsForTopicAndUsesFinalThread(t *testing.T) {
 	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 3 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "https://t.me/c/123/10" {
+	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "<a href=\"https://t.me/c/123/10\">Replying to:</a>\ndo useful work" || first.ParseMode != models.ParseModeHTML {
 		t.Fatalf("first topic message = %#v, want original-message link", first)
 	}
 	foundAgentReply := false
@@ -1247,7 +1250,7 @@ func TestHandleMessageGeneralForumTopicWithoutUsernameUsesPrivateLink(t *testing
 	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if got := stubBot.sendMessageParams[0]; got.Text != "https://t.me/c/9876543210/11" || got.MessageThreadID != 77 {
+	if got := stubBot.sendMessageParams[0]; got.Text != "<a href=\"https://t.me/c/9876543210/11\">Replying to:</a>\nprivate forum request" || got.MessageThreadID != 77 || got.ParseMode != models.ParseModeHTML {
 		t.Fatalf("original-message link = %#v", got)
 	}
 	if got := stubBot.sendMessageParams[1].Text; got != "Private forum request\nhttps://t.me/c/9876543210/77" {
@@ -1444,7 +1447,7 @@ func TestHandleMessageOriginalLinkFailureDoesNotBindSession(t *testing.T) {
 	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "https://t.me/c/123/10" {
+	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "<a href=\"https://t.me/c/123/10\">Replying to:</a>\nhello" || first.ParseMode != models.ParseModeHTML {
 		t.Fatalf("attempted original-message link = %#v", first)
 	}
 	failure := stubBot.sendMessageParams[1]
@@ -1519,6 +1522,41 @@ func TestForumTopicNamingInputFallbacks(t *testing.T) {
 	)
 	if spanishPhoto != "Foto" {
 		t.Fatalf("Spanish photo name = %q, want %q", spanishPhoto, "Foto")
+	}
+}
+
+func TestOriginalMessageReferenceLinksAndTruncatesSnippet(t *testing.T) {
+	msg := &models.Message{
+		ID:   12,
+		Text: "first <line>\nsecond & line\nthird\nfourth\nfifth\nsixth",
+		Chat: models.Chat{ID: -100123, Username: "@testforum"},
+	}
+	got := originalMessageReference(msg)
+	want := `<a href="https://t.me/testforum/12">Replying to:</a>
+first &lt;line&gt;
+second &amp; line
+third
+fourth
+fifth…`
+	if got != want {
+		t.Fatalf("originalMessageReference() = %q, want %q", got, want)
+	}
+	if lines := strings.Count(got, "\n"); lines != 5 {
+		t.Fatalf("newline count = %d, want header plus five snippet lines", lines)
+	}
+}
+
+func TestOriginalMessageReferenceUsesCaption(t *testing.T) {
+	msg := &models.Message{
+		ID:      13,
+		Caption: "caption text",
+		Chat:    models.Chat{ID: -100123},
+	}
+	got := originalMessageReference(msg)
+	want := `<a href="https://t.me/c/123/13">Replying to:</a>
+caption text`
+	if got != want {
+		t.Fatalf("originalMessageReference() = %q, want %q", got, want)
 	}
 }
 
