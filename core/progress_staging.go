@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -76,8 +77,8 @@ type stagingProgressWriter struct {
 
 	ctx             context.Context
 	cancel          context.CancelFunc
-	previewCtx      context.Context
-	cancelPreview   context.CancelFunc
+	runningCtx      context.Context
+	cancelRunning   context.CancelFunc
 	platform        Platform
 	replyCtx        any
 	starter         PreviewStarter
@@ -176,7 +177,7 @@ func (w *stagingProgressWriter) Start() bool {
 		return false
 	}
 	w.enabled = true
-	w.previewCtx, w.cancelPreview = context.WithCancel(w.ctx)
+	w.runningCtx, w.cancelRunning = context.WithCancel(w.ctx)
 	w.ticker = w.newTicker(stagingProgressTick)
 	go w.runWorker()
 	w.signalLocked()
@@ -298,9 +299,11 @@ func (w *stagingProgressWriter) Finalize(state stagingProgressState) bool {
 	w.state = state
 	w.terminal = true
 	w.terminalDeadline = time.Now().Add(w.terminalLifetime)
-	if w.handle == nil && w.cancelPreview != nil {
-		// Do not create a stale timeline after its separate final answer.
-		w.cancelPreview()
+	if w.cancelRunning != nil {
+		// Interrupt any pre-terminal throttle, scheduler, outbound, retry, or API
+		// wait. The worker restarts with the bounded terminal context. If no
+		// preview exists, it exits instead of creating one after the final answer.
+		w.cancelRunning()
 	}
 	if w.degraded {
 		w.stopWorkerLocked()
@@ -381,6 +384,9 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 		if handle != nil && w.minUpdateInterval > 0 {
 			if delay := w.minUpdateInterval - w.now().Sub(lastUpdateAt); delay > 0 {
 				if !w.waitForDelivery(delay) {
+					if w.shouldRestartTerminal(context.Canceled) {
+						continue
+					}
 					return false
 				}
 			}
@@ -392,6 +398,9 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 			releaseProgress, err = w.scheduler.AcquireProgressUpdate(deliveryCtx)
 			if err != nil {
 				cancelDelivery()
+				if w.shouldRestartTerminal(err) {
+					continue
+				}
 				return false
 			}
 		}
@@ -399,6 +408,9 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 			if err := w.waitOutbound(deliveryCtx); err != nil {
 				releaseProgress(false)
 				cancelDelivery()
+				if w.shouldRestartTerminal(err) {
+					continue
+				}
 				return false
 			}
 		}
@@ -435,9 +447,15 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 			}
 			releaseProgress(true)
 			cancelDelivery()
+			if w.shouldRestartTerminal(err) {
+				continue
+			}
 			if transient {
 				slog.Warn("staging progress: transient delivery failure; retrying latest snapshot", "platform", w.platform.Name(), "retry_after", delay, "error", err)
 				if !w.waitForDelivery(delay) {
+					if w.shouldRestartTerminal(context.Canceled) {
+						continue
+					}
 					return false
 				}
 				continue
@@ -456,11 +474,6 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 		w.mu.Lock()
 		if handle == nil {
 			w.handle = newHandle
-			if w.cancelPreview != nil {
-				w.cancelPreview()
-				w.cancelPreview = nil
-				w.previewCtx = nil
-			}
 		}
 		w.lastSent = content
 		w.lastUpdateAt = w.now()
@@ -498,17 +511,25 @@ func (w *stagingProgressWriter) retryAfter(err error) (time.Duration, bool) {
 	return delay, true
 }
 
+func (w *stagingProgressWriter) shouldRestartTerminal(err error) bool {
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.terminal && !w.stopped && w.ctx.Err() == nil && time.Now().Before(w.terminalDeadline)
+}
+
 func (w *stagingProgressWriter) deliveryContext() (context.Context, context.CancelFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	base := w.ctx
-	if w.handle == nil && w.previewCtx != nil {
-		base = w.previewCtx
-	}
 	if w.terminal && !w.terminalDeadline.IsZero() {
-		return context.WithDeadline(base, w.terminalDeadline)
+		return context.WithDeadline(w.ctx, w.terminalDeadline)
 	}
-	return context.WithCancel(base)
+	if w.runningCtx != nil {
+		return context.WithCancel(w.runningCtx)
+	}
+	return context.WithCancel(w.ctx)
 }
 
 func (w *stagingProgressWriter) waitForDelivery(delay time.Duration) bool {

@@ -397,18 +397,26 @@ func TestStagingProgressWriterRepeated429StopsAtTerminalDeadline(t *testing.T) {
 	p := &stagingCapturePlatform{
 		updateErrAlways: true,
 		updateErr:       transientErr,
-		retryDelay:      20 * time.Millisecond,
+		retryDelay:      time.Second,
 	}
+	ticker := &fakeStagingTicker{ch: make(chan time.Time, 1)}
 	w := newStagingProgressWriter(context.Background(), p, "reply", time.Now(), LangEnglish, nil, &stagingProgressOptions{
+		newTicker:        func(time.Duration) stagingTicker { return ticker },
 		terminalLifetime: 65 * time.Millisecond,
 	})
 	if !w.Start() {
 		t.Fatal("Start() = false")
 	}
 	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "repeated-429 preview")
+	if !w.AppendThinking("retain") {
+		t.Fatal("append failed")
+	}
+	ticker.ch <- time.Now()
+	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 1 }, "pre-terminal 429 retry wait")
+
 	started := time.Now()
-	if !w.AppendThinking("retain") || !w.Finalize(stagingStateCompleted) {
-		t.Fatal("terminal lifecycle failed")
+	if !w.Finalize(stagingStateCompleted) {
+		t.Fatal("Finalize() = false")
 	}
 	waitStaging(t, func() bool {
 		select {
@@ -419,11 +427,11 @@ func TestStagingProgressWriterRepeated429StopsAtTerminalDeadline(t *testing.T) {
 		}
 	}, "terminal retry deadline")
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("terminal retries outlived deadline: %v", elapsed)
+		t.Fatalf("pre-terminal retry outlived terminal deadline: %v", elapsed)
 	}
 	calls, _ := p.attempts()
 	if calls < 2 {
-		t.Fatalf("update attempts = %d, want repeated retries", calls)
+		t.Fatalf("update attempts = %d, want terminal retry after pre-terminal 429", calls)
 	}
 	_, updates, sent := p.snapshot()
 	if len(updates) != 0 || len(sent) != 0 {
