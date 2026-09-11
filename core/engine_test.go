@@ -1367,6 +1367,41 @@ func TestProcessInteractiveEvents_SuppressesReplyFooterWhenOnlyWorkDir(t *testin
 	}
 }
 
+func TestProcessInteractiveEvents_QuietHiddenToolsPreferAuthoritativeFinalResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "quiet",
+		ThinkingMessages: false,
+		ToolMessages:     false,
+	})
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: false})
+
+	sessionKey := "telegram:user-final-only"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-final-only")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-final-only",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "checking first"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "final answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-final-only", time.Now(), nil, nil, state.replyCtx)
+
+	if got := p.getSent(); len(got) != 1 || got[0] != "final answer" {
+		t.Fatalf("sent = %#v, want authoritative final answer only", got)
+	}
+	history := session.GetHistory(0)
+	if len(history) != 1 || history[0].Role != "assistant" || history[0].Content != "final answer" {
+		t.Fatalf("history = %#v, want authoritative final answer only", history)
+	}
+}
+
 func TestProcessInteractiveEvents_HiddenToolProgressKeepsPreviewOnFinalize(t *testing.T) {
 	p := &mockKeepPreviewPlatform{}
 	p.n = "feishu"

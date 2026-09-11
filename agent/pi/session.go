@@ -85,10 +85,9 @@ type piSession struct {
 
 	thinkingBuf strings.Builder // accumulates thinking_delta chunks
 
-	finalTextBuf     strings.Builder // complete final assistant text from message_end/turn_end
-	emittedTextDelta bool            // true after a non-empty text_delta was emitted this turn
-	inputTokens      int
-	outputTokens     int
+	finalTextBuf strings.Builder // complete final assistant text from message_end/turn_end
+	inputTokens  int
+	outputTokens int
 
 	usageMu                   sync.Mutex
 	contextUsage              *core.ContextUsage
@@ -297,9 +296,7 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf stde
 		InputTokens:  s.inputTokens,
 		OutputTokens: s.outputTokens,
 	}
-	if !s.emittedTextDelta {
-		evt.Content = s.finalTextBuf.String()
-	}
+	evt.Content = s.finalTextBuf.String()
 	s.resetResponseState()
 	select {
 	case s.events <- evt:
@@ -493,7 +490,6 @@ func (s *piSession) handleMessageUpdate(raw map[string]any) {
 	case "text_delta":
 		delta, _ := ame["delta"].(string)
 		if delta != "" {
-			s.emittedTextDelta = true
 			evt := core.Event{Type: core.EventText, Content: delta}
 			select {
 			case s.events <- evt:
@@ -666,7 +662,6 @@ func (s *piSession) handleTurnEnd(raw map[string]any) {
 
 func (s *piSession) resetResponseState() {
 	s.finalTextBuf.Reset()
-	s.emittedTextDelta = false
 	s.inputTokens = 0
 	s.outputTokens = 0
 }
