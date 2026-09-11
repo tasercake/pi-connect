@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -956,9 +957,48 @@ func (p *Platform) sendOriginalMessageLink(ctx context.Context, bot telegramBot,
 	_, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID:          msg.Chat.ID,
 		MessageThreadID: threadID,
-		Text:            telegramMessageLink(msg.Chat, msg.ID),
+		Text:            originalMessageReference(msg),
+		ParseMode:       models.ParseModeHTML,
+		LinkPreviewOptions: &models.LinkPreviewOptions{
+			IsDisabled: tgbot.True(),
+		},
 	})
 	return err
+}
+
+func originalMessageReference(msg *models.Message) string {
+	content := strings.TrimSpace(msg.Text)
+	if content == "" {
+		content = strings.TrimSpace(msg.Caption)
+	}
+	if content == "" {
+		content = core.NewI18n(telegramMessageLanguage("", msg)).T(core.MsgForumTopicNewRequest)
+	}
+	content = truncateMessageLines(content, 5)
+
+	label := core.NewI18n(telegramMessageLanguage(content, msg)).T(core.MsgForumTopicReplyingTo)
+	link := html.EscapeString(telegramMessageLink(msg.Chat, msg.ID))
+	return fmt.Sprintf(`<a href="%s">%s</a>%s%s`, link, html.EscapeString(label), "\n", html.EscapeString(content))
+}
+
+func truncateMessageLines(content string, maxLines int) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	content = strings.TrimSpace(content)
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxLines {
+		return content
+	}
+
+	lines = lines[:maxLines]
+	last := strings.TrimRight(lines[len(lines)-1], " \t")
+	if last == "" {
+		last = "…"
+	} else {
+		last += "…"
+	}
+	lines[len(lines)-1] = last
+	return strings.Join(lines, "\n")
 }
 
 func (p *Platform) sendTopicCreationFailure(ctx context.Context, bot telegramBot, msg *models.Message) {
