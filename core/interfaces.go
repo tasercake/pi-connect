@@ -61,6 +61,21 @@ type ConversationTitleGeneratorSetter interface {
 	SetConversationTitleGenerator(func(context.Context, string) (string, error))
 }
 
+// MessageRouteDisposition tells a platform whether to create its normal
+// conversation route or dispatch the message in its current route.
+type MessageRouteDisposition uint8
+
+const (
+	MessageRouteDefault MessageRouteDisposition = iota
+	MessageRouteInPlace
+)
+
+// MessageRoutePreflightSetter lets the engine provide command-aware routing
+// without duplicating command registries in platform adapters.
+type MessageRoutePreflightSetter interface {
+	SetMessageRoutePreflight(func(*Message) MessageRouteDisposition)
+}
+
 // FormattingInstructionProvider is an optional interface for platforms that
 // provide platform-specific formatting instructions for the agent system prompt
 // (e.g., Slack mrkdwn vs standard Markdown).

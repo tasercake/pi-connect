@@ -196,13 +196,20 @@ Telegram topics include a `message_thread_id`. pi-connect uses that thread ID
 as part of the Telegram session key, so each topic has its own independent
 conversation context.
 
-In a forum-enabled supergroup, each accepted message sent to the General topic
+In a forum-enabled supergroup, each ordinary accepted message sent to General
 first creates a dedicated topic with a localized fallback name such as
 `New request · 123`. Pi processing then starts with the final topic session key.
 After core dispatch starts, pi-connect can make a separate, tool-free LLM call
 to rename the topic. Title generation is optional, concurrency-bounded, and
 dropped when saturated. Missing generators, invalid output, timeouts, and
 Telegram rename failures leave the fallback name and do not affect Pi.
+
+Slash commands use command-aware routing. Project-wide, stateless, navigation,
+and administrative pi-connect commands run and reply directly in General,
+without a title call, new topic, or General Pi session. Commands that require a
+current conversation tell the user to run them inside the desired topic.
+Unknown slash commands, prompt commands, and skills still create a topic because
+they may need Pi. Custom exec commands run directly in General.
 
 Before agent output is delivered, pi-connect attempts to post a clickable
 `Replying to:` label and a snippet of up to five lines from the original General

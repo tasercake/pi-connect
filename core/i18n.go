@@ -456,14 +456,15 @@ const (
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
-	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
-	MsgCommandDisabled   MsgKey = "command_disabled"
-	MsgAdminRequired     MsgKey = "admin_required"
-	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent            MsgKey = "ps_sent"
-	MsgPsSendFailed      MsgKey = "ps_send_failed"
-	MsgPsEmpty           MsgKey = "ps_empty"
-	MsgPsNoSession       MsgKey = "ps_no_session"
+	MsgBannedWordBlocked    MsgKey = "banned_word_blocked"
+	MsgCommandDisabled      MsgKey = "command_disabled"
+	MsgCommandRequiresTopic MsgKey = "command_requires_topic"
+	MsgAdminRequired        MsgKey = "admin_required"
+	MsgRateLimited          MsgKey = "rate_limited"
+	MsgPsSent               MsgKey = "ps_sent"
+	MsgPsSendFailed         MsgKey = "ps_send_failed"
+	MsgPsEmpty              MsgKey = "ps_empty"
+	MsgPsNoSession          MsgKey = "ps_no_session"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -3306,6 +3307,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🚫 命令 `%s` 在當前專案中已被停用。",
 		LangJapanese:           "🚫 コマンド `%s` はこのプロジェクトで無効化されています。",
 		LangSpanish:            "🚫 El comando `%s` está deshabilitado para este proyecto.",
+	},
+	MsgCommandRequiresTopic: {
+		LangEnglish:            "Run `%s` inside the topic for the conversation you want to manage.",
+		LangChinese:            "请在要管理的会话话题中运行 `%s`。",
+		LangTraditionalChinese: "請在要管理的對話主題中執行 `%s`。",
+		LangJapanese:           "管理する会話のトピック内で `%s` を実行してください。",
+		LangSpanish:            "Ejecuta `%s` dentro del tema de la conversación que quieres gestionar.",
 	},
 	MsgAdminRequired: {
 		LangEnglish:            "🔒 Command `%s` requires admin privilege. Set `admin_from` in config to authorize users.",
