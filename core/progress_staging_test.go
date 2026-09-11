@@ -46,19 +46,29 @@ func (t *fakeStagingTicker) isStopped() bool {
 }
 
 type stagingCapturePlatform struct {
-	mu          sync.Mutex
-	starts      []string
-	updates     []string
-	sent        []string
-	updateErrAt int
-	updateCalls int
-	updated     chan struct{}
+	mu              sync.Mutex
+	starts          []string
+	updates         []string
+	sent            []string
+	replies         []string
+	updateErrAt     int
+	updateErrAlways bool
+	updateErr       error
+	retryDelay      time.Duration
+	updateCalls     int
+	attemptedAt     []time.Time
+	updated         chan struct{}
 }
 
-func (p *stagingCapturePlatform) Name() string                             { return "capable" }
-func (p *stagingCapturePlatform) Start(MessageHandler) error               { return nil }
-func (p *stagingCapturePlatform) Stop() error                              { return nil }
-func (p *stagingCapturePlatform) Reply(context.Context, any, string) error { return nil }
+func (p *stagingCapturePlatform) Name() string               { return "capable" }
+func (p *stagingCapturePlatform) Start(MessageHandler) error { return nil }
+func (p *stagingCapturePlatform) Stop() error                { return nil }
+func (p *stagingCapturePlatform) Reply(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
+	p.replies = append(p.replies, content)
+	p.mu.Unlock()
+	return nil
+}
 func (p *stagingCapturePlatform) Send(_ context.Context, _ any, content string) error {
 	p.mu.Lock()
 	p.sent = append(p.sent, content)
@@ -77,8 +87,10 @@ func (p *stagingCapturePlatform) UpdateMessage(_ context.Context, handle any, co
 	}
 	p.mu.Lock()
 	p.updateCalls++
+	p.attemptedAt = append(p.attemptedAt, time.Now())
 	call := p.updateCalls
-	if p.updateErrAt == 0 || call != p.updateErrAt {
+	shouldFail := p.updateErrAlways || (p.updateErrAt > 0 && call == p.updateErrAt)
+	if !shouldFail {
 		p.updates = append(p.updates, content)
 	}
 	updated := p.updated
@@ -86,15 +98,48 @@ func (p *stagingCapturePlatform) UpdateMessage(_ context.Context, handle any, co
 	if updated != nil {
 		updated <- struct{}{}
 	}
-	if p.updateErrAt > 0 && call == p.updateErrAt {
+	if shouldFail {
+		if p.updateErr != nil {
+			return p.updateErr
+		}
 		return errors.New("edit failed")
 	}
 	return nil
+}
+func (p *stagingCapturePlatform) ProgressUpdateRetryAfter(err error) (time.Duration, bool) {
+	return p.retryDelay, p.retryDelay > 0 && errors.Is(err, p.updateErr)
 }
 func (p *stagingCapturePlatform) snapshot() (starts, updates, sent []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.starts...), append([]string(nil), p.updates...), append([]string(nil), p.sent...)
+}
+func (p *stagingCapturePlatform) replySnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.replies...)
+}
+func (p *stagingCapturePlatform) attempts() (int, []time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.updateCalls, append([]time.Time(nil), p.attemptedAt...)
+}
+
+func waitStaging(t *testing.T, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", description)
+}
+
+func allStagingRenders(p *stagingCapturePlatform) []string {
+	starts, updates, _ := p.snapshot()
+	return append(starts, updates...)
 }
 
 func newTestStagingWriter(t *testing.T, p Platform) (*stagingProgressWriter, *fakeStagingTicker, *fakeStagingClock) {
@@ -117,6 +162,7 @@ func TestStagingProgressWriterTimelineCountsCoalescingAndFinalState(t *testing.T
 	if !w.Start() {
 		t.Fatal("Start() = false")
 	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "initial preview")
 	starts, _, _ := p.snapshot()
 	if len(starts) != 1 || starts[0] != "⏳ 0s · 🔧 0 · 🪜 0" {
 		t.Fatalf("initial staging message = %#v", starts)
@@ -149,11 +195,12 @@ func TestStagingProgressWriterTimelineCountsCoalescingAndFinalState(t *testing.T
 	if !w.Finalize(stagingStateCompleted) {
 		t.Fatal("Finalize() = false")
 	}
-	if !ticker.isStopped() {
-		t.Fatal("ticker was not stopped")
-	}
+	waitStaging(t, ticker.isStopped, "final timeline")
 
 	_, updates, _ := p.snapshot()
+	if len(updates) != 2 {
+		t.Fatalf("event burst produced %d edits, want one batched edit plus final", len(updates))
+	}
 	last := updates[len(updates)-1]
 	for _, want := range []string{
 		"✅ 42s · 🔧 1 · 🪜 5",
@@ -179,47 +226,56 @@ func TestStagingProgressWriterTimelineCountsCoalescingAndFinalState(t *testing.T
 func TestStagingProgressWriterFailedAndCancelledStates(t *testing.T) {
 	p := &stagingCapturePlatform{}
 	w, ticker, _ := newTestStagingWriter(t, p)
-	if !w.Start() || !w.AppendError("agent failed") || !w.Finalize(stagingStateFailed) {
+	if !w.Start() {
+		t.Fatal("failed-state Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "failed-state preview")
+	if !w.AppendError("agent failed") || !w.Finalize(stagingStateFailed) {
 		t.Fatal("failed-state lifecycle failed")
 	}
-	_, updates, _ := p.snapshot()
-	last := updates[len(updates)-1]
+	waitStaging(t, ticker.isStopped, "failed final timeline")
+	renders := allStagingRenders(p)
+	last := renders[len(renders)-1]
 	if !strings.HasPrefix(last, "❌ ") || !strings.Contains(last, "❌ agent failed") {
 		t.Fatalf("failed rendering = %q", last)
-	}
-	if !ticker.isStopped() {
-		t.Fatal("failed finalize did not stop timer")
 	}
 
 	p2 := &stagingCapturePlatform{}
 	w2, ticker2, _ := newTestStagingWriter(t, p2)
-	if !w2.Start() || !w2.Finalize(stagingStateCancelled) {
+	if !w2.Start() {
+		t.Fatal("cancelled-state Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p2.snapshot(); return len(starts) == 1 }, "cancelled-state preview")
+	if !w2.Finalize(stagingStateCancelled) {
 		t.Fatal("cancelled-state lifecycle failed")
 	}
-	_, updates2, _ := p2.snapshot()
-	if got := updates2[len(updates2)-1]; !strings.HasPrefix(got, "🛑 ") {
+	waitStaging(t, ticker2.isStopped, "cancelled final timeline")
+	renders2 := allStagingRenders(p2)
+	if got := renders2[len(renders2)-1]; !strings.HasPrefix(got, "🛑 ") {
 		t.Fatalf("cancelled rendering = %q", got)
-	}
-	if !ticker2.isStopped() {
-		t.Fatal("cancelled finalize did not stop timer")
 	}
 }
 
 func TestStagingProgressWriterMiddleTruncationCapAndOldestOmission(t *testing.T) {
 	p := &stagingCapturePlatform{}
-	w, _, _ := newTestStagingWriter(t, p)
+	w, ticker, _ := newTestStagingWriter(t, p)
 	if !w.Start() {
 		t.Fatal("Start() = false")
 	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "initial preview")
 	long := "```json\nHEAD-" + strings.Repeat("界", 3000) + "-TAIL\n```"
 	if !w.AppendToolUse(1, "Read", long) {
 		t.Fatal("long tool append failed")
 	}
+	ticker.ch <- time.Now()
+	waitStaging(t, func() bool { _, updates, _ := p.snapshot(); return len(updates) == 1 }, "long tool update")
 	for i := 0; i < stagingProgressMaxEntries+3; i++ {
 		if !w.AppendThinking("old-step-" + strings.Repeat("x", 30)) {
 			t.Fatalf("append %d failed", i)
 		}
 	}
+	ticker.ch <- time.Now()
+	waitStaging(t, func() bool { _, updates, _ := p.snapshot(); return len(updates) == 2 }, "omission update")
 	starts, updates, _ := p.snapshot()
 	last := updates[len(updates)-1]
 	for i, rendered := range append(starts, updates...) {
@@ -243,25 +299,178 @@ func TestStagingProgressWriterMiddleTruncationCapAndOldestOmission(t *testing.T)
 		t.Fatal("newest entries missing")
 	}
 	w.Finalize(stagingStateCompleted)
+	waitStaging(t, ticker.isStopped, "truncation final timeline")
 }
 
-func TestStagingProgressWriterUpdateFailureDisablesAndStops(t *testing.T) {
+func TestStagingProgressWriterPermanentFailureSuppressesFurtherProgress(t *testing.T) {
 	p := &stagingCapturePlatform{updateErrAt: 1}
 	w, ticker, _ := newTestStagingWriter(t, p)
 	if !w.Start() {
 		t.Fatal("Start() = false")
 	}
-	if w.AppendThinking("must fall back") {
-		t.Fatal("AppendThinking() = true after failed edit")
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "initial preview")
+	if !w.AppendThinking("must stay quiet") {
+		t.Fatal("AppendThinking() = false before failed edit")
 	}
-	if w.Active() {
-		t.Fatal("writer stayed active after update failure")
+	ticker.ch <- time.Now()
+	waitStaging(t, ticker.isStopped, "permanent failure degradation")
+	if !w.Active() {
+		t.Fatal("writer gave up ownership after permanent update failure")
 	}
-	if !ticker.isStopped() {
-		t.Fatal("ticker not stopped after update failure")
+	if !w.AppendToolUse(1, "Bash", "echo hi") {
+		t.Fatal("degraded writer did not suppress later progress")
 	}
-	if w.AppendToolUse(1, "Bash", "echo hi") {
-		t.Fatal("disabled writer swallowed later event")
+	if !w.Finalize(stagingStateCompleted) {
+		t.Fatal("Finalize() = false after permanent failure")
+	}
+	starts, updates, sent := p.snapshot()
+	if len(starts) != 1 || len(updates) != 0 || len(sent) != 0 {
+		t.Fatalf("unexpected delivery after permanent failure: starts=%d updates=%d sent=%d", len(starts), len(updates), len(sent))
+	}
+}
+
+func TestStagingProgressWriterTransientFailureRetriesLatestSnapshot(t *testing.T) {
+	transientErr := errors.New("retry later")
+	p := &stagingCapturePlatform{
+		updateErrAt: 1,
+		updateErr:   transientErr,
+		retryDelay:  30 * time.Millisecond,
+		updated:     make(chan struct{}, 4),
+	}
+	w, ticker, _ := newTestStagingWriter(t, p)
+	if !w.Start() {
+		t.Fatal("Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "initial preview")
+	if !w.AppendThinking("old snapshot") {
+		t.Fatal("first append failed")
+	}
+	ticker.ch <- time.Now()
+	select {
+	case <-p.updated:
+	case <-time.After(time.Second):
+		t.Fatal("first update attempt missing")
+	}
+	if !w.AppendToolUse(1, "Bash", "latest snapshot") {
+		t.Fatal("append during retry failed")
+	}
+	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 2 }, "transient retry")
+	calls, attemptedAt := p.attempts()
+	if calls != 2 || attemptedAt[1].Sub(attemptedAt[0]) < p.retryDelay {
+		t.Fatalf("retry timing calls=%d delay=%v, want >=%v", calls, attemptedAt[1].Sub(attemptedAt[0]), p.retryDelay)
+	}
+	_, updates, sent := p.snapshot()
+	if len(updates) != 1 || !strings.Contains(updates[0], "latest snapshot") {
+		t.Fatalf("retry did not send latest snapshot: %#v", updates)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("transient failure emitted standalone progress: %#v", sent)
+	}
+	w.Finalize(stagingStateCompleted)
+	waitStaging(t, ticker.isStopped, "transient final timeline")
+}
+
+func TestStagingProgressWriterTerminalBeforePreviewSuppressesLateTimeline(t *testing.T) {
+	capture := &stagingCapturePlatform{}
+	p := &blockingStagingSchedulerPlatform{stagingCapturePlatform: capture, release: make(chan struct{})}
+	w, _, _ := newTestStagingWriter(t, p)
+	if !w.Start() || !w.AppendThinking("fast turn") || !w.Finalize(stagingStateCompleted) {
+		t.Fatal("staging lifecycle failed")
+	}
+	close(p.release)
+	waitStaging(t, func() bool {
+		select {
+		case <-w.done:
+			return true
+		default:
+			return false
+		}
+	}, "terminal writer without preview")
+	starts, updates, _ := capture.snapshot()
+	if len(starts) != 0 || len(updates) != 0 {
+		t.Fatalf("terminal writer created late timeline: starts=%d updates=%d", len(starts), len(updates))
+	}
+}
+
+func TestStagingProgressWriterRepeated429StopsAtTerminalDeadline(t *testing.T) {
+	transientErr := errors.New("repeated 429")
+	p := &stagingCapturePlatform{
+		updateErrAlways: true,
+		updateErr:       transientErr,
+		retryDelay:      time.Second,
+	}
+	ticker := &fakeStagingTicker{ch: make(chan time.Time, 1)}
+	w := newStagingProgressWriter(context.Background(), p, "reply", time.Now(), LangEnglish, nil, &stagingProgressOptions{
+		newTicker:        func(time.Duration) stagingTicker { return ticker },
+		terminalLifetime: 65 * time.Millisecond,
+	})
+	if !w.Start() {
+		t.Fatal("Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "repeated-429 preview")
+	if !w.AppendThinking("retain") {
+		t.Fatal("append failed")
+	}
+	ticker.ch <- time.Now()
+	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 1 }, "pre-terminal 429 retry wait")
+
+	started := time.Now()
+	if !w.Finalize(stagingStateCompleted) {
+		t.Fatal("Finalize() = false")
+	}
+	waitStaging(t, func() bool {
+		select {
+		case <-w.done:
+			return true
+		default:
+			return false
+		}
+	}, "terminal retry deadline")
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("pre-terminal retry outlived terminal deadline: %v", elapsed)
+	}
+	calls, _ := p.attempts()
+	if calls < 2 {
+		t.Fatalf("update attempts = %d, want terminal retry after pre-terminal 429", calls)
+	}
+	_, updates, sent := p.snapshot()
+	if len(updates) != 0 || len(sent) != 0 {
+		t.Fatalf("repeated 429 produced noise: updates=%d sent=%d", len(updates), len(sent))
+	}
+}
+
+func TestStagingProgressWriterUsesOutboundGateForPreviewAndEdit(t *testing.T) {
+	p := &stagingCapturePlatform{}
+	var gateMu sync.Mutex
+	gateCalls := 0
+	w := newStagingProgressWriter(context.Background(), p, "reply", time.Now(), LangEnglish, nil, &stagingProgressOptions{
+		waitOutbound: func(context.Context) error {
+			gateMu.Lock()
+			gateCalls++
+			gateMu.Unlock()
+			return nil
+		},
+	})
+	if !w.Start() {
+		t.Fatal("Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "outbound-gated preview")
+	if !w.AppendThinking("batched") || !w.Finalize(stagingStateCompleted) {
+		t.Fatal("staging lifecycle failed")
+	}
+	waitStaging(t, func() bool {
+		select {
+		case <-w.done:
+			return true
+		default:
+			return false
+		}
+	}, "outbound-gated final edit")
+	gateMu.Lock()
+	calls := gateCalls
+	gateMu.Unlock()
+	if calls != 2 {
+		t.Fatalf("outbound gate calls = %d, want preview plus final edit", calls)
 	}
 }
 
@@ -272,7 +481,7 @@ func TestStagingProgressWriterRequiresBothCapabilities(t *testing.T) {
 		t.Fatal("Start() = true without preview/update capabilities")
 	}
 	select {
-	case <-w.stopTicker:
+	case <-w.stopWorker:
 	default:
 		t.Fatal("disabled writer was not closed")
 	}

@@ -179,6 +179,11 @@ type Platform struct {
 	generalRouteMu sync.Mutex
 	generalRoutes  map[generalRouteKey]time.Time
 	titleSem       chan struct{}
+
+	progressMu       sync.Mutex
+	progressGate     chan struct{}
+	progressNext     time.Time
+	progressInterval time.Duration
 }
 
 const (
@@ -190,6 +195,7 @@ const (
 	generalRouteTTL           = 10 * time.Minute
 	titleConcurrency          = 1
 	telegramMessageLimit      = 4096
+	telegramProgressInterval  = 5 * time.Second
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -1938,6 +1944,88 @@ type telegramPreviewHandle struct {
 	threadID  int
 	messageID int
 }
+
+func (p *Platform) progressIntervalLocked() time.Duration {
+	if p.progressInterval > 0 {
+		return p.progressInterval
+	}
+	return telegramProgressInterval
+}
+
+// AcquireProgressUpdate serializes Telegram progress calls and waits for the
+// shared spacing/backoff deadline. The caller must release after its API call.
+func (p *Platform) AcquireProgressUpdate(ctx context.Context) (func(bool), error) {
+	p.progressMu.Lock()
+	if p.progressGate == nil {
+		p.progressGate = make(chan struct{}, 1)
+		p.progressGate <- struct{}{}
+	}
+	gate := p.progressGate
+	p.progressMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-gate:
+	}
+
+	var releaseOnce sync.Once
+	release := func(attempted bool) {
+		releaseOnce.Do(func() {
+			p.progressMu.Lock()
+			if attempted {
+				next := time.Now().Add(p.progressIntervalLocked())
+				if next.After(p.progressNext) {
+					p.progressNext = next
+				}
+			}
+			gate <- struct{}{}
+			p.progressMu.Unlock()
+		})
+	}
+
+	for {
+		p.progressMu.Lock()
+		delay := time.Until(p.progressNext)
+		p.progressMu.Unlock()
+		if delay <= 0 {
+			return release, nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			release(false)
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// DeferProgressUpdates applies Telegram's global retry_after window to all
+// concurrent staging writers on this platform instance.
+func (p *Platform) DeferProgressUpdates(delay time.Duration) {
+	if delay < 0 {
+		return
+	}
+	p.progressMu.Lock()
+	deferredUntil := time.Now().Add(delay)
+	if deferredUntil.After(p.progressNext) {
+		p.progressNext = deferredUntil
+	}
+	p.progressMu.Unlock()
+}
+
+func (p *Platform) ProgressUpdateRetryAfter(err error) (time.Duration, bool) {
+	var rateErr *tgbot.TooManyRequestsError
+	if !errors.As(err, &rateErr) {
+		return 0, false
+	}
+	return time.Duration(max(0, rateErr.RetryAfter)) * time.Second, true
+}
+
+var _ core.ProgressUpdateScheduler = (*Platform)(nil)
+var _ core.ProgressUpdateRetryClassifier = (*Platform)(nil)
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {

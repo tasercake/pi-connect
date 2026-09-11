@@ -152,6 +152,7 @@ type Engine struct {
 	i18n                  *I18n
 	speech                SpeechCfg
 	tts                   *TTSCfg
+	displayMu             sync.RWMutex
 	display               DisplayCfg
 	injectSender          bool
 	attachmentSendEnabled bool
@@ -557,7 +558,15 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	e.displayMu.Lock()
 	e.display = cfg
+	e.displayMu.Unlock()
+}
+
+func (e *Engine) displaySnapshot() DisplayCfg {
+	e.displayMu.RLock()
+	defer e.displayMu.RUnlock()
+	return e.display
 }
 
 // SetInstantReply configures the immediate confirmation reply.
@@ -3881,6 +3890,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		replyAgent = e.agent
 	}
 	state.mu.Unlock()
+	// Freeze display policy for this turn. /quiet changes apply to new turns;
+	// already-running turns keep their existing delivery contract.
+	turnDisplay := e.displaySnapshot()
 
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(turnPlatform, content, workspaceDir)
@@ -3893,8 +3905,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 	// Staging owns the only progress message when both required capabilities work.
-	staging := newStagingProgressWriter(e.ctx, turnPlatform, turnReplyCtx, turnStart, e.i18n.CurrentLang(), workspaceRenderer, nil)
-	stagingActive := e.display.Mode == "staging" && staging.Start()
+	staging := newStagingProgressWriter(e.ctx, turnPlatform, turnReplyCtx, turnStart, e.i18n.CurrentLang(), workspaceRenderer, &stagingProgressOptions{
+		waitOutbound: func(ctx context.Context) error { return e.waitOutgoingContext(ctx, turnPlatform) },
+	})
+	stagingActive := turnDisplay.Mode == "staging" && staging.Start()
 	defer func() { staging.Stop() }()
 
 	// Streaming card: aggregate entire turn into a single updatable card.
@@ -4185,6 +4199,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	eventReceived:
 		if state.isStopped() {
+			if stagingActive {
+				staging.Finalize(stagingStateCancelled)
+				stagingActive = false
+			}
 			sp.discard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
@@ -4218,12 +4236,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 
 		// main codebase has no per-session quiet flag; pr309 referenced
-		// sessionQuiet which we drop. e.display.ThinkingMessages /
+		// sessionQuiet which we drop. turnDisplay.ThinkingMessages /
 		// ToolMessages handle user-level quiet in the fallback branches.
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" || stagingActive {
+		if turnDisplay.CardMode != "rich" || stagingActive {
 			hasRichCard = false
 		}
 
@@ -4234,7 +4252,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isEllipsisOnly(event.Content) {
 				break
 			}
-			if stagingActive && e.display.ThinkingMessages {
+			if stagingActive && turnDisplay.ThinkingMessages {
 				if staging.AppendThinking(event.Content) {
 					break
 				}
@@ -4242,10 +4260,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
-				if !e.display.ThinkingMessages {
+				if !turnDisplay.ThinkingMessages {
 					break
 				}
-				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
+				if thinking := strings.TrimSpace(truncateIf(event.Content, turnDisplay.ThinkingMaxLen)); thinking != "" {
 					toolSteps = append(toolSteps, ToolStep{
 						Kind:    ToolStepKindThinking,
 						Name:    "Thinking",
@@ -4274,8 +4292,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !turnDisplay.ThinkingMessages && len(textParts) > segmentStart {
+				if turnDisplay.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -4295,10 +4313,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ThinkingMessages && event.Content != "" {
+			if turnDisplay.ThinkingMessages && event.Content != "" {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
-					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
+					cardThinkingText = truncateIf(event.Content, turnDisplay.ThinkingMaxLen)
 					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					continue // skip original independent message sending
 				}
@@ -4321,7 +4339,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+				preview := truncateIf(event.Content, turnDisplay.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
 					sendWorkspace(p, replyCtx, thinkingMsg)
@@ -4330,7 +4348,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
-			if stagingActive && e.display.ToolMessages {
+			if stagingActive && turnDisplay.ToolMessages {
 				if staging.AppendToolUse(toolCount, event.ToolName, event.ToolInput) {
 					break
 				}
@@ -4338,13 +4356,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
+				if !turnDisplay.ToolMessages {
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
 					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Summary: truncateIf(event.ToolInput, turnDisplay.ToolMaxLen),
 				})
 				if cardMessageID == nil {
 					card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
@@ -4367,8 +4385,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !turnDisplay.ToolMessages && len(textParts) > segmentStart {
+				if turnDisplay.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -4388,7 +4406,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ToolMessages {
+			if turnDisplay.ToolMessages {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					toolInput := event.ToolInput
@@ -4461,7 +4479,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if stagingActive && e.display.ToolMessages {
+			if stagingActive && turnDisplay.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
@@ -4471,17 +4489,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				stagingActive = false
 			}
-			if e.display.ToolMessages {
+			if turnDisplay.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
 				}
 				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
+					result = truncateIf(result, turnDisplay.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if hasRichCard {
-						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
+						toolSteps = mergeRichToolResult(toolSteps, event, result, turnDisplay.ToolMaxLen)
 						if cardMessageID == nil {
 							card := richCardSupporter.BuildRichCard(CardStatusWorking, "", toolSteps, partialText, true, time.Since(turnStart))
 							if starter, ok := p.(PreviewStarter); ok {
@@ -4660,7 +4678,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
 			} else {
-				permLimit := e.display.ToolMaxLen
+				permLimit := turnDisplay.ToolMaxLen
 				if permLimit > 0 {
 					permLimit = permLimit * 8 / 5
 				}
@@ -5019,6 +5037,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				// Reset per-turn state for the next turn
 				msgID = queued.messageID
+				turnStart = time.Now()
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
@@ -5040,8 +5059,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				staging.Stop()
-				staging = newStagingProgressWriter(e.ctx, queued.platform, queued.replyCtx, turnStart, e.i18n.CurrentLang(), queuedRenderer, nil)
-				stagingActive = e.display.Mode == "staging" && staging.Start()
+				turnDisplay = e.displaySnapshot()
+				staging = newStagingProgressWriter(e.ctx, queued.platform, queued.replyCtx, turnStart, e.i18n.CurrentLang(), queuedRenderer, &stagingProgressOptions{
+					waitOutbound: func(ctx context.Context) error { return e.waitOutgoingContext(ctx, queued.platform) },
+				})
+				stagingActive = turnDisplay.Mode == "staging" && staging.Start()
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
@@ -7366,12 +7388,13 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
 			}
 		}
+		display := e.displaySnapshot()
 		thinkingStr := e.i18n.T(MsgDisabledShort)
-		if e.display.ThinkingMessages {
+		if display.ThinkingMessages {
 			thinkingStr = e.i18n.T(MsgEnabledShort)
 		}
 		toolStr := e.i18n.T(MsgDisabledShort)
-		if e.display.ToolMessages {
+		if display.ToolMessages {
 			toolStr = e.i18n.T(MsgEnabledShort)
 		}
 		modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
@@ -7978,12 +8001,13 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
 		}
 	}
+	display := e.displaySnapshot()
 	thinkingStr := e.i18n.T(MsgDisabledShort)
-	if e.display.ThinkingMessages {
+	if display.ThinkingMessages {
 		thinkingStr = e.i18n.T(MsgEnabledShort)
 	}
 	toolStr := e.i18n.T(MsgDisabledShort)
-	if e.display.ToolMessages {
+	if display.ToolMessages {
 		toolStr = e.i18n.T(MsgEnabledShort)
 	}
 	modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
@@ -8942,16 +8966,20 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	// /quiet [full|quiet|staging|compact]
 	// Without argument: cycle full → quiet → staging → compact → full.
 	// With argument: set mode directly.
-	var newMode string
+	var requested string
 	if len(args) > 0 {
 		switch strings.ToLower(args[0]) {
 		case "full", "quiet", "staging", "compact":
-			newMode = strings.ToLower(args[0])
+			requested = strings.ToLower(args[0])
 		default:
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietUsage))
 			return
 		}
-	} else {
+	}
+
+	e.displayMu.Lock()
+	newMode := requested
+	if newMode == "" {
 		switch e.display.Mode {
 		case "full", "":
 			newMode = "quiet"
@@ -8963,7 +8991,6 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 			newMode = "full"
 		}
 	}
-
 	e.display.Mode = newMode
 	switch newMode {
 	case "compact", "quiet":
@@ -8973,25 +9000,28 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		e.display.ThinkingMessages = true
 		e.display.ToolMessages = true
 	}
+	tm := e.display.ThinkingMessages
+	tool := e.display.ToolMessages
+	e.displayMu.Unlock()
 
 	if e.displaySaveFunc != nil {
-		tm := e.display.ThinkingMessages
-		tool := e.display.ToolMessages
 		if err := e.displaySaveFunc(&newMode, &tm, nil, nil, &tool); err != nil {
 			slog.Error("failed to persist display config after /quiet", "error", err)
 		}
 	}
 
+	var response string
 	switch newMode {
 	case "quiet":
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
+		response = e.i18n.T(MsgQuietOn)
 	case "staging":
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDisplayModeStaging))
+		response = e.i18n.T(MsgDisplayModeStaging)
 	case "compact":
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDisplayModeCompact))
+		response = e.i18n.T(MsgDisplayModeCompact)
 	default:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOff))
+		response = e.i18n.T(MsgQuietOff)
 	}
+	e.reply(p, msg.ReplyCtx, response+"\n"+e.i18n.T(MsgDisplayModeNextTurn))
 }
 
 func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
@@ -10162,10 +10192,14 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 
 // waitOutgoing blocks on the per-platform outgoing rate limiter when enabled.
 func (e *Engine) waitOutgoing(p Platform) error {
+	return e.waitOutgoingContext(e.ctx, p)
+}
+
+func (e *Engine) waitOutgoingContext(ctx context.Context, p Platform) error {
 	if e.outgoingRL == nil {
 		return nil
 	}
-	return e.outgoingRL.Wait(e.ctx, p.Name())
+	return e.outgoingRL.Wait(ctx, p.Name())
 }
 
 func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
@@ -12969,12 +13003,14 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Display mode: full, quiet, staging, compact",
 			descZh: "显示模式: full, quiet, staging, compact",
 			getFunc: func() string {
-				if e.display.Mode == "" {
+				display := e.displaySnapshot()
+				if display.Mode == "" {
 					return "full"
 				}
-				return e.display.Mode
+				return display.Mode
 			},
 			setFunc: func(v string) error {
+				e.displayMu.Lock()
 				switch v {
 				case "full", "staging":
 					e.display.Mode = v
@@ -12985,11 +13021,13 @@ func (e *Engine) configItems() []configItem {
 					e.display.ThinkingMessages = false
 					e.display.ToolMessages = false
 				default:
+					e.displayMu.Unlock()
 					return fmt.Errorf("must be full, quiet, staging, or compact")
 				}
+				tm := e.display.ThinkingMessages
+				tool := e.display.ToolMessages
+				e.displayMu.Unlock()
 				if e.displaySaveFunc != nil {
-					tm := e.display.ThinkingMessages
-					tool := e.display.ToolMessages
 					return e.displaySaveFunc(&v, &tm, nil, nil, &tool)
 				}
 				return nil
@@ -13000,14 +13038,16 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Whether thinking messages are shown (true/false)",
 			descZh: "是否显示思考消息 (true/false)",
 			getFunc: func() string {
-				return fmt.Sprintf("%t", e.display.ThinkingMessages)
+				return fmt.Sprintf("%t", e.displaySnapshot().ThinkingMessages)
 			},
 			setFunc: func(v string) error {
 				b, err := strconv.ParseBool(v)
 				if err != nil {
 					return fmt.Errorf("invalid boolean: %s", v)
 				}
+				e.displayMu.Lock()
 				e.display.ThinkingMessages = b
+				e.displayMu.Unlock()
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, &b, nil, nil, nil)
 				}
@@ -13019,7 +13059,7 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Max chars for thinking messages (0=no truncation)",
 			descZh: "思考消息最大长度 (0=不截断)",
 			getFunc: func() string {
-				return fmt.Sprintf("%d", e.display.ThinkingMaxLen)
+				return fmt.Sprintf("%d", e.displaySnapshot().ThinkingMaxLen)
 			},
 			setFunc: func(v string) error {
 				n, err := strconv.Atoi(v)
@@ -13029,7 +13069,9 @@ func (e *Engine) configItems() []configItem {
 				if n < 0 {
 					return fmt.Errorf("value must be >= 0")
 				}
+				e.displayMu.Lock()
 				e.display.ThinkingMaxLen = n
+				e.displayMu.Unlock()
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, &n, nil, nil)
 				}
@@ -13041,14 +13083,16 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Whether tool progress messages are shown (true/false)",
 			descZh: "是否显示工具进度消息 (true/false)",
 			getFunc: func() string {
-				return fmt.Sprintf("%t", e.display.ToolMessages)
+				return fmt.Sprintf("%t", e.displaySnapshot().ToolMessages)
 			},
 			setFunc: func(v string) error {
 				b, err := strconv.ParseBool(v)
 				if err != nil {
 					return fmt.Errorf("invalid boolean: %s", v)
 				}
+				e.displayMu.Lock()
 				e.display.ToolMessages = b
+				e.displayMu.Unlock()
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, nil, nil, &b)
 				}
@@ -13060,7 +13104,7 @@ func (e *Engine) configItems() []configItem {
 			desc:   "Max chars for tool use messages (0=no truncation)",
 			descZh: "工具消息最大长度 (0=不截断)",
 			getFunc: func() string {
-				return fmt.Sprintf("%d", e.display.ToolMaxLen)
+				return fmt.Sprintf("%d", e.displaySnapshot().ToolMaxLen)
 			},
 			setFunc: func(v string) error {
 				n, err := strconv.Atoi(v)
@@ -13070,7 +13114,9 @@ func (e *Engine) configItems() []configItem {
 				if n < 0 {
 					return fmt.Errorf("value must be >= 0")
 				}
+				e.displayMu.Lock()
 				e.display.ToolMaxLen = n
+				e.displayMu.Unlock()
 				if e.displaySaveFunc != nil {
 					return e.displaySaveFunc(nil, nil, nil, &n, nil)
 				}

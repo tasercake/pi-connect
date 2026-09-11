@@ -233,6 +233,22 @@ type ProgressUpdateThrottler interface {
 	ProgressUpdateInterval() time.Duration
 }
 
+// ProgressUpdateScheduler is an optional platform-level gate shared by all
+// progress writers. AcquireProgressUpdate serializes calls across turns; its
+// release function must run with attempted=true after an API call, or false
+// when delivery aborts before one. DeferProgressUpdates applies
+// API-directed backoff, such as Telegram's retry_after response, before release.
+type ProgressUpdateScheduler interface {
+	AcquireProgressUpdate(ctx context.Context) (release func(attempted bool), err error)
+	DeferProgressUpdates(delay time.Duration)
+}
+
+// ProgressUpdateRetryClassifier lets a platform identify a transient progress
+// update failure and return the minimum delay before retrying it.
+type ProgressUpdateRetryClassifier interface {
+	ProgressUpdateRetryAfter(err error) (time.Duration, bool)
+}
+
 // ButtonOption represents a clickable inline button.
 type ButtonOption struct {
 	Text string // display text on the button

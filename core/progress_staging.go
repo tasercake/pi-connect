@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,12 +12,13 @@ import (
 )
 
 const (
-	stagingProgressMaxRunes    = maxPlatformMessageLen - 200
-	stagingProgressBodyRunes   = 900
-	stagingProgressToolRunes   = 120
-	stagingProgressStatusRunes = 80
-	stagingProgressMaxEntries  = 128
-	stagingProgressTick        = 5 * time.Second
+	stagingProgressMaxRunes         = maxPlatformMessageLen - 200
+	stagingProgressBodyRunes        = 900
+	stagingProgressToolRunes        = 120
+	stagingProgressStatusRunes      = 80
+	stagingProgressMaxEntries       = 128
+	stagingProgressTick             = 5 * time.Second
+	stagingProgressTerminalLifetime = 2 * time.Minute
 )
 
 type stagingProgressState string
@@ -38,8 +40,10 @@ type realStagingTicker struct{ *time.Ticker }
 func (t realStagingTicker) Chan() <-chan time.Time { return t.C }
 
 type stagingProgressOptions struct {
-	now       func() time.Time
-	newTicker func(time.Duration) stagingTicker
+	now              func() time.Time
+	newTicker        func(time.Duration) stagingTicker
+	waitOutbound     func(context.Context) error
+	terminalLifetime time.Duration
 }
 
 type stagingEntryKind int
@@ -64,19 +68,28 @@ type stagingEntry struct {
 }
 
 // stagingProgressWriter owns one editable progress message for one turn.
-// Its mutex serializes event-driven edits with elapsed-time ticker edits.
+// Event methods only mutate the latest timeline snapshot. One worker performs
+// coalesced API calls without holding mu, so platform backoff never blocks the
+// agent event loop. If delivery fails permanently, the writer keeps ownership
+// of progress events and degrades to no progress rather than flooding chat.
 type stagingProgressWriter struct {
 	mu sync.Mutex
 
-	ctx       context.Context
-	platform  Platform
-	replyCtx  any
-	starter   PreviewStarter
-	updater   MessageUpdater
-	transform func(string) string
-	i18n      *I18n
-	now       func() time.Time
-	startTime time.Time
+	ctx             context.Context
+	cancel          context.CancelFunc
+	runningCtx      context.Context
+	cancelRunning   context.CancelFunc
+	platform        Platform
+	replyCtx        any
+	starter         PreviewStarter
+	updater         MessageUpdater
+	scheduler       ProgressUpdateScheduler
+	retryClassifier ProgressUpdateRetryClassifier
+	waitOutbound    func(context.Context) error
+	transform       func(string) string
+	i18n            *I18n
+	now             func() time.Time
+	startTime       time.Time
 
 	handle            any
 	entries           []stagingEntry
@@ -85,30 +98,40 @@ type stagingProgressWriter struct {
 	stepCount         int
 	state             stagingProgressState
 	enabled           bool
-	failed            bool
-	closed            bool
+	degraded          bool
+	terminal          bool
+	terminalDeadline  time.Time
+	stopped           bool
 	lastSent          string
 	lastUpdateAt      time.Time
 	minUpdateInterval time.Duration
+	terminalLifetime  time.Duration
 
 	newTicker  func(time.Duration) stagingTicker
 	ticker     stagingTicker
-	stopTicker chan struct{}
+	wake       chan struct{}
+	stopWorker chan struct{}
+	done       chan struct{}
 	stopOnce   sync.Once
 }
 
 func newStagingProgressWriter(ctx context.Context, p Platform, replyCtx any, startTime time.Time, lang Language, transform func(string) string, options *stagingProgressOptions) *stagingProgressWriter {
+	workerCtx, cancel := context.WithCancel(ctx)
 	w := &stagingProgressWriter{
-		ctx:        ctx,
-		platform:   p,
-		replyCtx:   replyCtx,
-		transform:  transform,
-		i18n:       NewI18n(lang),
-		startTime:  startTime,
-		state:      stagingStateRunning,
-		stopTicker: make(chan struct{}),
-		now:        time.Now,
-		newTicker:  func(d time.Duration) stagingTicker { return realStagingTicker{time.NewTicker(d)} },
+		ctx:              workerCtx,
+		cancel:           cancel,
+		platform:         p,
+		replyCtx:         replyCtx,
+		transform:        transform,
+		i18n:             NewI18n(lang),
+		startTime:        startTime,
+		state:            stagingStateRunning,
+		terminalLifetime: stagingProgressTerminalLifetime,
+		wake:             make(chan struct{}, 1),
+		stopWorker:       make(chan struct{}),
+		done:             make(chan struct{}),
+		now:              time.Now,
+		newTicker:        func(d time.Duration) stagingTicker { return realStagingTicker{time.NewTicker(d)} },
 	}
 	if options != nil {
 		if options.now != nil {
@@ -116,6 +139,10 @@ func newStagingProgressWriter(ctx context.Context, p Platform, replyCtx any, sta
 		}
 		if options.newTicker != nil {
 			w.newTicker = options.newTicker
+		}
+		w.waitOutbound = options.waitOutbound
+		if options.terminalLifetime > 0 {
+			w.terminalLifetime = options.terminalLifetime
 		}
 	}
 	if w.startTime.IsZero() {
@@ -131,75 +158,74 @@ func newStagingProgressWriter(ctx context.Context, p Platform, replyCtx any, sta
 	if throttler, ok := p.(ProgressUpdateThrottler); ok {
 		w.minUpdateInterval = throttler.ProgressUpdateInterval()
 	}
+	w.scheduler, _ = p.(ProgressUpdateScheduler)
+	w.retryClassifier, _ = p.(ProgressUpdateRetryClassifier)
 	return w
 }
 
-// Start promptly creates the sole staging message with a zero-count header.
+// Start enables staging ownership and starts asynchronous delivery. Capability
+// failures return false; API failures degrade silently while progress remains
+// handled by this writer.
 func (w *stagingProgressWriter) Start() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.enabled && !w.failed && !w.closed {
+	if w.enabled {
 		return true
 	}
-	if w.starter == nil || w.updater == nil || w.closed || w.failed {
-		w.stopTimerLocked()
+	if w.starter == nil || w.updater == nil || w.stopped {
+		w.stopWorkerLocked()
 		return false
 	}
-	content := w.renderLocked()
-	callCtx, cancel := w.withAPITimeoutLocked()
-	handle, err := w.starter.SendPreviewStart(callCtx, w.replyCtx, content)
-	cancel()
-	if err != nil || handle == nil {
-		slog.Warn("staging progress: SendPreviewStart failed", "platform", w.platform.Name(), "error", err, "handle_nil", handle == nil)
-		w.failed = true
-		w.stopTimerLocked()
-		return false
-	}
-	w.handle = handle
 	w.enabled = true
-	w.lastSent = content
-	w.lastUpdateAt = w.now()
+	w.runningCtx, w.cancelRunning = context.WithCancel(w.ctx)
 	w.ticker = w.newTicker(stagingProgressTick)
-	go w.runTicker()
+	go w.runWorker()
+	w.signalLocked()
 	return true
 }
 
 func (w *stagingProgressWriter) Active() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.enabled && !w.failed && !w.closed && w.state == stagingStateRunning
+	return w.enabled && !w.terminal && w.state == stagingStateRunning && (!w.stopped || w.degraded)
 }
 
 func (w *stagingProgressWriter) AppendThinking(text string) bool {
-	return w.append(stagingEntry{kind: stagingEntryThinking, body: text}, false, false)
+	return w.append(stagingEntry{kind: stagingEntryThinking, body: text}, false)
 }
 
 func (w *stagingProgressWriter) AppendToolUse(number int, name, input string) bool {
-	return w.append(stagingEntry{kind: stagingEntryToolUse, toolNo: number, tool: name, body: input}, false, false)
+	return w.append(stagingEntry{kind: stagingEntryToolUse, toolNo: number, tool: name, body: input}, false)
 }
 
 func (w *stagingProgressWriter) AppendToolResult(name, result, status string, exitCode *int, success *bool) bool {
-	return w.append(stagingEntry{kind: stagingEntryToolResult, tool: name, body: result, status: status, exitCode: exitCode, success: success}, false, false)
+	return w.append(stagingEntry{kind: stagingEntryToolResult, tool: name, body: result, status: status, exitCode: exitCode, success: success}, false)
 }
 
 func (w *stagingProgressWriter) AppendText(text string) bool {
-	return w.append(stagingEntry{kind: stagingEntryText, body: text}, true, false)
+	return w.append(stagingEntry{kind: stagingEntryText, body: text}, true)
 }
 
 func (w *stagingProgressWriter) AppendPermission(name, input string) bool {
-	// Permission prompt is sent immediately after this returns, so force this
-	// security-relevant timeline update through any normal progress throttle.
-	return w.append(stagingEntry{kind: stagingEntryPermission, tool: name, body: input}, false, true)
+	// Permission UI is sent separately by the engine. Do not bypass progress
+	// pacing here; security UX must not wait for a timeline edit.
+	return w.append(stagingEntry{kind: stagingEntryPermission, tool: name, body: input}, false)
 }
 
 func (w *stagingProgressWriter) AppendError(text string) bool {
-	return w.append(stagingEntry{kind: stagingEntryError, body: text}, false, false)
+	return w.append(stagingEntry{kind: stagingEntryError, body: text}, false)
 }
 
-func (w *stagingProgressWriter) append(entry stagingEntry, coalesceText, force bool) bool {
+func (w *stagingProgressWriter) append(entry stagingEntry, coalesceText bool) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.enabled || w.failed || w.closed || w.state != stagingStateRunning {
+	if !w.enabled || w.terminal || w.state != stagingStateRunning {
+		return false
+	}
+	if w.degraded {
+		return true
+	}
+	if w.stopped {
 		return false
 	}
 	if entry.kind != stagingEntryText {
@@ -207,6 +233,14 @@ func (w *stagingProgressWriter) append(entry stagingEntry, coalesceText, force b
 	}
 	entry.tool = middleTruncateStaging(strings.TrimSpace(entry.tool), stagingProgressToolRunes, w.bodyOmission)
 	entry.status = middleTruncateStaging(strings.TrimSpace(entry.status), stagingProgressStatusRunes, w.bodyOmission)
+	if entry.exitCode != nil {
+		exitCode := *entry.exitCode
+		entry.exitCode = &exitCode
+	}
+	if entry.success != nil {
+		success := *entry.success
+		entry.success = &success
+	}
 	if w.transform != nil && entry.body != "" {
 		entry.body = w.transform(entry.body)
 	}
@@ -235,7 +269,9 @@ func (w *stagingProgressWriter) append(entry stagingEntry, coalesceText, force b
 			w.omittedEntries += drop
 		}
 	}
-	return w.updateLocked(force)
+	// Periodic ticks batch all events since the previous edit. The terminal
+	// transition wakes the worker immediately and still observes platform pacing.
+	return true
 }
 
 func (w *stagingProgressWriter) latestToolNumberLocked(name string) int {
@@ -253,68 +289,265 @@ func (w *stagingProgressWriter) Finalize(state stagingProgressState) bool {
 	if state == "" {
 		state = stagingStateCompleted
 	}
-	if w.closed {
-		return w.enabled && !w.failed && w.state == state
-	}
-	if !w.enabled || w.failed {
-		w.stopTimerLocked()
+	if !w.enabled {
+		w.stopWorkerLocked()
 		return false
 	}
+	if w.terminal {
+		return w.state == state
+	}
 	w.state = state
-	ok := w.updateLocked(true)
-	w.closed = true
-	w.stopTimerLocked()
-	return ok
+	w.terminal = true
+	w.terminalDeadline = time.Now().Add(w.terminalLifetime)
+	if w.cancelRunning != nil {
+		// Interrupt any pre-terminal throttle, scheduler, outbound, retry, or API
+		// wait. The worker restarts with the bounded terminal context. If no
+		// preview exists, it exits instead of creating one after the final answer.
+		w.cancelRunning()
+	}
+	if w.degraded {
+		w.stopWorkerLocked()
+		return true
+	}
+	w.signalLocked()
+	return true
 }
 
-// Stop only releases timer resources. Terminal paths call Finalize explicitly.
+// Stop cancels an unterminated writer. A finalized writer remains detached long
+// enough to deliver its terminal snapshot without delaying the final answer.
 func (w *stagingProgressWriter) Stop() {
 	w.mu.Lock()
-	w.closed = true
-	w.stopTimerLocked()
-	w.mu.Unlock()
+	defer w.mu.Unlock()
+	if w.terminal {
+		return
+	}
+	w.stopped = true
+	w.stopWorkerLocked()
 }
 
-func (w *stagingProgressWriter) runTicker() {
+func (w *stagingProgressWriter) runWorker() {
+	defer func() {
+		w.mu.Lock()
+		w.stopped = true
+		w.stopWorkerLocked()
+		w.mu.Unlock()
+		close(w.done)
+	}()
 	for {
 		select {
+		case <-w.wake:
 		case <-w.ticker.Chan():
-			w.mu.Lock()
-			if w.enabled && !w.failed && !w.closed && w.state == stagingStateRunning {
-				w.updateLocked(false)
-			}
-			w.mu.Unlock()
-		case <-w.stopTicker:
+		case <-w.stopWorker:
 			return
 		case <-w.ctx.Done():
-			w.mu.Lock()
-			w.stopTimerLocked()
-			w.mu.Unlock()
+			return
+		}
+		if !w.deliverLatest() {
 			return
 		}
 	}
 }
 
-func (w *stagingProgressWriter) updateLocked(force bool) bool {
-	content := w.renderLocked()
-	if content == w.lastSent {
+// deliverLatest sends one current snapshot, retrying transient failures with
+// latest-state-wins semantics. All waits and API calls happen without mu held.
+func (w *stagingProgressWriter) deliverLatest() bool {
+	for {
+		w.mu.Lock()
+		if w.stopped || w.degraded {
+			w.mu.Unlock()
+			return false
+		}
+		content := w.renderLocked()
+		handle := w.handle
+		terminal := w.terminal
+		if terminal && handle == nil {
+			w.stopped = true
+			w.stopWorkerLocked()
+			w.mu.Unlock()
+			return false
+		}
+		lastSent := w.lastSent
+		lastUpdateAt := w.lastUpdateAt
+		w.mu.Unlock()
+
+		if content == lastSent {
+			if terminal {
+				w.mu.Lock()
+				w.stopped = true
+				w.stopWorkerLocked()
+				w.mu.Unlock()
+				return false
+			}
+			return true
+		}
+
+		if handle != nil && w.minUpdateInterval > 0 {
+			if delay := w.minUpdateInterval - w.now().Sub(lastUpdateAt); delay > 0 {
+				if !w.waitForDelivery(delay) {
+					if w.shouldRestartTerminal(context.Canceled) {
+						continue
+					}
+					return false
+				}
+			}
+		}
+		deliveryCtx, cancelDelivery := w.deliveryContext()
+		releaseProgress := func(bool) {}
+		if w.scheduler != nil {
+			var err error
+			releaseProgress, err = w.scheduler.AcquireProgressUpdate(deliveryCtx)
+			if err != nil {
+				cancelDelivery()
+				if w.shouldRestartTerminal(err) {
+					continue
+				}
+				return false
+			}
+		}
+		if w.waitOutbound != nil {
+			if err := w.waitOutbound(deliveryCtx); err != nil {
+				releaseProgress(false)
+				cancelDelivery()
+				if w.shouldRestartTerminal(err) {
+					continue
+				}
+				return false
+			}
+		}
+
+		// Re-render after pacing waits so bursts and retry windows send only the
+		// newest state. The shared progress lease stays held through the API call.
+		w.mu.Lock()
+		if w.stopped || w.degraded || (w.terminal && w.handle == nil) {
+			w.mu.Unlock()
+			releaseProgress(false)
+			cancelDelivery()
+			return false
+		}
+		content = w.renderLocked()
+		handle = w.handle
+		w.mu.Unlock()
+
+		callCtx, cancelCall := w.withAPITimeout(deliveryCtx)
+		var err error
+		var newHandle any
+		if handle == nil {
+			newHandle, err = w.starter.SendPreviewStart(callCtx, w.replyCtx, content)
+			if err == nil && newHandle == nil {
+				err = fmt.Errorf("nil preview handle")
+			}
+		} else {
+			err = w.updater.UpdateMessage(callCtx, handle, content)
+		}
+		cancelCall()
+		if err != nil {
+			delay, transient := w.retryAfter(err)
+			if transient && w.scheduler != nil {
+				w.scheduler.DeferProgressUpdates(delay)
+			}
+			releaseProgress(true)
+			cancelDelivery()
+			if w.shouldRestartTerminal(err) {
+				continue
+			}
+			if transient {
+				slog.Warn("staging progress: transient delivery failure; retrying latest snapshot", "platform", w.platform.Name(), "retry_after", delay, "error", err)
+				if !w.waitForDelivery(delay) {
+					if w.shouldRestartTerminal(context.Canceled) {
+						continue
+					}
+					return false
+				}
+				continue
+			}
+			slog.Warn("staging progress: delivery failed permanently; suppressing further progress", "platform", w.platform.Name(), "error", err)
+			w.mu.Lock()
+			w.degraded = true
+			w.stopped = true
+			w.stopWorkerLocked()
+			w.mu.Unlock()
+			return false
+		}
+		releaseProgress(true)
+		cancelDelivery()
+
+		w.mu.Lock()
+		if handle == nil {
+			w.handle = newHandle
+		}
+		w.lastSent = content
+		w.lastUpdateAt = w.now()
+		latest := w.renderLocked()
+		terminal = w.terminal
+		if terminal && latest == content {
+			w.stopped = true
+			w.stopWorkerLocked()
+		}
+		w.mu.Unlock()
+		if terminal && latest == content {
+			return false
+		}
+		if terminal && latest != content {
+			continue
+		}
 		return true
 	}
-	if !force && w.minUpdateInterval > 0 && w.now().Sub(w.lastUpdateAt) < w.minUpdateInterval {
-		return true
+}
+
+func (w *stagingProgressWriter) retryAfter(err error) (time.Duration, bool) {
+	if w.retryClassifier == nil {
+		return 0, false
 	}
-	callCtx, cancel := w.withAPITimeoutLocked()
-	err := w.updater.UpdateMessage(callCtx, w.handle, content)
-	cancel()
-	if err != nil {
-		slog.Warn("staging progress: UpdateMessage failed", "platform", w.platform.Name(), "error", err)
-		w.failed = true
-		w.stopTimerLocked()
+	delay, ok := w.retryClassifier.ProgressUpdateRetryAfter(err)
+	if !ok {
+		return 0, false
+	}
+	if delay < w.minUpdateInterval {
+		delay = w.minUpdateInterval
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
+}
+
+func (w *stagingProgressWriter) shouldRestartTerminal(err error) bool {
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	w.lastSent = content
-	w.lastUpdateAt = w.now()
-	return true
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.terminal && !w.stopped && w.ctx.Err() == nil && time.Now().Before(w.terminalDeadline)
+}
+
+func (w *stagingProgressWriter) deliveryContext() (context.Context, context.CancelFunc) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.terminal && !w.terminalDeadline.IsZero() {
+		return context.WithDeadline(w.ctx, w.terminalDeadline)
+	}
+	if w.runningCtx != nil {
+		return context.WithCancel(w.runningCtx)
+	}
+	return context.WithCancel(w.ctx)
+}
+
+func (w *stagingProgressWriter) waitForDelivery(delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	ctx, cancel := w.deliveryContext()
+	defer cancel()
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-w.stopWorker:
+		return false
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (w *stagingProgressWriter) renderLocked() string {
@@ -463,18 +696,23 @@ func runePrefix(text string, maxRunes int) string {
 	return string(rs[:maxRunes])
 }
 
-func (w *stagingProgressWriter) stopTimerLocked() {
+func (w *stagingProgressWriter) signalLocked() {
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (w *stagingProgressWriter) stopWorkerLocked() {
 	w.stopOnce.Do(func() {
 		if w.ticker != nil {
 			w.ticker.Stop()
 		}
-		close(w.stopTicker)
+		close(w.stopWorker)
+		w.cancel()
 	})
 }
 
-func (w *stagingProgressWriter) withAPITimeoutLocked() (context.Context, context.CancelFunc) {
-	if _, hasDeadline := w.ctx.Deadline(); hasDeadline {
-		return w.ctx, func() {}
-	}
-	return context.WithTimeout(w.ctx, compactProgressAPITimeout)
+func (w *stagingProgressWriter) withAPITimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, compactProgressAPITimeout)
 }

@@ -399,6 +399,53 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 	}
 }
 
+func TestProgressUpdateRetryAfterClassifiesWrappedTelegram429(t *testing.T) {
+	p := &Platform{}
+	err := fmt.Errorf("telegram: edit message: %w", &tgbot.TooManyRequestsError{Message: "rate limited", RetryAfter: 33})
+	delay, ok := p.ProgressUpdateRetryAfter(err)
+	if !ok || delay != 33*time.Second {
+		t.Fatalf("ProgressUpdateRetryAfter() = %v, %v; want 33s, true", delay, ok)
+	}
+	if _, ok := p.ProgressUpdateRetryAfter(errors.New("permanent")); ok {
+		t.Fatal("permanent error classified as transient")
+	}
+}
+
+func TestConcurrentProgressWritersShareBudgetAndExtendedBackoff(t *testing.T) {
+	p := &Platform{progressInterval: 25 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	release, err := p.AcquireProgressUpdate(ctx)
+	if err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	returned := make(chan time.Time, 1)
+	go func() {
+		release, err := p.AcquireProgressUpdate(ctx)
+		if err == nil {
+			returned <- time.Now()
+			release(true)
+		}
+	}()
+	select {
+	case <-returned:
+		t.Fatal("concurrent writer entered while first API lease was held")
+	case <-time.After(5 * time.Millisecond):
+	}
+
+	deferredAt := time.Now()
+	p.DeferProgressUpdates(40 * time.Millisecond)
+	release(true)
+	select {
+	case got := <-returned:
+		if delay := got.Sub(deferredAt); delay < 35*time.Millisecond {
+			t.Fatalf("shared waiter ignored backoff: returned after %v", delay)
+		}
+	case <-ctx.Done():
+		t.Fatalf("shared waiter: %v", ctx.Err())
+	}
+}
+
 func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
 	p := &Platform{token: "token", httpClient: &http.Client{}}
 	ctx := context.Background()
