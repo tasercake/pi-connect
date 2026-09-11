@@ -598,10 +598,8 @@ const (
 	MsgForumTopicAudio            MsgKey = "forum_topic_audio"
 	MsgForumTopicLocation         MsgKey = "forum_topic_location"
 	MsgForumTopicNewRequest       MsgKey = "forum_topic_new_request"
-	MsgForumTopicNamingFailed     MsgKey = "forum_topic_naming_failed"
 	MsgForumTopicCreationFailed   MsgKey = "forum_topic_creation_failed"
-	MsgForumTopicBindingFailed    MsgKey = "forum_topic_binding_failed"
-	MsgForumTopicOriginLinkFailed MsgKey = "forum_topic_origin_link_failed"
+	MsgForumTopicAttachmentFailed MsgKey = "forum_topic_attachment_failed"
 	MsgForumTopicReplyingTo       MsgKey = "forum_topic_replying_to"
 )
 
@@ -648,13 +646,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "新しいリクエスト",
 		LangSpanish:            "Nueva solicitud",
 	},
-	MsgForumTopicNamingFailed: {
-		LangEnglish:            "Could not name the new topic. Please try again.",
-		LangChinese:            "无法为新话题命名。请重试。",
-		LangTraditionalChinese: "無法為新話題命名。請重試。",
-		LangJapanese:           "新しいトピックに名前を付けられませんでした。もう一度お試しください。",
-		LangSpanish:            "No se pudo nombrar el tema nuevo. Inténtalo de nuevo.",
-	},
 	MsgForumTopicCreationFailed: {
 		LangEnglish:            "Could not create a topic. Check that the bot can manage topics.",
 		LangChinese:            "无法创建话题。请检查机器人是否有管理话题的权限。",
@@ -662,19 +653,12 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "トピックを作成できませんでした。ボットにトピック管理権限があることを確認してください。",
 		LangSpanish:            "No se pudo crear el tema. Comprueba que el bot pueda administrar temas.",
 	},
-	MsgForumTopicBindingFailed: {
-		LangEnglish:            "The topic was created, but the session could not be connected to it. Please try again.",
-		LangChinese:            "话题已创建，但无法连接会话。请重试。",
-		LangTraditionalChinese: "話題已建立，但無法連接工作階段。請重試。",
-		LangJapanese:           "トピックは作成されましたが、セッションを接続できませんでした。もう一度お試しください。",
-		LangSpanish:            "El tema se creó, pero no se pudo conectar la sesión. Inténtalo de nuevo.",
-	},
-	MsgForumTopicOriginLinkFailed: {
-		LangEnglish:            "The topic was created, but the original message link could not be added. Please try again.",
-		LangChinese:            "话题已创建，但无法添加原消息链接。请重试。",
-		LangTraditionalChinese: "話題已建立，但無法新增原始訊息連結。請重試。",
-		LangJapanese:           "トピックは作成されましたが、元のメッセージへのリンクを追加できませんでした。もう一度お試しください。",
-		LangSpanish:            "El tema se creó, pero no se pudo añadir el enlace al mensaje original. Inténtalo de nuevo.",
+	MsgForumTopicAttachmentFailed: {
+		LangEnglish:            "Could not download the attachment. Please resend it.",
+		LangChinese:            "无法下载附件。请重新发送。",
+		LangTraditionalChinese: "無法下載附件。請重新傳送。",
+		LangJapanese:           "添付ファイルをダウンロードできませんでした。もう一度送信してください。",
+		LangSpanish:            "No se pudo descargar el archivo adjunto. Vuelve a enviarlo.",
 	},
 	MsgForumTopicReplyingTo: {
 		LangEnglish:            "Replying to:",

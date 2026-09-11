@@ -95,6 +95,34 @@ func TestGenerateConversationTitleTimesOut(t *testing.T) {
 	}
 }
 
+func TestNewRejectsInvalidOptionalTitleConfiguration(t *testing.T) {
+	for _, opts := range []map[string]any{
+		{"cmd": "/bin/true", "topic_title_timeout_seconds": 0},
+		{"cmd": "/bin/true", "topic_title_timeout_seconds": "fast"},
+		{"cmd": "/bin/true", "topic_title_timeout_seconds": 121},
+		{"cmd": "/bin/true", "topic_title_model": 7},
+	} {
+		if _, err := New(opts); err == nil {
+			t.Fatalf("New(%#v) accepted invalid title configuration", opts)
+		}
+	}
+}
+
+func TestTitleCaptureAndErrorDetailAreBoundedUTF8SafeAndRedacted(t *testing.T) {
+	buf := &limitedBuffer{max: 4}
+	input := []byte("abcdefgh")
+	if n, err := buf.Write(input); err != nil || n != len(input) || buf.String() != "abcd" {
+		t.Fatalf("limited write = %d/%v/%q", n, err, buf.String())
+	}
+	detail := safeTitleErrorDetail("token=secret-value " + strings.Repeat("界", 400))
+	if strings.Contains(detail, "secret-value") || !strings.Contains(detail, "[REDACTED]") {
+		t.Fatalf("secret was not redacted: %q", detail)
+	}
+	if !strings.HasSuffix(detail, "…") || len([]rune(detail)) > 301 {
+		t.Fatalf("detail was not rune-bounded: %q", detail)
+	}
+}
+
 // ── normalizeTransport ───────────────────────────────────────
 
 func TestNormalizeTransport(t *testing.T) {

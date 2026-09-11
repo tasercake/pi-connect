@@ -83,17 +83,20 @@ type stubTelegramBot struct {
 	getFileCalls          int
 	setReactionCalls      int
 	createForumTopicCalls int
+	editForumTopicCalls   int
 
 	sendErr                error
 	sendMessageErrByCall   map[int]error
 	createForumTopicErr    error
 	createdForumTopic      *models.ForumTopic
+	editForumTopicErr      error
 	getFileErr             error
 	file                   *models.File
 	files                  map[string]*models.File
 	downloadURL            string
 	sendMessageParams      []*tgbot.SendMessageParams
 	createForumTopicParams []*tgbot.CreateForumTopicParams
+	editForumTopicParams   []*tgbot.EditForumTopicParams
 }
 
 func newStubTelegramBot() *stubTelegramBot {
@@ -254,6 +257,15 @@ func (b *stubTelegramBot) CreateForumTopic(_ context.Context, params *tgbot.Crea
 		result = &models.ForumTopic{MessageThreadID: 77, Name: params.Name}
 	}
 	return result, nil
+}
+
+func (b *stubTelegramBot) EditForumTopic(_ context.Context, params *tgbot.EditForumTopicParams) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.editForumTopicCalls++
+	paramsCopy := *params
+	b.editForumTopicParams = append(b.editForumTopicParams, &paramsCopy)
+	return b.editForumTopicErr == nil, b.editForumTopicErr
 }
 
 func (b *stubTelegramBot) SendMessageCallCount() int {
@@ -973,62 +985,55 @@ func TestHandleMessageWithForumTopic(t *testing.T) {
 	}
 }
 
-func TestHandleMessageGeneralForumTopicDefersCreationUntilLLMTitle(t *testing.T) {
+func generalForumMessage(id int, text string) *models.Message {
+	return &models.Message{
+		ID: id, MessageThreadID: 1, Text: text, Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7, Username: "alice"},
+		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, Title: "Test Forum", Username: "testforum", IsForum: true},
+	}
+}
+
+func TestHandleMessageGeneralForumUsesFinalRouteBeforeOptionalTitle(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	titleStarted := make(chan string, 1)
 	releaseTitle := make(chan struct{})
 	stubBot := newStubTelegramBot()
-	stubBot.createdForumTopic = &models.ForumTopic{MessageThreadID: 77, Name: "Investigate flaky tests"}
 	p := &Platform{
-		token:           "token",
-		httpClient:      &http.Client{},
-		groupReplyAll:   true,
-		enableReactions: true,
-		bot:             stubBot,
-		selfUser:        &models.User{ID: 42, Username: "mybot"},
+		groupReplyAll: true, enableReactions: true, bot: stubBot,
+		selfUser: &models.User{ID: 42, Username: "mybot"},
 		titleGenerator: func(_ context.Context, input string) (string, error) {
 			titleStarted <- input
 			<-releaseTitle
 			return "Investigate flaky tests", nil
 		},
-		handler: func(_ core.Platform, msg *core.Message) {
-			handled <- msg
-		},
+		handler: func(_ core.Platform, msg *core.Message) { handled <- msg },
 	}
 
-	p.handleMessage(context.Background(), &models.Message{
-		ID:              10,
-		MessageThreadID: 1,
-		Text:            "  please investigate why the tests are flaky  ",
-		Date:            int(time.Now().Unix()),
-		From:            &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{
-			ID:       -1001234567890,
-			Type:     models.ChatTypeSupergroup,
-			Title:    "Test Forum",
-			Username: "testforum",
-			IsForum:  true,
-		},
-	})
-
+	p.handleMessage(context.Background(), generalForumMessage(10, "please investigate why the tests are flaky"))
 	var got *core.Message
 	select {
 	case got = <-handled:
-		if got.SessionKey != "telegram:-1001234567890:pending-10:7" {
-			t.Fatalf("SessionKey = %q, want provisional key", got.SessionKey)
-		}
-		if got.ChannelKey != "-1001234567890:1" {
-			t.Fatalf("ChannelKey = %q, want source General topic for workspace resolution", got.ChannelKey)
-		}
-		if got.DeferredRoute == nil {
-			t.Fatal("DeferredRoute is nil")
-		}
-		if rc := got.ReplyCtx.(replyContext); rc.deferred == nil {
-			t.Fatalf("ReplyCtx = %#v, want deferred target", rc)
-		}
 	case <-time.After(time.Second):
-		t.Fatal("message was not dispatched before title generation completed")
+		t.Fatal("message not dispatched")
 	}
+	if got.SessionKey != "telegram:-100123:77:7" || got.ChannelKey != "-100123:77" {
+		t.Fatalf("session/channel = %q/%q, want final topic", got.SessionKey, got.ChannelKey)
+	}
+	if got.WorkspaceSourceChannelKey != "-100123:1" {
+		t.Fatalf("workspace source = %q", got.WorkspaceSourceChannelKey)
+	}
+	rc := got.ReplyCtx.(replyContext)
+	if rc.threadID != 77 || rc.deliveryReady == nil {
+		t.Fatalf("ReplyCtx = %#v", rc)
+	}
+	stubBot.mu.Lock()
+	if stubBot.createForumTopicCalls != 1 || stubBot.createForumTopicParams[0].Name != "New request · 10" {
+		t.Fatalf("fallback creation = %d/%#v", stubBot.createForumTopicCalls, stubBot.createForumTopicParams)
+	}
+	if stubBot.setReactionCalls != 0 {
+		t.Fatalf("General reaction calls = %d", stubBot.setReactionCalls)
+	}
+	stubBot.mu.Unlock()
 
 	select {
 	case input := <-titleStarted:
@@ -1036,252 +1041,309 @@ func TestHandleMessageGeneralForumTopicDefersCreationUntilLLMTitle(t *testing.T)
 			t.Fatalf("title input = %q", input)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("title generation did not start")
-	}
-	stubBot.mu.Lock()
-	if stubBot.createForumTopicCalls != 0 {
-		t.Fatalf("CreateForumTopic calls before title = %d, want 0", stubBot.createForumTopicCalls)
-	}
-	if stubBot.setReactionCalls != 0 {
-		t.Fatalf("reaction calls in General = %d, want 0", stubBot.setReactionCalls)
-	}
-	stubBot.mu.Unlock()
-
-	close(releaseTitle)
-	var route core.DeferredRouteResult
-	select {
-	case route = <-got.DeferredRoute.Result:
-	case <-time.After(time.Second):
-		t.Fatal("deferred route did not resolve")
-	}
-	if route.Err != nil {
-		t.Fatalf("route error = %v", route.Err)
-	}
-	if route.SessionKey != "telegram:-1001234567890:77:7" || route.ChannelKey != "-1001234567890:77" {
-		t.Fatalf("route = %#v, want dedicated topic", route)
-	}
-	if calls := stubBot.SendMessageCallCount(); calls != 1 {
-		t.Fatalf("messages before core binding = %d, want only original-message link", calls)
-	}
-	stubBot.mu.Lock()
-	originLink := stubBot.sendMessageParams[0]
-	stubBot.mu.Unlock()
-	if originLink.MessageThreadID != 77 || originLink.Text != "<a href=\"https://t.me/testforum/10\">Replying to:</a>\nplease investigate why the tests are flaky" || originLink.ParseMode != models.ParseModeHTML || originLink.ReplyParameters != nil {
-		t.Fatalf("first topic message = %#v, want original-message link", originLink)
-	}
-	if originLink.LinkPreviewOptions == nil || originLink.LinkPreviewOptions.IsDisabled == nil || !*originLink.LinkPreviewOptions.IsDisabled {
-		t.Fatalf("first topic message link preview = %#v, want disabled", originLink.LinkPreviewOptions)
-	}
-	got.DeferredRoute.Bound <- nil
-
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
-	stubBot.mu.Lock()
-	defer stubBot.mu.Unlock()
-	if stubBot.createForumTopicCalls != 1 {
-		t.Fatalf("CreateForumTopic calls = %d, want 1", stubBot.createForumTopicCalls)
-	}
-	if got := stubBot.createForumTopicParams[0]; got.ChatID != int64(-1001234567890) || got.Name != "Investigate flaky tests" {
-		t.Fatalf("CreateForumTopic params = %#v", got)
-	}
-	if len(stubBot.sendMessageParams) != 2 {
-		t.Fatalf("SendMessage calls = %d, want origin link and topic handoff", len(stubBot.sendMessageParams))
-	}
-	linkReply := stubBot.sendMessageParams[1]
-	if linkReply.MessageThreadID != 0 {
-		t.Fatalf("topic link MessageThreadID = %d, want omitted for General", linkReply.MessageThreadID)
-	}
-	if linkReply.ReplyParameters == nil || linkReply.ReplyParameters.MessageID != 10 {
-		t.Fatalf("topic link ReplyParameters = %#v, want reply to message 10", linkReply.ReplyParameters)
-	}
-	if linkReply.Text != "Investigate flaky tests\nhttps://t.me/testforum/77" {
-		t.Fatalf("topic link text = %q", linkReply.Text)
-	}
-}
-
-func TestGeneralForumReplyWaitsForTopicAndUsesFinalThread(t *testing.T) {
-	handled := make(chan *core.Message, 1)
-	releaseTitle := make(chan struct{})
-	stubBot := newStubTelegramBot()
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           stubBot,
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		titleGenerator: func(context.Context, string) (string, error) {
-			<-releaseTitle
-			return "Generated title", nil
-		},
-		handler: func(_ core.Platform, msg *core.Message) {
-			handled <- msg
-			go func() {
-				<-msg.DeferredRoute.Result
-				msg.DeferredRoute.Bound <- nil
-			}()
-		},
-	}
-	p.handleMessage(context.Background(), &models.Message{
-		ID: 10, MessageThreadID: 1, Text: "do useful work", Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-	var msg *core.Message
-	select {
-	case msg = <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("message not dispatched")
+		t.Fatal("title generation did not start after dispatch")
 	}
 
 	replyDone := make(chan error, 1)
-	go func() { replyDone <- p.Reply(context.Background(), msg.ReplyCtx, "agent result") }()
-	time.Sleep(20 * time.Millisecond)
-	if calls := stubBot.SendMessageCallCount(); calls != 0 {
-		t.Fatalf("SendMessage calls before topic creation = %d, want 0", calls)
-	}
-
-	close(releaseTitle)
+	go func() { replyDone <- p.Reply(context.Background(), got.ReplyCtx, "agent result") }()
 	select {
 	case err := <-replyDone:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("deferred reply did not unblock")
+		t.Fatal("agent output did not release")
 	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 3 })
+	close(releaseTitle)
+	waitForTelegramTest(t, time.Second, func() bool {
+		stubBot.mu.Lock()
+		defer stubBot.mu.Unlock()
+		return stubBot.editForumTopicCalls == 1
+	})
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "<a href=\"https://t.me/c/123/10\">Replying to:</a>\ndo useful work" || first.ParseMode != models.ParseModeHTML {
-		t.Fatalf("first topic message = %#v, want original-message link", first)
+	if stubBot.editForumTopicParams[0].Name != "Investigate flaky tests" {
+		t.Fatalf("renamed topic = %#v", stubBot.editForumTopicParams[0])
 	}
-	foundAgentReply := false
-	for _, params := range stubBot.sendMessageParams {
-		if params.Text == "agent result" {
-			foundAgentReply = true
-			if params.MessageThreadID != 77 {
-				t.Fatalf("agent reply thread = %d, want 77", params.MessageThreadID)
-			}
-			if params.ReplyParameters != nil {
-				t.Fatalf("agent reply has cross-topic reply parameters: %#v", params.ReplyParameters)
-			}
+	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != `<a href="https://t.me/testforum/10">Replying to:</a>
+please investigate why the tests are flaky` {
+		t.Fatalf("first topic message = %#v", first)
+	}
+	for i, params := range stubBot.sendMessageParams {
+		if params.Text == "agent result" && i == 0 {
+			t.Fatal("agent output preceded source reference")
 		}
-	}
-	if !foundAgentReply {
-		t.Fatal("agent reply was not sent")
 	}
 }
 
-func TestGeneralForumLLMTitleFailureDoesNotCreateTopic(t *testing.T) {
-	handled := make(chan *core.Message, 1)
+func TestGeneralForumOptionalTitleFailuresKeepFallbackAndOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		generator func(context.Context, string) (string, error)
+		editErr   error
+	}{
+		{name: "missing generator"},
+		{name: "generator error", generator: func(context.Context, string) (string, error) { return "", errors.New("model unavailable") }},
+		{name: "timeout", generator: func(context.Context, string) (string, error) { return "", context.DeadlineExceeded }},
+		{name: "empty", generator: func(context.Context, string) (string, error) { return "", nil }},
+		{name: "direct response", generator: func(context.Context, string) (string, error) { return "Sure, I can help", nil }},
+		{name: "edit failure", generator: func(context.Context, string) (string, error) { return "Useful title", nil }, editErr: errors.New("edit denied")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubBot := newStubTelegramBot()
+			stubBot.editForumTopicErr = tt.editErr
+			handled := make(chan *core.Message, 1)
+			p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42, Username: "mybot"}, titleGenerator: tt.generator,
+				handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+			p.handleMessage(context.Background(), generalForumMessage(10, "do useful work"))
+			msg := <-handled
+			if msg.SessionKey != "telegram:-100123:77:7" {
+				t.Fatalf("SessionKey = %q", msg.SessionKey)
+			}
+			if err := p.Reply(context.Background(), msg.ReplyCtx, "done"); err != nil {
+				t.Fatal(err)
+			}
+			waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() >= 3 })
+			stubBot.mu.Lock()
+			defer stubBot.mu.Unlock()
+			if stubBot.createForumTopicCalls != 1 || stubBot.createForumTopicParams[0].Name != "New request · 10" {
+				t.Fatalf("fallback topic missing: %#v", stubBot.createForumTopicParams)
+			}
+			wantEdits := 0
+			if tt.name == "edit failure" {
+				wantEdits = 1
+			}
+			if stubBot.editForumTopicCalls != wantEdits {
+				t.Fatalf("EditForumTopic calls = %d, want %d", stubBot.editForumTopicCalls, wantEdits)
+			}
+		})
+	}
+}
+
+func TestGeneralForumSourceReferenceFallbackAndFailureReleaseOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		errs      map[int]error
+		wantCalls int
+		wantPlain bool
+	}{
+		{name: "html parse fallback", errs: map[int]error{1: errors.New("Bad Request: can't parse entities")}, wantCalls: 4, wantPlain: true},
+		{name: "both reference sends fail", errs: map[int]error{1: errors.New("can't parse entities"), 2: errors.New("send failed")}, wantCalls: 4},
+		{name: "api failure", errs: map[int]error{1: errors.New("network failed")}, wantCalls: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubBot := newStubTelegramBot()
+			stubBot.sendMessageErrByCall = tt.errs
+			handled := make(chan *core.Message, 1)
+			p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+			p.handleMessage(context.Background(), generalForumMessage(10, "hello"))
+			msg := <-handled
+			if err := p.Send(context.Background(), msg.ReplyCtx, "agent output"); err != nil {
+				t.Fatal(err)
+			}
+			waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == tt.wantCalls })
+			stubBot.mu.Lock()
+			defer stubBot.mu.Unlock()
+			if tt.wantPlain && stubBot.sendMessageParams[1].ParseMode != "" {
+				t.Fatalf("plain fallback ParseMode = %q", stubBot.sendMessageParams[1].ParseMode)
+			}
+			for _, params := range stubBot.sendMessageParams {
+				if params.Text == "agent output" && params.MessageThreadID != 77 {
+					t.Fatalf("output thread = %d", params.MessageThreadID)
+				}
+			}
+		})
+	}
+}
+
+func TestGeneralForumAttachmentDownloadFailureIsVisibleAndDoesNotCreateTopic(t *testing.T) {
 	stubBot := newStubTelegramBot()
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           stubBot,
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		titleGenerator: func(context.Context, string) (string, error) {
-			return "", errors.New("model unavailable")
-		},
-		handler: func(_ core.Platform, msg *core.Message) { handled <- msg },
+	stubBot.getFileErr = errors.New("download unavailable")
+	var handled atomic.Int32
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(core.Platform, *core.Message) { handled.Add(1) }}
+	msg := generalForumMessage(10, "")
+	msg.Photo = []models.PhotoSize{{FileID: "photo"}}
+	p.handleMessage(context.Background(), msg)
+	if handled.Load() != 0 {
+		t.Fatal("failed attachment dispatched")
 	}
-	p.handleMessage(context.Background(), &models.Message{
-		ID: 10, MessageThreadID: 1, Text: "do useful work", Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-	var msg *core.Message
-	select {
-	case msg = <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("message not dispatched early")
-	}
-	select {
-	case route := <-msg.DeferredRoute.Result:
-		if route.Err == nil {
-			t.Fatal("route error is nil")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("route failure not delivered")
-	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 1 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if stubBot.createForumTopicCalls != 0 {
-		t.Fatalf("CreateForumTopic calls = %d, want 0", stubBot.createForumTopicCalls)
+	if stubBot.createForumTopicCalls != 0 || stubBot.sendMessageCalls != 1 {
+		t.Fatalf("topic/reply calls = %d/%d", stubBot.createForumTopicCalls, stubBot.sendMessageCalls)
 	}
-	if got := stubBot.sendMessageParams[0].Text; got != "Could not name the new topic. Please try again." {
-		t.Fatalf("failure text = %q", got)
+	if got := stubBot.sendMessageParams[0]; got.ReplyParameters == nil || got.ReplyParameters.MessageID != 10 || !strings.Contains(got.Text, "download") {
+		t.Fatalf("attachment failure reply = %#v", got)
+	}
+}
+
+func TestGeneralForumTopicCreationRateLimitRetryIsBounded(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.createForumTopicErr = &tgbot.TooManyRequestsError{Message: "rate limited", RetryAfter: 0}
+	var handled atomic.Int32
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(core.Platform, *core.Message) { handled.Add(1) }}
+	p.handleMessage(context.Background(), generalForumMessage(10, "hello"))
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if stubBot.createForumTopicCalls != 2 || handled.Load() != 0 {
+		t.Fatalf("create calls/dispatches = %d/%d, want bounded retry and no dispatch", stubBot.createForumTopicCalls, handled.Load())
+	}
+}
+
+func TestGeneralForumCreationFailureDoesNotDispatch(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	stubBot.createForumTopicErr = errors.New("not enough rights")
+	var handled atomic.Int32
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(core.Platform, *core.Message) { handled.Add(1) }}
+	p.handleMessage(context.Background(), generalForumMessage(10, "hello"))
+	if handled.Load() != 0 {
+		t.Fatal("Pi dispatched after topic creation failure")
+	}
+	if stubBot.SendMessageCallCount() != 1 {
+		t.Fatalf("failure replies = %d", stubBot.SendMessageCallCount())
+	}
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if reply := stubBot.sendMessageParams[0].ReplyParameters; reply == nil || reply.MessageID != 10 {
+		t.Fatalf("failure reply = %#v", reply)
+	}
+}
+
+func TestGeneralForumTitleWorkDropsWhenWorkerSaturated(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	p := &Platform{
+		groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42},
+		titleGenerator: func(context.Context, string) (string, error) {
+			if calls.Add(1) == 1 {
+				close(firstStarted)
+				<-releaseFirst
+			}
+			return "Useful title", nil
+		},
+		handler: func(core.Platform, *core.Message) {},
+	}
+	p.handleMessage(context.Background(), generalForumMessage(10, "first"))
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first title worker did not start")
+	}
+	p.handleMessage(context.Background(), generalForumMessage(11, "second"))
+	waitForTelegramTest(t, time.Second, func() bool {
+		stubBot.mu.Lock()
+		defer stubBot.mu.Unlock()
+		return stubBot.createForumTopicCalls == 2
+	})
+	time.Sleep(20 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("title generator calls = %d, want saturated work dropped", got)
+	}
+	close(releaseFirst)
+}
+
+func TestGeneralForumDuplicateConcurrentAndReplayDispatchOnce(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	var handled atomic.Int32
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(core.Platform, *core.Message) { handled.Add(1) }}
+	msg := generalForumMessage(10, "hello")
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() { defer wg.Done(); p.handleMessage(context.Background(), msg) }()
+	}
+	wg.Wait()
+	p.handleMessage(context.Background(), msg)
+	if handled.Load() != 1 {
+		t.Fatalf("dispatches = %d, want 1", handled.Load())
+	}
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if stubBot.createForumTopicCalls != 1 {
+		t.Fatalf("topics = %d, want 1", stubBot.createForumTopicCalls)
+	}
+}
+
+func TestGeneralForumSynchronousCommandReplyDoesNotDeadlockBarrier(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	done := make(chan error, 1)
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}}
+	p.handler = func(platform core.Platform, msg *core.Message) {
+		done <- platform.Reply(context.Background(), msg.ReplyCtx, "command result")
+	}
+	go p.handleMessage(context.Background(), generalForumMessage(10, "/help"))
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("synchronous reply deadlocked on source barrier")
+	}
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if len(stubBot.sendMessageParams) < 2 || stubBot.sendMessageParams[0].MessageThreadID != 77 {
+		t.Fatalf("source reference was not first: %#v", stubBot.sendMessageParams)
+	}
+}
+
+func TestGeneralForumFollowUpUsesSameFinalSessionKey(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	handled := make(chan *core.Message, 2)
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+	p.handleMessage(context.Background(), generalForumMessage(10, "start"))
+	first := <-handled
+	p.handleMessage(context.Background(), &models.Message{
+		ID: 11, MessageThreadID: 77, Text: "follow up", Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7}, Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
+	})
+	second := <-handled
+	if first.SessionKey != "telegram:-100123:77:7" || second.SessionKey != first.SessionKey {
+		t.Fatalf("session keys = %q/%q", first.SessionKey, second.SessionKey)
+	}
+}
+
+func TestMediaGroupTimerDoesNotDispatchAfterStop(t *testing.T) {
+	var handled atomic.Int32
+	p := &Platform{
+		groupReplyAll: true, mediaGroupDebounce: 20 * time.Millisecond,
+		bot: newStubTelegramBot(), selfUser: &models.User{ID: 42},
+		handler: func(core.Platform, *core.Message) { handled.Add(1) },
+	}
+	p.handleMessage(context.Background(), telegramPhotoMessage(1, 100, 7, "album", "photo", "caption"))
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if handled.Load() != 0 {
+		t.Fatalf("dispatches after Stop = %d", handled.Load())
 	}
 }
 
 func TestHandleMessageGeneralForumTopicWithoutUsernameUsesPrivateLink(t *testing.T) {
-	handled := make(chan *core.Message, 1)
 	stubBot := newStubTelegramBot()
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           stubBot,
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		titleGenerator: func(context.Context, string) (string, error) {
-			return "Private forum request", nil
-		},
-		handler: func(_ core.Platform, msg *core.Message) { handled <- msg },
+	handled := make(chan *core.Message, 1)
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+	msg := generalForumMessage(11, "private forum request")
+	msg.Chat.Username = ""
+	msg.Chat.ID = -1009876543210
+	p.handleMessage(context.Background(), msg)
+	got := <-handled
+	if err := p.Send(context.Background(), got.ReplyCtx, "done"); err != nil {
+		t.Fatal(err)
 	}
-
-	p.handleMessage(context.Background(), &models.Message{
-		ID:   11,
-		Text: "private forum request",
-		Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -1009876543210, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-
-	var gotMessage *core.Message
-	select {
-	case gotMessage = <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("message not handled")
-	}
-	select {
-	case result := <-gotMessage.DeferredRoute.Result:
-		if result.Err != nil {
-			t.Fatalf("route error = %v", result.Err)
-		}
-		gotMessage.DeferredRoute.Bound <- nil
-	case <-time.After(time.Second):
-		t.Fatal("route did not resolve")
-	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 3 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if got := stubBot.sendMessageParams[0]; got.Text != "<a href=\"https://t.me/c/9876543210/11\">Replying to:</a>\nprivate forum request" || got.MessageThreadID != 77 || got.ParseMode != models.ParseModeHTML {
-		t.Fatalf("original-message link = %#v", got)
+	if first := stubBot.sendMessageParams[0]; !strings.Contains(first.Text, "https://t.me/c/9876543210/11") {
+		t.Fatalf("private source link = %q", first.Text)
 	}
-	if got := stubBot.sendMessageParams[1].Text; got != "Private forum request\nhttps://t.me/c/9876543210/77" {
-		t.Fatalf("topic link text = %q", got)
-	}
-}
-
-func TestHandleMessageUsesProvisionalSessionWhileTopicBindingIsPending(t *testing.T) {
-	handled := make(chan *core.Message, 1)
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           newStubTelegramBot(),
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		handler:       func(_ core.Platform, msg *core.Message) { handled <- msg },
-	}
-	p.setPendingTopicRoute(-100123, 77, 7, "telegram:-100123:pending-10:7")
-	p.handleMessage(context.Background(), &models.Message{
-		ID: 11, MessageThreadID: 77, Text: "message during binding", Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-	select {
-	case msg := <-handled:
-		if msg.SessionKey != "telegram:-100123:pending-10:7" {
-			t.Fatalf("SessionKey = %q, want provisional binding", msg.SessionKey)
-		}
-		if msg.ChannelKey != "-100123:77" {
-			t.Fatalf("ChannelKey = %q, want final topic channel", msg.ChannelKey)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("message not handled")
+	if handoff := stubBot.sendMessageParams[1]; handoff.Text != "https://t.me/c/9876543210/77" || handoff.ReplyParameters == nil || handoff.ReplyParameters.MessageID != 11 {
+		t.Fatalf("private handoff = %#v", handoff)
 	}
 }
 
@@ -1369,131 +1431,6 @@ func TestHandleMessageRejectedInGeneralForumDoesNotCreateTopic(t *testing.T) {
 	}
 }
 
-func TestHandleMessageGeneralForumTopicCreationFailureDispatchesEarlyThenFailsRoute(t *testing.T) {
-	handled := make(chan *core.Message, 1)
-	stubBot := newStubTelegramBot()
-	stubBot.createForumTopicErr = errors.New("not enough rights")
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           stubBot,
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		titleGenerator: func(context.Context, string) (string, error) {
-			return "Friendly greeting", nil
-		},
-		handler: func(_ core.Platform, msg *core.Message) { handled <- msg },
-	}
-	p.handleMessage(context.Background(), &models.Message{
-		ID: 10, MessageThreadID: 1, Text: "hello", Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-
-	var got *core.Message
-	select {
-	case got = <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("message was not dispatched early")
-	}
-	select {
-	case result := <-got.DeferredRoute.Result:
-		if result.Err == nil {
-			t.Fatal("route error is nil")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("failed route did not resolve")
-	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 1 })
-	stubBot.mu.Lock()
-	defer stubBot.mu.Unlock()
-	failure := stubBot.sendMessageParams[0]
-	if failure.ReplyParameters == nil || failure.ReplyParameters.MessageID != 10 {
-		t.Fatalf("failure ReplyParameters = %#v, want reply to message 10", failure.ReplyParameters)
-	}
-}
-
-func TestHandleMessageOriginalLinkFailureDoesNotBindSession(t *testing.T) {
-	handled := make(chan *core.Message, 1)
-	stubBot := newStubTelegramBot()
-	stubBot.sendMessageErrByCall = map[int]error{1: errors.New("send failed")}
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           stubBot,
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		titleGenerator: func(context.Context, string) (string, error) {
-			return "Friendly greeting", nil
-		},
-		handler: func(_ core.Platform, msg *core.Message) { handled <- msg },
-	}
-	p.handleMessage(context.Background(), &models.Message{
-		ID: 10, MessageThreadID: 1, Text: "hello", Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-
-	var msg *core.Message
-	select {
-	case msg = <-handled:
-	case <-time.After(time.Second):
-		t.Fatal("message was not dispatched early")
-	}
-	select {
-	case result := <-msg.DeferredRoute.Result:
-		if result.Err == nil {
-			t.Fatal("route was bound despite original-link failure")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("failed route did not resolve")
-	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
-	stubBot.mu.Lock()
-	defer stubBot.mu.Unlock()
-	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != "<a href=\"https://t.me/c/123/10\">Replying to:</a>\nhello" || first.ParseMode != models.ParseModeHTML {
-		t.Fatalf("attempted original-message link = %#v", first)
-	}
-	failure := stubBot.sendMessageParams[1]
-	if failure.ReplyParameters == nil || failure.ReplyParameters.MessageID != 10 {
-		t.Fatalf("failure ReplyParameters = %#v, want reply to message 10", failure.ReplyParameters)
-	}
-	if failure.Text != "The topic was created, but the original message link could not be added. Please try again." {
-		t.Fatalf("failure text = %q", failure.Text)
-	}
-}
-
-func TestHandleMessageGeneralForumTopicLinkFailureKeepsEarlyDispatch(t *testing.T) {
-	var handled atomic.Int32
-	stubBot := newStubTelegramBot()
-	stubBot.sendMessageErrByCall = map[int]error{2: errors.New("send failed")}
-	p := &Platform{
-		groupReplyAll: true,
-		bot:           stubBot,
-		selfUser:      &models.User{ID: 42, Username: "mybot"},
-		titleGenerator: func(context.Context, string) (string, error) {
-			return "Friendly greeting", nil
-		},
-		handler: func(_ core.Platform, msg *core.Message) {
-			handled.Add(1)
-			go func() {
-				<-msg.DeferredRoute.Result
-				msg.DeferredRoute.Bound <- nil
-			}()
-		},
-	}
-	p.handleMessage(context.Background(), &models.Message{
-		ID: 10, MessageThreadID: 1, Text: "hello", Date: int(time.Now().Unix()),
-		From: &models.User{ID: 7, Username: "alice"},
-		Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
-	})
-
-	if handled.Load() != 1 {
-		t.Fatal("message was not dispatched before the handoff link")
-	}
-	waitForTelegramTest(t, time.Second, func() bool {
-		stubBot.mu.Lock()
-		defer stubBot.mu.Unlock()
-		return stubBot.createForumTopicCalls == 1 && len(stubBot.sendMessageParams) == 2
-	})
-}
-
 func TestForumTopicNamingInputFallbacks(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1543,6 +1480,27 @@ fifth…`
 	}
 	if lines := strings.Count(got, "\n"); lines != 5 {
 		t.Fatalf("newline count = %d, want header plus five snippet lines", lines)
+	}
+}
+
+func TestOriginalMessageReferenceBoundsLongContentForTelegram(t *testing.T) {
+	msg := &models.Message{
+		ID:   12,
+		Text: strings.Repeat("界<&", 3000) + "\nsecond\nthird\nfourth\nfifth\nsixth",
+		Chat: models.Chat{ID: -100123},
+	}
+	htmlText, plainText := originalMessageReferences(msg)
+	if utf16Len(plainText) > telegramMessageLimit {
+		t.Fatalf("plain reference UTF-16 length = %d", utf16Len(plainText))
+	}
+	if strings.Count(plainText, "\n") > 5 {
+		t.Fatalf("reference has too many lines: %d", strings.Count(plainText, "\n")+1)
+	}
+	if !strings.Contains(htmlText, "&lt;") || !strings.Contains(htmlText, "&amp;") {
+		t.Fatal("HTML reference did not escape source")
+	}
+	if !strings.HasSuffix(plainText, "…") {
+		t.Fatal("long reference was not truncated")
 	}
 }
 
@@ -1681,25 +1639,34 @@ func TestHandleMessageGeneralForumMediaGroupCreatesOneTopic(t *testing.T) {
 	var got *core.Message
 	select {
 	case got = <-handled:
-		if got.SessionKey != "telegram:-100123:pending-2:7" || len(got.Images) != 2 {
-			t.Fatalf("session/images = %q/%d, want provisional topic session with album", got.SessionKey, len(got.Images))
+		if got.SessionKey != "telegram:-100123:77:7" || len(got.Images) != 2 {
+			t.Fatalf("session/images = %q/%d, want final topic session with album", got.SessionKey, len(got.Images))
 		}
 	case <-time.After(time.Second):
 		t.Fatal("media group not handled")
 	}
+	waitForTelegramTest(t, time.Second, func() bool {
+		stubBot.mu.Lock()
+		defer stubBot.mu.Unlock()
+		return stubBot.editForumTopicCalls == 1
+	})
+	late := telegramPhotoMessage(3, -100123, 7, "album", "photo-3", "late")
+	late.Chat = models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true}
+	late.MessageThreadID = 1
+	p.handleMessage(context.Background(), late)
+	time.Sleep(2 * p.mediaGroupDebounce)
 	select {
-	case route := <-got.DeferredRoute.Result:
-		if route.Err != nil || route.SessionKey != "telegram:-100123:77:7" {
-			t.Fatalf("route = %#v", route)
-		}
-		got.DeferredRoute.Bound <- nil
-	case <-time.After(time.Second):
-		t.Fatal("media group route not resolved")
+	case duplicate := <-handled:
+		t.Fatalf("sealed media group dispatched twice: %#v", duplicate)
+	default:
 	}
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if stubBot.createForumTopicCalls != 1 || stubBot.createForumTopicParams[0].Name != "Singapore trip photos" {
-		t.Fatalf("topic calls/params = %d/%#v, want one LLM-named topic", stubBot.createForumTopicCalls, stubBot.createForumTopicParams)
+	if stubBot.createForumTopicCalls != 1 || stubBot.createForumTopicParams[0].Name != "New request · 2" {
+		t.Fatalf("topic calls/params = %d/%#v, want one fallback-named topic", stubBot.createForumTopicCalls, stubBot.createForumTopicParams)
+	}
+	if stubBot.editForumTopicParams[0].Name != "Singapore trip photos" {
+		t.Fatalf("renamed topic = %#v", stubBot.editForumTopicParams[0])
 	}
 }
 
