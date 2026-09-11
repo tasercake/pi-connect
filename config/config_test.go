@@ -224,6 +224,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	tru, fal := true, false
 	compact := DisplayModeCompact
 	quiet := DisplayModeQuiet
+	staging := DisplayModeStaging
 	tests := []struct {
 		name     string
 		cfg      Config
@@ -282,6 +283,22 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			wantMode: "compact",
 			wantTM:   false,
 			wantTool: false,
+		},
+		{
+			name:     "explicit mode staging shows progress by default",
+			cfg:      Config{Display: DisplayConfig{Mode: &staging}},
+			proj:     ProjectConfig{},
+			wantMode: "staging",
+			wantTM:   true,
+			wantTool: true,
+		},
+		{
+			name:     "project staging overrides global quiet",
+			cfg:      Config{Display: DisplayConfig{Mode: &quiet}},
+			proj:     ProjectConfig{Display: &DisplayConfig{Mode: &staging}},
+			wantMode: "staging",
+			wantTM:   true,
+			wantTool: true,
 		},
 		{
 			name:     "project mode overrides global mode",
@@ -442,6 +459,15 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 }
 
+func TestValidateStagingDisplayConfig(t *testing.T) {
+	staging := DisplayModeStaging
+	cfg := Config{Display: DisplayConfig{Mode: &staging}, Projects: []ProjectConfig{validProject("demo")}}
+	cfg.Projects[0].Display = &DisplayConfig{Mode: &staging}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("staging display config rejected: %v", err)
+	}
+}
+
 func TestValidateProjectDisplayConfig(t *testing.T) {
 	mode := "verbose"
 	cardMode := "modern"
@@ -454,7 +480,7 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 		{
 			name:    "invalid project display mode",
 			display: &DisplayConfig{Mode: &mode},
-			wantErr: `projects[0].display.mode must be "full", "compact", or "quiet"`,
+			wantErr: `projects[0].display.mode must be "full", "quiet", "staging", or "compact"`,
 		},
 		{
 			name:    "invalid project card mode",

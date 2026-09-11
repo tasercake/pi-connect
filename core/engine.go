@@ -119,7 +119,7 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
+	Mode             string // "full" (default), "quiet", "staging", or "compact" — progress delivery
 	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages bool
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
@@ -3914,11 +3914,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	workspaceDir := state.workspaceDir
 	agentSession := state.agentSession
 	replyAgent := state.agent
+	turnPlatform := state.platform
+	turnReplyCtx := state.replyCtx
 	if replyAgent == nil {
 		replyAgent = e.agent
 	}
+	state.mu.Unlock()
+
 	workspaceRenderer := func(content string) string {
-		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
+		return e.renderOutgoingContentForWorkspace(turnPlatform, content, workspaceDir)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
 		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
@@ -3927,33 +3931,38 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 
+	// Staging owns the only progress message when both required capabilities work.
+	staging := newStagingProgressWriter(e.ctx, turnPlatform, turnReplyCtx, turnStart, e.i18n.CurrentLang(), workspaceRenderer, nil)
+	stagingActive := e.display.Mode == "staging" && staging.Start()
+	defer func() { staging.Stop() }()
+
 	// Streaming card: aggregate entire turn into a single updatable card.
+	// It must not compete with staging for the progress-message handle.
 	var streamCard StreamingCard
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
-		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
-			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
-		} else {
-			streamCard = sc
-			slog.Info("streaming card created for turn", "session", sessionKey)
+	if !stagingActive {
+		if scp, ok := turnPlatform.(StreamingCardPlatform); ok {
+			if sc, err := scp.CreateStreamingCard(e.ctx, turnReplyCtx); err != nil {
+				slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
+			} else {
+				streamCard = sc
+				slog.Info("streaming card created for turn", "session", sessionKey)
+			}
 		}
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
-	state.mu.Unlock()
+	sp := newStreamPreview(e.streamPreview, turnPlatform, turnReplyCtx, e.ctx, workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, turnPlatform, turnReplyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 
-	// Send instant confirmation reply if enabled and no streaming card is active.
-	// Streaming cards provide their own "processing" indicator, so instant reply
-	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
+	// Staging's initial header is the processing indicator, so do not duplicate it.
+	if e.instantReply.Enabled && streamCard == nil && !stagingActive {
 		replyContent := e.instantReply.Content
 		if replyContent == "" {
 			replyContent = e.i18n.T(MsgStarting)
 		}
-		e.send(state.platform, state.replyCtx, replyContent)
+		e.send(turnPlatform, turnReplyCtx, replyContent)
 	}
 
 	// Foreground watchdog: idle_timeout is a soft observation threshold.
@@ -4005,6 +4014,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	defer cancelStallControl()
 	terminalStall := func(message MsgKey, cause string) {
+		if stagingActive {
+			staging.AppendError(e.i18n.T(message))
+			staging.Finalize(stagingStateFailed)
+			stagingActive = false
+		}
 		cp.Finalize(ProgressCardStateFailed)
 		sp.discard()
 		state.mu.Lock()
@@ -4040,6 +4054,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		select {
 		case <-stopCh:
+			if stagingActive {
+				staging.Finalize(stagingStateCancelled)
+				stagingActive = false
+			}
 			sp.discard()
 			return
 		case event, ok = <-events:
@@ -4053,6 +4071,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				unknown := errors.As(err, &outcomeUnknown) && outcomeUnknown.OutcomeUnknown()
 				e.setRuntimeTurn(state, msgID, unknown, unknown)
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+				if stagingActive {
+					staging.AppendError(e.userFacingAgentError(err))
+					staging.Finalize(stagingStateFailed)
+					stagingActive = false
+				}
 				sp.discard()
 				if stopTyping != nil {
 					stopTyping()
@@ -4189,6 +4212,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			continue
 		case <-e.ctx.Done():
+			if stagingActive {
+				staging.Finalize(stagingStateCancelled)
+				stagingActive = false
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -4234,7 +4261,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if e.display.CardMode != "rich" || stagingActive {
 			hasRichCard = false
 		}
 
@@ -4244,6 +4271,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
 				break
+			}
+			if stagingActive && e.display.ThinkingMessages {
+				if staging.AppendThinking(event.Content) {
+					break
+				}
+				stagingActive = false
 			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
@@ -4335,6 +4368,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			if stagingActive && e.display.ToolMessages {
+				if staging.AppendToolUse(toolCount, event.ToolName, event.ToolInput) {
+					break
+				}
+				stagingActive = false
+			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
@@ -4460,6 +4499,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			if stagingActive && e.display.ToolMessages {
+				result := strings.TrimSpace(event.ToolResult)
+				if result == "" {
+					result = strings.TrimSpace(event.Content)
+				}
+				if staging.AppendToolResult(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess) {
+					break
+				}
+				stagingActive = false
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -4508,7 +4557,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" && !isEllipsisOnly(event.Content) {
-				if streamCard != nil && !streamCard.Failed() {
+				stagingHandled := false
+				if stagingActive {
+					stagingHandled = staging.AppendText(event.Content)
+					if !stagingHandled {
+						stagingActive = false
+					}
+				}
+				if stagingHandled {
+					// Keep text for history/final response, but do not create normal previews.
+					textParts = append(textParts, event.Content)
+					partialText += event.Content
+				} else if streamCard != nil && !streamCard.Failed() {
 					// Streaming card path (e.g. DingTalk AI Card): aggregate
 					// answer text into a single updatable card message.
 					textParts = append(textParts, event.Content) // always accumulate for history
@@ -4578,6 +4638,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventPermissionRequest:
 			isAskQuestion := event.ToolName == "AskUserQuestion" && len(event.Questions) > 0
+
+			// Permission UI remains separate and actionable. Update timeline first.
+			if stagingActive {
+				if !staging.AppendPermission(event.ToolName, event.ToolInput) {
+					stagingActive = false
+				}
+			}
 
 			state.mu.Lock()
 			autoApprove := state.approveAll
@@ -4660,6 +4727,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			resetStallTimer(e.eventIdleTimeout)
 
 		case EventResult:
+			if stagingActive {
+				staging.Finalize(stagingStateCompleted)
+				stagingActive = false
+			}
 			cp.Finalize(ProgressCardStateCompleted)
 			state.mu.Lock()
 			currentAgentSession := state.agentSession
@@ -5001,6 +5072,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
+				staging.Stop()
+				staging = newStagingProgressWriter(e.ctx, queued.platform, queued.replyCtx, turnStart, e.i18n.CurrentLang(), queuedRenderer, nil)
+				stagingActive = e.display.Mode == "staging" && staging.Start()
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
@@ -5010,17 +5084,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardThinkingText = ""
 				cardAnswerText.Reset()
 
-				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
-					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
-						slog.Warn("streaming card creation failed for queued turn", "error", err)
-					} else {
-						streamCard = sc
+				// Try to create a new streaming card for the queued turn.
+				if !stagingActive {
+					if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+						if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
+							slog.Warn("streaming card creation failed for queued turn", "error", err)
+						} else {
+							streamCard = sc
+						}
 					}
 				}
 
-				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
+				// Staging/card already provides an initial processing message.
+				if e.instantReply.Enabled && streamCard == nil && !stagingActive {
 					replyContent := e.instantReply.Content
 					if replyContent == "" {
 						replyContent = e.i18n.T(MsgStarting)
@@ -5068,6 +5144,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
+			if stagingActive {
+				errorText := ""
+				if event.Error != nil {
+					errorText = e.userFacingAgentError(event.Error)
+				}
+				staging.AppendError(errorText)
+				staging.Finalize(stagingStateFailed)
+				stagingActive = false
+			}
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			terminalError := eventErrorIsTerminal(state.agentSession, event.Error)
@@ -5110,8 +5195,17 @@ channelClosed:
 	// Closed channels are expected during engine/session cancellation. Avoid a
 	// false user alert when shutdown wins a select race with channel closure.
 	if e.ctx.Err() != nil || state.isStopped() {
+		if stagingActive {
+			staging.Finalize(stagingStateCancelled)
+			stagingActive = false
+		}
 		sp.discard()
 		return
+	}
+	if stagingActive {
+		staging.AppendError(e.i18n.T(MsgAgentUnexpectedExit))
+		staging.Finalize(stagingStateFailed)
+		stagingActive = false
 	}
 	slog.Warn("agent process exited unexpectedly", "session_key", sessionKey)
 	e.setRuntimeTurn(state, msgID, true, true)
@@ -8572,16 +8666,16 @@ func (e *Engine) applyLiveModeChange(sessionKey, mode string) bool {
 }
 
 func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
-	// /quiet [full|compact|quiet]
-	// Without argument: cycle full → quiet → compact → full.
+	// /quiet [full|quiet|staging|compact]
+	// Without argument: cycle full → quiet → staging → compact → full.
 	// With argument: set mode directly.
 	var newMode string
 	if len(args) > 0 {
 		switch strings.ToLower(args[0]) {
-		case "full", "compact", "quiet":
+		case "full", "quiet", "staging", "compact":
 			newMode = strings.ToLower(args[0])
 		default:
-			e.reply(p, msg.ReplyCtx, "Usage: /quiet [full|compact|quiet]")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietUsage))
 			return
 		}
 	} else {
@@ -8589,6 +8683,8 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		case "full", "":
 			newMode = "quiet"
 		case "quiet":
+			newMode = "staging"
+		case "staging":
 			newMode = "compact"
 		default: // "compact" or unknown
 			newMode = "full"
@@ -8600,7 +8696,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	case "compact", "quiet":
 		e.display.ThinkingMessages = false
 		e.display.ToolMessages = false
-	default:
+	default: // full and staging expose progress; staging writer consumes it.
 		e.display.ThinkingMessages = true
 		e.display.ToolMessages = true
 	}
@@ -8616,6 +8712,8 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	switch newMode {
 	case "quiet":
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietOn))
+	case "staging":
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDisplayModeStaging))
 	case "compact":
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDisplayModeCompact))
 	default:
@@ -12588,8 +12686,8 @@ func (e *Engine) configItems() []configItem {
 	return []configItem{
 		{
 			key:    "mode",
-			desc:   "Display mode: full, compact, quiet",
-			descZh: "显示模式: full, compact, quiet",
+			desc:   "Display mode: full, quiet, staging, compact",
+			descZh: "显示模式: full, quiet, staging, compact",
 			getFunc: func() string {
 				if e.display.Mode == "" {
 					return "full"
@@ -12598,16 +12696,16 @@ func (e *Engine) configItems() []configItem {
 			},
 			setFunc: func(v string) error {
 				switch v {
-				case "full":
-					e.display.Mode = "full"
+				case "full", "staging":
+					e.display.Mode = v
 					e.display.ThinkingMessages = true
 					e.display.ToolMessages = true
-				case "compact", "quiet":
+				case "quiet", "compact":
 					e.display.Mode = v
 					e.display.ThinkingMessages = false
 					e.display.ToolMessages = false
 				default:
-					return fmt.Errorf("must be full, compact, or quiet")
+					return fmt.Errorf("must be full, quiet, staging, or compact")
 				}
 				if e.displaySaveFunc != nil {
 					tm := e.display.ThinkingMessages

@@ -78,13 +78,15 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+# mode = "full"             # Display mode: "full" (default), "quiet", "staging", or "compact"
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
-#                           # compact: hide thinking/tool, each text segment sent separately
-#                           #          隐藏思考和工具消息，每段文本独立发送
 #                           # quiet: hide thinking/tool, all text in one card, done emoji at end
 #                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+#                           # staging: one live-updated progress timeline; final answer separate
+#                           #          一条持续更新的进度时间线；最终答复单独发送
+#                           # compact: hide thinking/tool, each text segment sent separately
+#                           #          隐藏思考和工具消息，每段文本独立发送
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）

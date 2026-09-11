@@ -331,6 +331,10 @@ Notes:
 
 📖 **Full documentation:** [docs/usage.md](docs/usage.md)
 
+### Progress display modes
+
+Use `/quiet` to cycle `full → quiet → staging → compact → full`, or set a mode directly (for example, `/quiet staging`). Staging mode keeps thinking, tool calls/results, and intermediate assistant text in one live-updated timeline, then sends the final answer separately. The same values are accepted by `[display].mode` and per-project display settings.
+
 
 ## 📚 Documentation
 
