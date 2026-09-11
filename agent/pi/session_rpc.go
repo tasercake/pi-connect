@@ -70,6 +70,8 @@ type piRPCSession struct {
 	lastProtocolEvent string
 	healthActivitySeq uint64
 	isCompacting      bool
+	activityActive    bool
+	activitySince     time.Time
 
 	startOnce sync.Once
 	startErr  error
@@ -261,6 +263,7 @@ func newPiRPCSession(ctx context.Context, cmd, workDir, model, mode, thinking, r
 	}
 	s.alive.Store(true)
 	s.healthPhase = core.StallPhaseSettled
+	s.activitySince = time.Now()
 	if resumeID != "" && resumeID != core.ContinueSession {
 		s.sessionID.Store(resumeID)
 	}
@@ -478,7 +481,7 @@ func (s *piRPCSession) handleAgentEvent(raw map[string]any) {
 		case "summarization_retry_scheduled", "summarization_retry_attempt_start":
 			s.setHealthPhase(core.StallPhaseRetrying, true)
 		case "compaction_end", "summarization_retry_finished":
-			s.setHealthPhase(core.StallPhaseRunning, false)
+			s.setHealthPhase(s.phaseAfterCompaction(), false)
 		}
 		s.rpcHandleCompactionEvent(eventType, raw)
 	case "tool_execution_start", "tool_execution_update":
@@ -893,6 +896,139 @@ func (s *piRPCSession) GetContextUsage() *core.ContextUsage {
 	return cloneContextUsage(s.contextUsage)
 }
 
+// GetSessionStatus queries Pi's read-only RPC statistics and then state. The
+// final get_state response makes activity the newest observation, while
+// get_session_stats supplies exact full-session counts and context use.
+func (s *piRPCSession) GetSessionStatus(ctx context.Context) (*core.AgentSessionStatus, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	status := &core.AgentSessionStatus{ProcessAlive: s.Alive()}
+
+	s.procMu.Lock()
+	if s.proc != nil && s.proc.Process != nil {
+		status.PID = s.proc.Process.Pid
+	}
+	s.procMu.Unlock()
+	if !status.ProcessAlive {
+		status.ObservedAt = time.Now()
+		status.Phase = core.StallPhaseProcessDead
+		return status, nil
+	}
+
+	var queryErrs []error
+	statsResp, err := s.callWithTimeoutContext(ctx, map[string]any{"type": "get_session_stats"}, 0)
+	if err != nil {
+		queryErrs = append(queryErrs, fmt.Errorf("get_session_stats: %w", err))
+	} else if !statsResp.success {
+		queryErrs = append(queryErrs, fmt.Errorf("get_session_stats rejected: %s", statsResp.errMsg))
+	} else {
+		var stats struct {
+			UserMessages      int `json:"userMessages"`
+			AssistantMessages int `json:"assistantMessages"`
+			ToolCalls         int `json:"toolCalls"`
+			ToolResults       int `json:"toolResults"`
+			TotalMessages     int `json:"totalMessages"`
+			ContextUsage      *struct {
+				Tokens        *int `json:"tokens"`
+				ContextWindow int  `json:"contextWindow"`
+			} `json:"contextUsage"`
+		}
+		if err := json.Unmarshal(statsResp.data, &stats); err != nil {
+			queryErrs = append(queryErrs, fmt.Errorf("decode get_session_stats: %w", err))
+		} else {
+			status.TransportResponsive = true
+			status.UserMessages = stats.UserMessages
+			status.AssistantMessages = stats.AssistantMessages
+			status.ToolCalls = stats.ToolCalls
+			status.ToolResults = stats.ToolResults
+			status.TotalMessages = stats.TotalMessages
+			status.StatsAvailable = true
+			if stats.ContextUsage != nil {
+				usage := &core.ContextUsage{ContextWindow: stats.ContextUsage.ContextWindow}
+				if stats.ContextUsage.Tokens != nil {
+					usage.UsedTokens = *stats.ContextUsage.Tokens
+					status.ContextTokensKnown = true
+				}
+				status.ContextUsage = usage
+			}
+		}
+	}
+
+	stateObserved := false
+	stateResp, err := s.callWithTimeoutContext(ctx, map[string]any{"type": "get_state"}, 0)
+	if err != nil {
+		queryErrs = append(queryErrs, fmt.Errorf("get_state: %w", err))
+	} else if !stateResp.success {
+		queryErrs = append(queryErrs, fmt.Errorf("get_state rejected: %s", stateResp.errMsg))
+	} else {
+		var state struct {
+			Model *struct {
+				ID            string `json:"id"`
+				Provider      string `json:"provider"`
+				ContextWindow int    `json:"contextWindow"`
+			} `json:"model"`
+			ThinkingLevel       string `json:"thinkingLevel"`
+			IsStreaming         bool   `json:"isStreaming"`
+			IsCompacting        bool   `json:"isCompacting"`
+			MessageCount        int    `json:"messageCount"`
+			PendingMessageCount int    `json:"pendingMessageCount"`
+		}
+		if err := json.Unmarshal(stateResp.data, &state); err != nil {
+			queryErrs = append(queryErrs, fmt.Errorf("decode get_state: %w", err))
+		} else {
+			stateObserved = true
+			status.TransportResponsive = true
+			status.ThinkingLevel = state.ThinkingLevel
+			status.IsStreaming = state.IsStreaming
+			status.IsCompacting = state.IsCompacting
+			status.MessageCount = state.MessageCount
+			status.PendingMessages = state.PendingMessageCount
+			if state.Model != nil {
+				status.Model = state.Model.ID
+				status.Provider = state.Model.Provider
+				if state.Model.ContextWindow > 0 {
+					if status.ContextUsage == nil {
+						status.ContextUsage = &core.ContextUsage{}
+					}
+					status.ContextUsage.ContextWindow = state.Model.ContextWindow
+				}
+			}
+		}
+	}
+
+	s.turnMu.Lock()
+	promptPending := s.promptPending
+	turnActive := s.turn.active
+	s.turnMu.Unlock()
+	s.healthMu.Lock()
+	status.Phase = s.healthPhase
+	status.LastEventType = s.lastProtocolEvent
+	localActive := s.activityActive
+	localActivitySince := s.activitySince
+	s.healthMu.Unlock()
+	if promptPending {
+		status.Phase = core.StallPhaseAwaitingAcceptance
+	} else if status.IsCompacting {
+		status.Phase = core.StallPhaseCompacting
+	} else if status.IsStreaming {
+		switch status.Phase {
+		case core.StallPhaseTool, core.StallPhaseRetrying:
+		default:
+			status.Phase = core.StallPhaseStreaming
+		}
+	} else if stateObserved && !turnActive {
+		status.Phase = core.StallPhaseSettled
+	}
+	status.Active = status.Phase != core.StallPhaseSettled && status.Phase != core.StallPhaseProcessDead && status.Phase != core.StallPhaseTransportBroken
+	if status.Active == localActive {
+		status.ActivitySince = localActivitySince
+	}
+	status.ObservedAt = time.Now()
+
+	return status, errors.Join(queryErrs...)
+}
+
 func (s *piRPCSession) storePendingOverflowError(errMsg string) {
 	s.usageMu.Lock()
 	defer s.usageMu.Unlock()
@@ -1107,10 +1243,11 @@ func (s *piRPCSession) SendContext(ctx context.Context, prompt string, images []
 		return fmt.Errorf("piRPCSession: pi rejected prompt: %s", resp.errMsg)
 	}
 	s.healthMu.Lock()
-	if s.healthPhase == core.StallPhaseAwaitingAcceptance {
-		s.healthPhase = core.StallPhaseRunning
-	}
+	awaitingAcceptance := s.healthPhase == core.StallPhaseAwaitingAcceptance
 	s.healthMu.Unlock()
+	if awaitingAcceptance {
+		s.setHealthPhase(core.StallPhaseRunning, false)
+	}
 	if s.CurrentSessionID() == "" {
 		s.acquireSessionIDFromState("post_prompt")
 	}
@@ -1770,8 +1907,23 @@ func (s *piRPCSession) noteProtocolEvent(eventType string) {
 	s.healthMu.Unlock()
 }
 
+func (s *piRPCSession) phaseAfterCompaction() core.StallPhase {
+	s.turnMu.Lock()
+	active := s.turn.active || s.promptPending
+	s.turnMu.Unlock()
+	if active {
+		return core.StallPhaseRunning
+	}
+	return core.StallPhaseSettled
+}
+
 func (s *piRPCSession) setHealthPhase(phase core.StallPhase, compacting bool) {
 	s.healthMu.Lock()
+	active := phase != core.StallPhaseSettled && phase != core.StallPhaseProcessDead && phase != core.StallPhaseTransportBroken
+	if active != s.activityActive {
+		s.activityActive = active
+		s.activitySince = time.Now()
+	}
 	s.healthPhase = phase
 	s.isCompacting = compacting
 	s.healthMu.Unlock()

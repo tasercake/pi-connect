@@ -117,6 +117,14 @@ func respondRPC(s *piRPCSession, id, command string, success bool, errMsg string
 	s.handleResponse(line)
 }
 
+func respondRPCData(s *piRPCSession, id, command string, data any) {
+	line, _ := json.Marshal(map[string]any{
+		"id": id, "type": "response", "command": command,
+		"success": true, "data": data,
+	})
+	s.handleResponse(line)
+}
+
 func pendingRPCCount(s *piRPCSession) int {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
@@ -129,6 +137,74 @@ func runSerializedMutation(s *piRPCSession, ctx context.Context, typ string) (rp
 	}
 	defer s.releaseMutating()
 	return s.callMutating(ctx, map[string]any{"type": typ})
+}
+
+func TestPiRPCSessionStatusUsesLiveStateAndExactSessionStats(t *testing.T) {
+	writer := newRPCRecordingWriteCloser()
+	s := newAcceptanceRPCSession(t, writer)
+	s.healthMu.Lock()
+	s.healthPhase = core.StallPhaseTool
+	s.lastProtocolEvent = "tool_execution_start"
+	s.healthMu.Unlock()
+	s.turnMu.Lock()
+	s.turn.active = true
+	s.turnMu.Unlock()
+	s.usageMu.Lock()
+	s.contextUsage = &core.ContextUsage{UsedTokens: 120000, InputTokens: 1000, CachedInputTokens: 118000, OutputTokens: 1000}
+	s.usageMu.Unlock()
+
+	type result struct {
+		status *core.AgentSessionStatus
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		status, err := s.GetSessionStatus(context.Background())
+		done <- result{status: status, err: err}
+	}()
+
+	statsCommand := <-writer.writeCh
+	if got := statsCommand["type"]; got != "get_session_stats" {
+		t.Fatalf("first command = %v, want get_session_stats", got)
+	}
+	respondRPCData(s, rpcCommandID(t, statsCommand), "get_session_stats", map[string]any{
+		"userMessages": 7, "assistantMessages": 9, "toolCalls": 12,
+		"toolResults": 11, "totalMessages": 28,
+		"contextUsage": map[string]any{"tokens": 123456, "contextWindow": 400000, "percent": 30.864},
+	})
+
+	stateCommand := <-writer.writeCh
+	if got := stateCommand["type"]; got != "get_state" {
+		t.Fatalf("second command = %v, want get_state", got)
+	}
+	respondRPCData(s, rpcCommandID(t, stateCommand), "get_state", map[string]any{
+		"model": map[string]any{
+			"id": "gpt-5.6-sol", "provider": "openai-codex", "contextWindow": 400000,
+		},
+		"thinkingLevel": "xhigh", "isStreaming": true, "isCompacting": false,
+		"messageCount": 28, "pendingMessageCount": 2,
+	})
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("GetSessionStatus error: %v", got.err)
+	}
+	status := got.status
+	if status.Phase != core.StallPhaseTool || !status.ProcessAlive || !status.TransportResponsive {
+		t.Fatalf("runtime status = %+v", status)
+	}
+	if status.Model != "gpt-5.6-sol" || status.Provider != "openai-codex" || status.ThinkingLevel != "xhigh" {
+		t.Fatalf("model status = %+v", status)
+	}
+	if !status.StatsAvailable || status.UserMessages != 7 || status.AssistantMessages != 9 || status.ToolCalls != 12 || status.ToolResults != 11 || status.TotalMessages != 28 {
+		t.Fatalf("session counts = %+v", status)
+	}
+	if status.ContextUsage == nil || status.ContextUsage.UsedTokens != 123456 || status.ContextUsage.ContextWindow != 400000 || !status.ContextTokensKnown {
+		t.Fatalf("context status = %+v", status.ContextUsage)
+	}
+	if cached := s.GetContextUsage(); cached == nil || cached.UsedTokens != 120000 || cached.InputTokens != 1000 || cached.CachedInputTokens != 118000 {
+		t.Fatalf("status query mutated cached context = %+v", cached)
+	}
 }
 
 func TestPiRPCStartupStateProbeHonorsSendCallerContext(t *testing.T) {

@@ -5553,6 +5553,19 @@ func (s *controllableAgentSession) Close() error {
 	return nil
 }
 
+type statusReportingAgentSession struct {
+	*controllableAgentSession
+	status *AgentSessionStatus
+	err    error
+}
+
+func (s *statusReportingAgentSession) GetSessionStatus(ctx context.Context) (*AgentSessionStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.status, s.err
+}
+
 type terminalEventErrorSession struct {
 	controllableAgentSession
 	terminal bool
@@ -7158,6 +7171,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	e.SetReplyFooterEnabled(true)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false})
 
 	key := "test:user1"
 	session := e.sessions.GetOrCreateActive(key)
@@ -7192,6 +7206,8 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 		}
 		sess.sendMu.Unlock()
 		// Turn 2 result (for the queued message)
+		sess.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "pwd"}
+		sess.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "/tmp"}
 		sess.events <- Event{Type: EventText, Content: "response2"}
 		sess.events <- Event{Type: EventResult, Content: "response2", InputTokens: 28000, Done: true}
 	}()
@@ -7218,9 +7234,16 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	// Verify queue is empty after processing.
 	state.mu.Lock()
 	remaining := len(state.pendingMessages)
+	turnInFlight := state.turnInFlight
+	turnStartedAt := state.turnStartedAt
+	turnFinishedAt := state.turnFinishedAt
+	turnToolCalls := state.turnToolCalls
 	state.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("pendingMessages after processing = %d, want 0", remaining)
+	}
+	if turnInFlight || turnStartedAt.IsZero() || turnFinishedAt.IsZero() || turnToolCalls != 1 {
+		t.Fatalf("queued turn telemetry: active=%v started=%v finished=%v tools=%d", turnInFlight, turnStartedAt, turnFinishedAt, turnToolCalls)
 	}
 
 	// Each final turn gets duration metadata. The queued turn resets its start
@@ -10974,6 +10997,88 @@ func TestCmdStatus_ShowsUserID(t *testing.T) {
 	}
 }
 
+func TestCmdStatus_ShowsLiveUnderlyingSessionDetailsWhileBusy(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "telegram"}
+	key := "telegram:chat:user"
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("failed to mark session busy")
+	}
+	defer session.Unlock()
+
+	agentSession := &statusReportingAgentSession{
+		controllableAgentSession: newControllableSession("pi-session-id"),
+		status: &AgentSessionStatus{
+			Phase:               StallPhaseTool,
+			ProcessAlive:        true,
+			TransportResponsive: true,
+			PID:                 4242,
+			Model:               "gpt-5.6-sol",
+			Provider:            "openai-codex",
+			ThinkingLevel:       "xhigh",
+			PendingMessages:     2,
+			UserMessages:        7,
+			AssistantMessages:   9,
+			ToolCalls:           12,
+			ToolResults:         11,
+			TotalMessages:       28,
+			StatsAvailable:      true,
+			ContextUsage:        &ContextUsage{UsedTokens: 123456, ContextWindow: 400000},
+			ContextTokensKnown:  true,
+			LastEventType:       "tool_execution_start",
+		},
+	}
+	e.interactiveStates[key] = &interactiveState{
+		agentSession:       agentSession,
+		turnInFlight:       true,
+		turnStartedAt:      time.Now().Add(-65 * time.Second),
+		turnToolCalls:      3,
+		currentTool:        "bash",
+		lastAgentEvent:     string(EventToolUse),
+		lastAgentEventAt:   time.Now().Add(-2 * time.Second),
+		pendingMessages:    []queuedMessage{{}, {}},
+		eventsNeedResync:   false,
+		turnOutcomeUnknown: false,
+	}
+
+	msg := &Message{SessionKey: key, Platform: "telegram", ReplyCtx: "ctx", Content: "/status"}
+	if !e.handleCommand(p, msg, msg.Content) {
+		t.Fatal("/status was not handled")
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("status replies = %d, want 1", len(p.sent))
+	}
+	got := p.sent[0]
+	for _, want := range []string{
+		"Pi session runtime:",
+		"State: tool",
+		"Turn: active for ",
+		"Process: ✅ · PID 4242",
+		"Model: openai-codex/gpt-5.6-sol",
+		"Thinking: xhigh",
+		"Context: 123,456 / 400,000 (30.9%)",
+		"Messages (user / assistant / total): 7 / 9 / 28",
+		"Tool calls (session / current turn): 12 / 3",
+		"Queue (Pi / pi-connect): 2 / 2",
+		"Last event: tool_execution_start",
+		"Current tool: bash",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatRuntimeContext(t *testing.T) {
+	if got := formatRuntimeContext(&ContextUsage{UsedTokens: 123456, ContextWindow: 400000}, true); got != "123,456 / 400,000 (30.9%)" {
+		t.Fatalf("known context = %q", got)
+	}
+	if got := formatRuntimeContext(&ContextUsage{ContextWindow: 400000}, false); got != "- / 400,000" {
+		t.Fatalf("unknown post-compaction context = %q", got)
+	}
+}
+
 func TestCmdWhoami_CardPlatform(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubModelModeAgent{model: "gpt-4.1", mode: "default"}
@@ -11829,7 +11934,9 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	e.startUnsolicitedReader(state, session, sessions, iKey, "")
 	defer e.stopUnsolicitedReader(state)
 
-	// Send only EventResult (no EventText) to ensure the reader uses EventResult.Content.
+	// Include background tool telemetry, then send EventResult without EventText.
+	sess.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "pwd"}
+	sess.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "/tmp"}
 	sess.events <- Event{Type: EventResult, Content: "All 5 campaigns created successfully"}
 
 	sent := waitForPlatformSend(p, 1, 5*time.Second)
@@ -11850,9 +11957,16 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	// Verify eventsNeedResync is false after clean EventResult.
 	state.mu.Lock()
 	resync := state.eventsNeedResync
+	toolCalls := state.turnToolCalls
+	currentTool := state.currentTool
+	lastEvent := state.lastAgentEvent
+	lastEventAt := state.lastAgentEventAt
 	state.mu.Unlock()
 	if resync {
 		t.Error("expected eventsNeedResync=false after clean unsolicited EventResult")
+	}
+	if toolCalls != 1 || currentTool != "" || lastEvent != string(EventResult) || lastEventAt.IsZero() {
+		t.Fatalf("unsolicited telemetry: tools=%d current=%q last=%q at=%v", toolCalls, currentTool, lastEvent, lastEventAt)
 	}
 }
 
