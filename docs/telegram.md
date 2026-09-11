@@ -211,7 +211,10 @@ or free model supported by your Pi provider. For an `openai-codex/*` agent,
 pi-connect defaults to `openai-codex/gpt-5.3-codex-spark`, which uses the same
 ChatGPT subscription. Other providers default to the agent's normal model. The
 title call has no tools, extensions, skills, project context, or persisted Pi
-session.
+session. Its structured prompt treats the message as quoted source data and
+requires one impersonal noun-phrase title. It explicitly forbids answering the
+user, offering help, acknowledgements, conversational lead-ins, and first- or
+second-person phrasing.
 
 The bot must be an administrator with **Manage Topics** permission. Messages
 already inside a non-General topic continue in that topic. Standard groups and
