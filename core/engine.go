@@ -248,6 +248,7 @@ type Engine struct {
 	pendingRecoveryStarted map[Platform]bool
 	recoveredPendingMu     sync.Mutex
 	recoveredPendingIDs    map[string]bool
+	pendingMutationMu      sync.Mutex // serializes spool deletion with Engine.Stop
 	replyFooterMu          sync.Mutex
 	replyFooterUsage       replyFooterUsageCache
 
@@ -1572,12 +1573,16 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) Stop() error {
+	// Linearize shutdown against spool deletion. Deletions that acquired this
+	// lock first complete before shutdown; after cancellation, none can begin.
+	e.pendingMutationMu.Lock()
 	e.platformLifecycleMu.Lock()
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
+	e.pendingMutationMu.Unlock()
 
 	// Lifecycle delivery may be inside Platform.Send. Let context-aware sends
 	// unwind before Platform.Stop tears down their clients; bound wait so a
@@ -1738,17 +1743,18 @@ func (e *Engine) recoverPendingMessages(p Platform) {
 			continue
 		}
 		if record.State == PendingMessageStateDispatching {
-			if err := e.waitOutgoing(p); err == nil {
-				err = p.Send(e.ctx, replyCtx, e.i18n.T(MsgAgentOutcomeUnknown))
+			sendErr := e.waitOutgoing(p)
+			if sendErr == nil {
+				sendErr = p.Send(e.ctx, replyCtx, e.i18n.T(MsgAgentOutcomeUnknown))
 			}
-			if err != nil {
-				slog.Warn("stale dispatching queue notice failed", "project", e.name, "platform", p.Name(), "durable_id", record.ID, "error", err)
+			if sendErr != nil {
+				slog.Warn("stale dispatching queue notice failed", "project", e.name, "platform", p.Name(), "durable_id", record.ID, "error", sendErr)
 				continue
 			}
-			if e.ctx.Err() != nil {
-				return
-			}
-			if err := e.pendingMessages.Remove(record.ID); err != nil {
+			if err := e.removePendingMessage(record.ID); err != nil {
+				if e.ctx.Err() != nil {
+					return
+				}
 				slog.Error("stale dispatching queue removal failed", "project", e.name, "durable_id", record.ID, "error", err)
 			}
 			continue
@@ -2079,7 +2085,7 @@ func (e *Engine) handleMessageRecall(p Platform, msg *Message) {
 	}
 
 	if e.pendingMessages != nil {
-		removed, err := e.pendingMessages.RemoveByMessageID(e.name, p.Name(), messageID)
+		removed, err := e.removePendingByMessageID(p.Name(), messageID)
 		if err != nil {
 			slog.Error("recalled durable queued message removal failed", "project", e.name, "platform", p.Name(), "msg_id", messageID, "error", err)
 			return
@@ -2565,6 +2571,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	state, hasState := e.interactiveStates[interactiveKey]
 	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
 	e.interactiveMu.Unlock()
+
+	if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+		slog.Error("idle auto-reset durable queue cancellation failed", "project", e.name, "session", msg.SessionKey, "error", err)
+		return nil
+	}
 
 	if hasAgent {
 		// Notify the user before the potentially long close. The close
@@ -5641,7 +5652,7 @@ func (e *Engine) finishCurrentDurableMessage(state *interactiveState, remove boo
 		remove = false
 	}
 	if remove && e.pendingMessages != nil {
-		if err := e.pendingMessages.Remove(id); err != nil {
+		if err := e.removePendingMessage(id); err != nil && e.ctx.Err() == nil {
 			slog.Error("durable queued message removal failed", "project", e.name, "durable_id", id, "error", err)
 		}
 	}
@@ -5656,7 +5667,7 @@ func (e *Engine) removeDurableQueuedMessages(messages []queuedMessage) {
 		if queued.durableID == "" {
 			continue
 		}
-		if err := e.pendingMessages.Remove(queued.durableID); err != nil {
+		if err := e.removePendingMessage(queued.durableID); err != nil && e.ctx.Err() == nil {
 			slog.Error("durable queued message cancellation failed", "project", e.name, "durable_id", queued.durableID, "error", err)
 		}
 		e.untrackRecoveredPending(queued.durableID)
@@ -9451,14 +9462,47 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 	}
 }
 
+func (e *Engine) removePendingMessage(id string) error {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return err
+	}
+	return e.pendingMessages.Remove(id)
+}
+
+func (e *Engine) removePendingBySession(rawSessionKey string) (int, error) {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return e.pendingMessages.RemoveBySessionKey(e.name, rawSessionKey)
+}
+
+func (e *Engine) removePendingByMessageID(platform, messageID string) (int, error) {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return e.pendingMessages.RemoveByMessageID(e.name, platform, messageID)
+}
+
+func (e *Engine) removePendingByProject() (int, error) {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return e.pendingMessages.RemoveByProject(e.name)
+}
+
 func (e *Engine) cancelDurablePendingForSession(rawSessionKey string) error {
 	if e.pendingMessages == nil {
 		return nil
 	}
-	if err := e.ctx.Err(); err != nil {
-		return err
-	}
-	_, err := e.pendingMessages.RemoveBySessionKey(e.name, rawSessionKey)
+	_, err := e.removePendingBySession(rawSessionKey)
 	return err
 }
 
@@ -9476,7 +9520,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	removed := 0
 	if e.pendingMessages != nil {
 		var err error
-		removed, err = e.pendingMessages.RemoveBySessionKey(e.name, msg.SessionKey)
+		removed, err = e.removePendingBySession(msg.SessionKey)
 		if err != nil {
 			slog.Error("durable queued message cancellation failed", "project", e.name, "session", msg.SessionKey, "error", err)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
@@ -9962,6 +10006,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
 
 	case "clear", "reset", "none":
+		if !msg.Sessionless {
+			if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+				return
+			}
+		}
 		switcher.SetActiveProvider("")
 		if !msg.Sessionless {
 			e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
@@ -10129,7 +10179,7 @@ func (e *Engine) resetAllSessions() {
 		e.cleanupInteractiveState(key)
 	}
 	if e.pendingMessages != nil {
-		if _, err := e.pendingMessages.RemoveByProject(e.name); err != nil {
+		if _, err := e.removePendingByProject(); err != nil {
 			slog.Error("durable queue project reset failed", "project", e.name, "error", err)
 		}
 	}

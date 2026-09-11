@@ -637,7 +637,9 @@ func TestDurableQueueDuplicateAndShutdownDoNotPop(t *testing.T) {
 	state := &interactiveState{agentSession: &stubAgentSession{}, platform: p}
 	e.interactiveStates["raw"] = state
 	msg := &Message{SessionKey: "raw", Platform: "test", MessageID: "same", Content: "queued", ReplyCtx: "ctx"}
-	if !e.queueMessageForBusySession(p, msg, "raw") || !e.queueMessageForBusySession(p, msg, "raw") {
+	firstQueued := e.queueMessageForBusySession(p, msg, "raw")
+	duplicateQueued := e.queueMessageForBusySession(p, msg, "raw")
+	if !firstQueued || !duplicateQueued {
 		t.Fatal("queue failed")
 	}
 	state.mu.Lock()
