@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -16,11 +17,16 @@ func (a *titleGeneratingStubAgent) GenerateConversationTitle(_ context.Context, 
 
 type titleSetterStubPlatform struct {
 	stubPlatformEngine
-	generator func(context.Context, string) (string, error)
+	generator      func(context.Context, string) (string, error)
+	routePreflight func(*Message) MessageRouteDisposition
 }
 
 func (p *titleSetterStubPlatform) SetConversationTitleGenerator(generator func(context.Context, string) (string, error)) {
 	p.generator = generator
+}
+
+func (p *titleSetterStubPlatform) SetMessageRoutePreflight(preflight func(*Message) MessageRouteDisposition) {
+	p.routePreflight = preflight
 }
 
 func TestEngineInjectsConversationTitleGeneratorBeforePlatformStart(t *testing.T) {
@@ -35,9 +41,65 @@ func TestEngineInjectsConversationTitleGeneratorBeforePlatformStart(t *testing.T
 	if platform.generator == nil {
 		t.Fatal("conversation title generator was not injected")
 	}
+	if platform.routePreflight == nil || platform.routePreflight(&Message{Content: "/quiet"}) != MessageRouteInPlace {
+		t.Fatal("message route preflight was not injected")
+	}
 	title, err := platform.generator(context.Background(), "request")
 	if err != nil || title != "title: request" {
 		t.Fatalf("title/error = %q/%v", title, err)
+	}
+}
+
+func TestEngineUsesWorkspaceBindingSnapshotFromRoutePreflight(t *testing.T) {
+	base := t.TempDir()
+	workspaceA := filepath.Join(base, "a")
+	workspaceB := filepath.Join(base, "b")
+	for _, dir := range []string{workspaceA, workspaceB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engine := NewEngine("project", &stubAgent{}, nil, "", LangEnglish)
+	engine.SetMultiWorkspace(base, filepath.Join(base, "bindings.json"))
+	source := workspaceChannelKey("telegram", "-100123:1")
+	engine.workspaceBindings.Bind("project:project", source, "General", workspaceA)
+
+	msg := &Message{Platform: "telegram", SessionKey: "telegram:-100123:1:7", ChannelKey: "-100123:1", Content: "/help"}
+	engine.messageRouteDisposition(msg)
+	engine.workspaceBindings.Bind("project:project", source, "General", workspaceB)
+	msg.SessionKey = "telegram:-100123:77:7"
+	msg.ChannelKey = "-100123:77"
+	msg.WorkspaceSourceChannelKey = "-100123:1"
+	engine.copyWorkspaceSourceBinding(msg)
+
+	binding := engine.workspaceBindings.Lookup("project:project", workspaceChannelKey("telegram", "-100123:77"))
+	if binding == nil || binding.Workspace != workspaceA {
+		t.Fatalf("final workspace binding = %#v, want intake workspace %q", binding, workspaceA)
+	}
+}
+
+func TestEngineDoesNotRestoreStaleWorkspaceSnapshotForInPlaceRoute(t *testing.T) {
+	base := t.TempDir()
+	workspaceA := filepath.Join(base, "a")
+	workspaceB := filepath.Join(base, "b")
+	for _, dir := range []string{workspaceA, workspaceB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engine := NewEngine("project", &stubAgent{}, nil, "", LangEnglish)
+	engine.SetMultiWorkspace(base, filepath.Join(base, "bindings.json"))
+	channel := workspaceChannelKey("telegram", "-100123:1")
+	engine.workspaceBindings.Bind("project:project", channel, "General", workspaceA)
+
+	msg := &Message{Platform: "telegram", SessionKey: "telegram:-100123:1:7", ChannelKey: "-100123:1", Content: "/help"}
+	engine.messageRouteDisposition(msg)
+	engine.workspaceBindings.Bind("project:project", channel, "General", workspaceB)
+	engine.copyWorkspaceSourceBinding(msg)
+
+	binding := engine.workspaceBindings.Lookup("project:project", channel)
+	if binding == nil || binding.Workspace != workspaceB {
+		t.Fatalf("in-place workspace binding = %#v, want newer binding %q", binding, workspaceB)
 	}
 }
 

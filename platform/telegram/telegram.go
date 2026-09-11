@@ -153,21 +153,22 @@ type Platform struct {
 	enableReactions       bool
 	httpClient            *http.Client
 
-	mu                  sync.RWMutex
-	bot                 telegramBot
-	selfUser            *models.User
-	handler             core.MessageHandler
-	lifecycleHandler    core.PlatformLifecycleHandler
-	cancel              context.CancelFunc
-	lifecycleCtx        context.Context
-	stopping            bool
-	generation          uint64
-	unavailableNotified bool
-	everConnected       bool
-	newBot              botFactory
-	newBackoffTimer     func(time.Duration) backoffTimer
-	newTypingTicker     func(time.Duration) typingTicker
-	titleGenerator      func(context.Context, string) (string, error)
+	mu                    sync.RWMutex
+	bot                   telegramBot
+	selfUser              *models.User
+	handler               core.MessageHandler
+	lifecycleHandler      core.PlatformLifecycleHandler
+	cancel                context.CancelFunc
+	lifecycleCtx          context.Context
+	stopping              bool
+	generation            uint64
+	unavailableNotified   bool
+	everConnected         bool
+	newBot                botFactory
+	newBackoffTimer       func(time.Duration) backoffTimer
+	newTypingTicker       func(time.Duration) typingTicker
+	titleGenerator        func(context.Context, string) (string, error)
+	messageRoutePreflight func(*core.Message) core.MessageRouteDisposition
 
 	mediaGroupMu       sync.Mutex
 	mediaGroupDebounce time.Duration
@@ -239,6 +240,22 @@ func (p *Platform) conversationTitleGenerator() func(context.Context, string) (s
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.titleGenerator
+}
+
+func (p *Platform) SetMessageRoutePreflight(preflight func(*core.Message) core.MessageRouteDisposition) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.messageRoutePreflight = preflight
+}
+
+func (p *Platform) messageRouteDisposition(msg *core.Message) core.MessageRouteDisposition {
+	p.mu.RLock()
+	preflight := p.messageRoutePreflight
+	p.mu.RUnlock()
+	if preflight == nil {
+		return core.MessageRouteDefault
+	}
+	return preflight(msg)
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -419,6 +436,9 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	threadID := 0
 	if msg.Chat.IsForum || !isGroup {
 		threadID = msg.MessageThreadID
+	}
+	if isGeneralForumMessage(msg) {
+		threadID = 1
 	}
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
 	channelKey := buildChannelKey(msg.Chat.ID, threadID)
@@ -743,6 +763,10 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 		slog.Debug("telegram: duplicate General message ignored", "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
 		return nil, false
 	}
+	if p.messageRouteDisposition(msg) == core.MessageRouteInPlace {
+		msg.Sessionless = true
+		return nil, true
+	}
 
 	bot, err := p.connectedBot("create forum topic")
 	if err != nil {
@@ -763,7 +787,7 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 	}
 
 	threadID := topic.MessageThreadID
-	sourceChannelKey := buildChannelKey(tgMsg.Chat.ID, tgMsg.MessageThreadID)
+	sourceChannelKey := buildChannelKey(tgMsg.Chat.ID, 1)
 	msg.SessionKey = p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
 	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, threadID)
 	msg.WorkspaceSourceChannelKey = sourceChannelKey
@@ -1382,6 +1406,10 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	if msg.Chat.IsForum || !isGroupChat {
 		threadID = msg.MessageThreadID
 	}
+	generalForum := isGeneralForumMessage(msg)
+	if generalForum {
+		threadID = 1
+	}
 	sessionKey := p.buildSessionKey(chatID, threadID, cb.From.ID)
 	channelKey := buildChannelKey(chatID, threadID)
 
@@ -1411,7 +1439,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 			slog.Debug("telegram: callback edit failed", "error", err)
 		}
 
-		p.handler(p, &core.Message{
+		commandMsg := &core.Message{
 			SessionKey: sessionKey,
 			Platform:   "telegram",
 			UserID:     userID,
@@ -1421,7 +1449,11 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 			MessageID:  strconv.Itoa(msgID),
 			ChannelKey: channelKey,
 			ReplyCtx:   rctx,
-		})
+		}
+		if generalForum && p.messageRouteDisposition(commandMsg) == core.MessageRouteInPlace {
+			commandMsg.Sessionless = true
+		}
+		p.handler(p, commandMsg)
 		return
 	}
 

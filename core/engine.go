@@ -1520,6 +1520,9 @@ func (e *Engine) Start() error {
 				setter.SetConversationTitleGenerator(nil)
 			}
 		}
+		if setter, ok := p.(MessageRoutePreflightSetter); ok {
+			setter.SetMessageRoutePreflight(e.messageRouteDisposition)
+		}
 		if err := p.Start(e.handleMessage); err != nil {
 			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
 			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
@@ -2019,23 +2022,57 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 	return cancel
 }
 
-// copyWorkspaceSourceBinding copies an existing source-channel binding to the
-// message's final channel before workspace and command routing. Platforms use
-// this neutral metadata when creating a new route synchronously.
-func (e *Engine) copyWorkspaceSourceBinding(msg *Message) {
-	if !e.multiWorkspace || e.workspaceBindings == nil || msg == nil || msg.WorkspaceSourceChannelKey == "" || msg.ChannelKey == "" {
+// captureWorkspaceSourceBinding snapshots the intake route's binding before a
+// platform creates a final route. This prevents concurrent rebinding from
+// splitting the first turn and its final topic across workspaces.
+func (e *Engine) captureWorkspaceSourceBinding(msg *Message) {
+	if msg == nil || msg.workspaceBindingCaptured {
 		return
 	}
-	sourceKey := workspaceChannelKey(msg.Platform, msg.WorkspaceSourceChannelKey)
-	finalKey := workspaceChannelKey(msg.Platform, msg.ChannelKey)
-	if sourceKey == finalKey {
+	msg.workspaceBindingCaptured = true
+	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return
 	}
-	binding, bindingScope := e.workspaceBindings.LookupEffective("project:"+e.name, sourceKey)
+	sourceKey := effectiveWorkspaceChannelKey(msg)
+	if sourceKey == "" {
+		return
+	}
+	msg.workspaceBindingSource = sourceKey
+	binding, scope := e.workspaceBindings.LookupEffective("project:"+e.name, sourceKey)
 	if binding == nil {
 		return
 	}
-	e.workspaceBindings.Bind(bindingScope, finalKey, binding.ChannelName, binding.Workspace)
+	msg.workspaceBindingScope = scope
+	msg.workspaceBindingName = binding.ChannelName
+	msg.workspaceBindingPath = binding.Workspace
+}
+
+// copyWorkspaceSourceBinding copies the snapshotted source-channel binding to
+// the message's final channel before workspace and command routing.
+func (e *Engine) copyWorkspaceSourceBinding(msg *Message) {
+	if !e.multiWorkspace || e.workspaceBindings == nil || msg == nil || msg.ChannelKey == "" {
+		return
+	}
+	finalKey := workspaceChannelKey(msg.Platform, msg.ChannelKey)
+	if msg.workspaceBindingCaptured {
+		// In-place routes already use source channel. Re-applying an intake
+		// snapshot here could overwrite a newer concurrent /workspace binding.
+		if finalKey != msg.workspaceBindingSource && msg.workspaceBindingPath != "" {
+			e.workspaceBindings.Bind(msg.workspaceBindingScope, finalKey, msg.workspaceBindingName, msg.workspaceBindingPath)
+		}
+		return
+	}
+	if msg.WorkspaceSourceChannelKey == "" {
+		return
+	}
+	sourceKey := workspaceChannelKey(msg.Platform, msg.WorkspaceSourceChannelKey)
+	if sourceKey == finalKey {
+		return
+	}
+	binding, scope := e.workspaceBindings.LookupEffective("project:"+e.name, sourceKey)
+	if binding != nil {
+		e.workspaceBindings.Bind(scope, finalKey, binding.ChannelName, binding.Workspace)
+	}
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
@@ -5316,53 +5353,78 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 // Command handling
 // ──────────────────────────────────────────────────────────────
 
-// builtinCommands maps canonical command names to their aliases/full names.
-// The first entry is the canonical name used for prefix matching.
-var builtinCommands = []struct {
-	names []string
-	id    string
-}{
-	{[]string{"new"}, "new"},
-	{[]string{"list", "sessions"}, "list"},
-	{[]string{"switch"}, "switch"},
-	{[]string{"name", "rename"}, "name"},
-	{[]string{"current"}, "current"},
-	{[]string{"status"}, "status"},
-	{[]string{"usage", "quota"}, "usage"},
-	{[]string{"history"}, "history"},
-	{[]string{"allow"}, "allow"},
-	{[]string{"model"}, "model"},
-	{[]string{"reasoning", "effort"}, "reasoning"},
-	{[]string{"mode"}, "mode"},
-	{[]string{"lang"}, "lang"},
-	{[]string{"quiet"}, "quiet"},
-	{[]string{"provider"}, "provider"},
-	{[]string{"memory"}, "memory"},
-	{[]string{"cron"}, "cron"},
-	{[]string{"heartbeat", "hb"}, "heartbeat"},
-	{[]string{"compress", "compact"}, "compress"},
-	{[]string{"stop"}, "stop"},
-	{[]string{"help"}, "help"},
-	{[]string{"version"}, "version"},
-	{[]string{"commands", "command", "cmd"}, "commands"},
-	{[]string{"skills", "skill"}, "skills"},
-	{[]string{"config"}, "config"},
-	{[]string{"doctor"}, "doctor"},
-	{[]string{"upgrade", "update"}, "upgrade"},
-	{[]string{"restart"}, "restart"},
-	{[]string{"alias"}, "alias"},
-	{[]string{"delete", "del", "rm"}, "delete"},
-	{[]string{"bind"}, "bind"},
-	{[]string{"search", "find"}, "search"},
-	{[]string{"shell", "sh", "exec", "run"}, "shell"},
-	{[]string{"show"}, "show"},
-	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
-	{[]string{"tts"}, "tts"},
-	{[]string{"workspace", "ws"}, "workspace"},
-	{[]string{"whoami", "myid"}, "whoami"},
-	{[]string{"web"}, "web"},
-	{[]string{"diff"}, "diff"},
-	{[]string{"ps", "btw"}, "ps"},
+type builtinCommand struct {
+	names           []string
+	id              string
+	requiresSession func(typedName string, args []string) bool
+}
+
+func alwaysRequiresSession(string, []string) bool { return true }
+
+func nameRequiresSession(typedName string, args []string) bool {
+	if typedName == "name-current" || len(args) == 0 {
+		return true
+	}
+	index, err := strconv.Atoi(args[0])
+	return err != nil || index < 1
+}
+
+func cronRequiresSession(_ string, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
+	})
+	return sub == "add" || sub == "addexec"
+}
+
+// builtinCommands is the single registry for built-in recognition and routing.
+// The first name is canonical. requiresSession marks commands that need a
+// durable conversation target and therefore cannot run in a sessionless route.
+var builtinCommands = []builtinCommand{
+	{[]string{"new"}, "new", alwaysRequiresSession},
+	{[]string{"list", "sessions"}, "list", nil},
+	{[]string{"switch"}, "switch", alwaysRequiresSession},
+	{[]string{"name", "rename", "name-current"}, "name", nameRequiresSession},
+	{[]string{"current"}, "current", alwaysRequiresSession},
+	{[]string{"status"}, "status", nil},
+	{[]string{"usage", "quota"}, "usage", nil},
+	{[]string{"history"}, "history", alwaysRequiresSession},
+	{[]string{"allow"}, "allow", nil},
+	{[]string{"model"}, "model", nil},
+	{[]string{"reasoning", "effort"}, "reasoning", nil},
+	{[]string{"mode"}, "mode", nil},
+	{[]string{"lang"}, "lang", nil},
+	{[]string{"quiet"}, "quiet", nil},
+	{[]string{"provider"}, "provider", nil},
+	{[]string{"memory"}, "memory", nil},
+	{[]string{"cron"}, "cron", cronRequiresSession},
+	{[]string{"heartbeat", "hb"}, "heartbeat", nil},
+	{[]string{"compress", "compact"}, "compress", alwaysRequiresSession},
+	{[]string{"stop"}, "stop", alwaysRequiresSession},
+	{[]string{"help"}, "help", nil},
+	{[]string{"start"}, "start", nil},
+	{[]string{"version"}, "version", nil},
+	{[]string{"commands", "command", "cmd"}, "commands", nil},
+	{[]string{"skills", "skill"}, "skills", nil},
+	{[]string{"config"}, "config", nil},
+	{[]string{"doctor"}, "doctor", nil},
+	{[]string{"upgrade", "update"}, "upgrade", nil},
+	{[]string{"restart"}, "restart", nil},
+	{[]string{"alias"}, "alias", nil},
+	{[]string{"delete", "del", "rm"}, "delete", nil},
+	{[]string{"bind"}, "bind", nil},
+	{[]string{"search", "find"}, "search", nil},
+	{[]string{"shell", "sh", "exec", "run"}, "shell", nil},
+	{[]string{"show"}, "show", nil},
+	{[]string{"dir", "cd", "chdir", "workdir"}, "dir", nil},
+	{[]string{"tts"}, "tts", nil},
+	{[]string{"workspace", "ws"}, "workspace", nil},
+	{[]string{"whoami", "myid"}, "whoami", nil},
+	{[]string{"web"}, "web", nil},
+	{[]string{"diff"}, "diff", nil},
+	{[]string{"ps", "btw"}, "ps", alwaysRequiresSession},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -5398,10 +5460,7 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 
 // matchPrefix finds a unique command matching the given prefix.
 // Returns the command id or "" if no match / ambiguous.
-func matchPrefix(prefix string, candidates []struct {
-	names []string
-	id    string
-}) string {
+func matchPrefix(prefix string, candidates []builtinCommand) string {
 	// Exact match first
 	for _, c := range candidates {
 		for _, n := range c.names {
@@ -5426,6 +5485,73 @@ func matchPrefix(prefix string, candidates []struct {
 	return matched
 }
 
+func builtinCommandRequiresSession(id, typedName string, args []string) bool {
+	for _, command := range builtinCommands {
+		if command.id == id && command.requiresSession != nil {
+			return command.requiresSession(typedName, args)
+		}
+	}
+	return false
+}
+
+// messageRouteDisposition classifies messages before a platform creates its
+// normal conversation route. Agent-backed and unknown commands use default
+// routing; built-ins and direct exec commands stay in place.
+func (e *Engine) messageRouteDisposition(msg *Message) MessageRouteDisposition {
+	if msg == nil {
+		return MessageRouteDefault
+	}
+	e.captureWorkspaceSourceBinding(msg)
+	if len(msg.Images) > 0 {
+		return MessageRouteDefault
+	}
+	if e.hasPendingSessionlessFlow(msg) {
+		return MessageRouteInPlace
+	}
+	content := e.resolveAlias(strings.TrimSpace(msg.Content))
+	parts := strings.Fields(content)
+	if len(parts) == 0 || !strings.HasPrefix(parts[0], "/") {
+		return MessageRouteDefault
+	}
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+	if matchPrefix(cmd, builtinCommands) != "" {
+		return MessageRouteInPlace
+	}
+
+	disabledCmds := e.disabledCommandsForUser(msg.UserID)
+	if custom, ok := e.commands.Resolve(cmd); ok {
+		if disabledCmds[strings.ToLower(custom.Name)] || custom.Exec != "" {
+			return MessageRouteInPlace
+		}
+		return MessageRouteDefault
+	}
+	if skill := e.skills.Resolve(cmd); skill != nil && disabledCmds[strings.ToLower(skill.Name)] {
+		return MessageRouteInPlace
+	}
+	return MessageRouteDefault
+}
+
+func (e *Engine) hasPendingSessionlessFlow(msg *Message) bool {
+	interactiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		state.mu.Lock()
+		hasProviderInput := state.pendingProviderAdd != nil
+		state.mu.Unlock()
+		if hasProviderInput {
+			return true
+		}
+	}
+
+	channelKey := effectiveWorkspaceChannelKey(msg)
+	e.initFlowsMu.Lock()
+	_, hasWorkspaceInput := e.initFlows[channelKey]
+	e.initFlowsMu.Unlock()
+	return hasWorkspaceInput
+}
+
 // matchSubCommand does prefix matching against a flat list of subcommand names.
 func matchSubCommand(input string, candidates []string) string {
 	for _, c := range candidates {
@@ -5448,23 +5574,26 @@ func matchSubCommand(input string, candidates []string) string {
 	return input
 }
 
+func (e *Engine) disabledCommandsForUser(userID string) map[string]bool {
+	e.userRolesMu.RLock()
+	disabledCmds := e.disabledCmds
+	urm := e.userRoles
+	e.userRolesMu.RUnlock()
+	if urm != nil {
+		if role := urm.ResolveRole(userID); role != nil {
+			return role.DisabledCmds
+		}
+	}
+	return disabledCmds
+}
+
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := strings.Fields(raw)
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 	args := parts[1:]
 
 	cmdID := matchPrefix(cmd, builtinCommands)
-
-	// Resolve effective disabled commands: role-based if available, else project-level
-	e.userRolesMu.RLock()
-	disabledCmds := e.disabledCmds
-	urm := e.userRoles
-	e.userRolesMu.RUnlock()
-	if urm != nil {
-		if role := urm.ResolveRole(msg.UserID); role != nil {
-			disabledCmds = role.DisabledCmds
-		}
-	}
+	disabledCmds := e.disabledCommandsForUser(msg.UserID)
 
 	if cmdID != "" && disabledCmds[cmdID] {
 		slog.Info("audit: command_blocked",
@@ -5479,6 +5608,11 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			"user_id", msg.UserID, "platform", msg.Platform,
 			"project", e.name, "command", cmdID, "reason", "unauthorized")
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/"+cmdID))
+		return true
+	}
+
+	if cmdID != "" && msg.Sessionless && builtinCommandRequiresSession(cmdID, cmd, args) {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCommandRequiresTopic, "/"+cmd))
 		return true
 	}
 
@@ -5917,7 +6051,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	if !supportsCards(p) {
+	if !supportsCards(p) || msg.Sessionless {
 		agentSessions, err := agent.ListSessions(e.ctx)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
@@ -5949,8 +6083,10 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		}
 
 		agentName := agent.Name()
-		activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-		activeAgentID := activeSession.GetAgentSessionID()
+		activeAgentID := ""
+		if !msg.Sessionless {
+			activeAgentID = sessions.GetOrCreateActive(msg.SessionKey).GetAgentSessionID()
+		}
 
 		var sb strings.Builder
 		if totalPages > 1 {
@@ -6848,8 +6984,10 @@ func (e *Engine) diff2html(ctx context.Context, diff []byte, workDir, title stri
 }
 
 // dirApply applies /dir mutations (same semantics as cmdDir). sessionKey is used for GetOrCreateActive.
+// Pass false in createSession to apply a sessionless route without creating a placeholder.
 // On failure returns a non-empty errMsg; on success returns ("", successMsg) for plain-text replies.
-func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey, sessionKey string, args []string) (errMsg, successMsg string) {
+func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey, sessionKey string, args []string, createSession ...bool) (errMsg, successMsg string) {
+	shouldCreateSession := len(createSession) == 0 || createSession[0]
 	switcher, ok := agent.(WorkDirSwitcher)
 	if !ok {
 		return e.i18n.T(MsgDirNotSupported), ""
@@ -6875,10 +7013,12 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 			}
 			e.cleanupInteractiveState(interactiveKey)
 
-			s := sessions.GetOrCreateActive(sessionKey)
-			s.SetAgentSessionID("", "")
-			s.ClearHistory()
-			sessions.Save()
+			if shouldCreateSession {
+				s := sessions.GetOrCreateActive(sessionKey)
+				s.SetAgentSessionID("", "")
+				s.ClearHistory()
+				sessions.Save()
+			}
 
 			if e.projectState != nil {
 				if e.multiWorkspace {
@@ -6945,10 +7085,12 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 	}
 	e.cleanupInteractiveState(interactiveKey)
 
-	s := sessions.GetOrCreateActive(sessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
-	sessions.Save()
+	if shouldCreateSession {
+		s := sessions.GetOrCreateActive(sessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		sessions.Save()
+	}
 
 	if e.dirHistory != nil {
 		e.dirHistory.Add(e.name, newDir)
@@ -7015,7 +7157,7 @@ func (e *Engine) cmdDir(p Platform, msg *Message, args []string) {
 		}
 	}
 
-	errMsg, successMsg := e.dirApply(agent, sessions, interactiveKey, msg.SessionKey, args)
+	errMsg, successMsg := e.dirApply(agent, sessions, interactiveKey, msg.SessionKey, args, !msg.Sessionless)
 	if errMsg != "" {
 		e.reply(p, msg.ReplyCtx, errMsg)
 		return
@@ -7195,7 +7337,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
-	if !supportsCards(p) {
+	if !supportsCards(p) || msg.Sessionless {
 		agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
@@ -7235,7 +7377,10 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
 		modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
 
-		s := sessions.GetOrCreateActive(msg.SessionKey)
+		s := &Session{Name: "default"}
+		if !msg.Sessionless {
+			s = sessions.GetOrCreateActive(msg.SessionKey)
+		}
 		sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
 		if sessionDisplayName == "" {
 			sessionDisplayName = s.Name
@@ -8406,7 +8551,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 
 	if len(args) == 0 {
-		if !supportsCards(p) {
+		if !supportsCards(p) || msg.Sessionless {
 			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 			defer cancel()
 			models := switcher.AvailableModels(fetchCtx)
@@ -8614,7 +8759,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	if len(args) == 0 {
-		if !supportsCards(p) {
+		if !supportsCards(p) || msg.Sessionless {
 			efforts := switcher.AvailableReasoningEfforts()
 
 			var sb strings.Builder
@@ -8677,12 +8822,13 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher.SetReasoningEffort(target)
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
-
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
-	e.sessions.Save()
+	if !msg.Sessionless {
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		s := e.sessions.GetOrCreateActive(msg.SessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		e.sessions.Save()
+	}
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
@@ -9336,8 +9482,8 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "clear", "reset", "none":
 		switcher.SetActiveProvider("")
-		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
-		{
+		if !msg.Sessionless {
+			e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 			s := e.sessions.GetOrCreateActive(msg.SessionKey)
 			s.SetAgentSessionID("", "")
 			s.ClearHistory()
@@ -9356,6 +9502,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
+	if msg.Sessionless && (len(args) == 0 || (len(args) == 1 && !strings.HasPrefix(strings.TrimSpace(args[0]), "{"))) {
+		// General has no durable control-flow state. Require credentials in the
+		// command itself instead of collecting a later plaintext secret.
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderAddUsage))
+		return
+	}
 	if len(args) == 0 {
 		if supportsCards(p) {
 			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderAddCard(msg.SessionKey))
@@ -9498,12 +9650,13 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderNotFound), name))
 		return
 	}
-	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
-
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
-	e.sessions.Save()
+	if !msg.Sessionless {
+		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+		s := e.sessions.GetOrCreateActive(msg.SessionKey)
+		s.SetAgentSessionID("", "")
+		s.ClearHistory()
+		e.sessions.Save()
+	}
 
 	if e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
@@ -12490,7 +12643,7 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -12713,7 +12866,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -13445,11 +13598,14 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 		return ""
 	}
 
-	// Prevent deleting the currently active session
+	// Prevent deleting the currently active session. Sessionless routes have no
+	// current conversation and must not create a placeholder to perform this check.
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
-	if activeSession.GetAgentSessionID() == matched.ID {
-		return e.i18n.T(MsgDeleteActiveDenied)
+	if !msg.Sessionless {
+		activeSession := sessions.GetOrCreateActive(msg.SessionKey)
+		if activeSession.GetAgentSessionID() == matched.ID {
+			return e.i18n.T(MsgDeleteActiveDenied)
+		}
 	}
 
 	displayName := e.deleteSessionDisplayName(sessions, matched)

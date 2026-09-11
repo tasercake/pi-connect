@@ -19,6 +19,17 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
+type routingTestAgent struct{}
+
+func (*routingTestAgent) Name() string { return "routing-test" }
+func (*routingTestAgent) StartSession(context.Context, string) (core.AgentSession, error) {
+	return nil, errors.New("agent must not start")
+}
+func (*routingTestAgent) ListSessions(context.Context) ([]core.AgentSessionInfo, error) {
+	return nil, nil
+}
+func (*routingTestAgent) Stop() error { return nil }
+
 type testLifecycleHandler struct {
 	onReady       func(core.Platform)
 	onUnavailable func(core.Platform, error)
@@ -1288,6 +1299,117 @@ func TestGeneralForumSynchronousCommandReplyDoesNotDeadlockBarrier(t *testing.T)
 	defer stubBot.mu.Unlock()
 	if len(stubBot.sendMessageParams) < 2 || stubBot.sendMessageParams[0].MessageThreadID != 77 {
 		t.Fatalf("source reference was not first: %#v", stubBot.sendMessageParams)
+	}
+}
+
+func TestGeneralForumInPlaceCommandSkipsTopicAndTitle(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	var titleCalls atomic.Int32
+	handled := make(chan *core.Message, 1)
+	p := &Platform{
+		groupReplyAll: true,
+		bot:           stubBot,
+		selfUser:      &models.User{ID: 42, Username: "mybot"},
+		titleGenerator: func(context.Context, string) (string, error) {
+			titleCalls.Add(1)
+			return "must not run", nil
+		},
+		handler: func(platform core.Platform, msg *core.Message) {
+			handled <- msg
+			if err := platform.Reply(context.Background(), msg.ReplyCtx, "quiet enabled"); err != nil {
+				t.Errorf("reply: %v", err)
+			}
+		},
+	}
+	p.SetMessageRoutePreflight(func(*core.Message) core.MessageRouteDisposition { return core.MessageRouteInPlace })
+	msg := generalForumMessage(12, "/quiet quiet")
+	msg.MessageThreadID = 0
+	p.handleMessage(context.Background(), msg)
+
+	got := <-handled
+	if !got.Sessionless || got.SessionKey != "telegram:-100123:1:7" || got.ChannelKey != "-100123:1" {
+		t.Fatalf("in-place route = sessionless:%v key:%q channel:%q", got.Sessionless, got.SessionKey, got.ChannelKey)
+	}
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if titleCalls.Load() != 0 || stubBot.createForumTopicCalls != 0 || stubBot.editForumTopicCalls != 0 {
+		t.Fatalf("title/create/edit calls = %d/%d/%d", titleCalls.Load(), stubBot.createForumTopicCalls, stubBot.editForumTopicCalls)
+	}
+	if len(stubBot.sendMessageParams) != 1 || stubBot.sendMessageParams[0].MessageThreadID != 1 {
+		t.Fatalf("General reply = %#v", stubBot.sendMessageParams)
+	}
+}
+
+func TestGeneralForumSessionCommandRejectedWithoutTopicOrSession(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	engine := core.NewEngine("project", &routingTestAgent{}, nil, "", core.LangEnglish)
+	t.Cleanup(func() { _ = engine.Stop() })
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: engine.ReceiveMessage}
+	p.SetMessageRoutePreflight(func(*core.Message) core.MessageRouteDisposition { return core.MessageRouteInPlace })
+	p.handleMessage(context.Background(), generalForumMessage(16, "/new private"))
+
+	key := "telegram:-100123:1:7"
+	if got := engine.GetSessions().ActiveSessionID(key); got != "" {
+		t.Fatalf("General session = %q, want none", got)
+	}
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if stubBot.createForumTopicCalls != 0 || len(stubBot.sendMessageParams) != 1 || !strings.Contains(stubBot.sendMessageParams[0].Text, "inside the topic") {
+		t.Fatalf("topic/reply = %d/%#v", stubBot.createForumTopicCalls, stubBot.sendMessageParams)
+	}
+}
+
+func TestGeneralForumUnknownCommandUsesFinalTopicRoute(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	handled := make(chan *core.Message, 1)
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+	p.SetMessageRoutePreflight(func(*core.Message) core.MessageRouteDisposition { return core.MessageRouteDefault })
+	msg := generalForumMessage(15, "/plugin-command work")
+	msg.MessageThreadID = 0
+	p.handleMessage(context.Background(), msg)
+	got := <-handled
+	if got.Sessionless || got.SessionKey != "telegram:-100123:77:7" || got.ChannelKey != "-100123:77" || got.WorkspaceSourceChannelKey != "-100123:1" {
+		t.Fatalf("unknown command route = sessionless:%v key:%q channel:%q", got.Sessionless, got.SessionKey, got.ChannelKey)
+	}
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if stubBot.createForumTopicCalls != 1 {
+		t.Fatalf("topics = %d, want 1", stubBot.createForumTopicCalls)
+	}
+}
+
+func TestNonGeneralCommandIgnoresGeneralRoutePolicy(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	handled := make(chan *core.Message, 1)
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+	p.SetMessageRoutePreflight(func(*core.Message) core.MessageRouteDisposition { return core.MessageRouteInPlace })
+	p.handleMessage(context.Background(), &models.Message{
+		ID: 13, MessageThreadID: 77, Text: "/new", Date: int(time.Now().Unix()),
+		From: &models.User{ID: 7}, Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
+	})
+	got := <-handled
+	if got.Sessionless || got.SessionKey != "telegram:-100123:77:7" {
+		t.Fatalf("non-General route changed: %#v", got)
+	}
+	if stubBot.createForumTopicCalls != 0 {
+		t.Fatalf("topics = %d, want 0", stubBot.createForumTopicCalls)
+	}
+}
+
+func TestGeneralForumCommandCallbackUsesSessionlessCanonicalRoute(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	handled := make(chan *core.Message, 1)
+	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
+	p.SetMessageRoutePreflight(func(*core.Message) core.MessageRouteDisposition { return core.MessageRouteInPlace })
+	p.handleCallbackQuery(context.Background(), &models.CallbackQuery{
+		ID: "callback-1", From: models.User{ID: 7, Username: "alice"}, Data: "cmd:/reasoning high",
+		Message: models.MaybeInaccessibleMessage{Message: &models.Message{
+			ID: 14, MessageThreadID: 0, Text: "settings", Chat: models.Chat{ID: -100123, Type: models.ChatTypeSupergroup, IsForum: true},
+		}},
+	})
+	got := <-handled
+	if !got.Sessionless || got.SessionKey != "telegram:-100123:1:7" || got.ChannelKey != "-100123:1" {
+		t.Fatalf("callback route = sessionless:%v key:%q channel:%q", got.Sessionless, got.SessionKey, got.ChannelKey)
 	}
 }
 
