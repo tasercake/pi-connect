@@ -1508,7 +1508,6 @@ func TestPiSession_ResponseStateResetsBetweenTurns(t *testing.T) {
 	defer s.cancel()
 
 	s.finalTextBuf.WriteString("stale final")
-	s.emittedTextDelta = true
 	s.inputTokens = 10
 	s.outputTokens = 20
 
@@ -1516,9 +1515,6 @@ func TestPiSession_ResponseStateResetsBetweenTurns(t *testing.T) {
 
 	if got := s.finalTextBuf.String(); got != "" {
 		t.Fatalf("finalTextBuf = %q, want empty", got)
-	}
-	if s.emittedTextDelta {
-		t.Fatal("emittedTextDelta = true, want false")
 	}
 	if s.inputTokens != 0 || s.outputTokens != 0 {
 		t.Fatalf("usage = %d/%d, want 0/0", s.inputTokens, s.outputTokens)
@@ -2202,49 +2198,64 @@ func TestPiSession_ReadLoopUsesFinalTextOnlyResultContent(t *testing.T) {
 	}
 }
 
-func TestPiSession_ReadLoopTextDeltaSuppressesDuplicateResultContent(t *testing.T) {
+func TestPiSession_ReadLoopTextDeltasKeepAuthoritativeFinalResultContent(t *testing.T) {
 	sessionEvent := map[string]any{"type": "session", "id": "delta-sess"}
-	textEvent := map[string]any{
+	commentaryDelta := map[string]any{
 		"type": "message_update",
 		"assistantMessageEvent": map[string]any{
 			"type":  "text_delta",
-			"delta": "real final from delta",
+			"delta": "checking first",
 		},
 	}
-	finalEvent := map[string]any{
+	toolUseMessage := map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":       "assistant",
+			"stopReason": "toolUse",
+			"content": []any{
+				map[string]any{"type": "text", "text": "checking first"},
+				map[string]any{"type": "toolCall", "name": "bash"},
+			},
+		},
+	}
+	finalDelta := map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":  "text_delta",
+			"delta": "final answer",
+		},
+	}
+	finalMessage := map[string]any{
 		"type": "message_end",
 		"message": map[string]any{
 			"role":       "assistant",
 			"stopReason": "stop",
 			"content": []any{
-				map[string]any{"type": "text", "text": "real final from delta"},
+				map[string]any{"type": "text", "text": "final answer"},
 			},
 		},
 	}
 
-	evts := runReadLoopEvents(t, sessionEvent, textEvent, finalEvent)
+	evts := runReadLoopEvents(t, sessionEvent, commentaryDelta, toolUseMessage, finalDelta, finalMessage)
 
-	var textCount int
+	var text []string
 	var result *core.Event
 	for i := range evts {
 		switch evts[i].Type {
 		case core.EventText:
-			textCount++
-			if evts[i].Content != "real final from delta" {
-				t.Fatalf("text content = %q", evts[i].Content)
-			}
+			text = append(text, evts[i].Content)
 		case core.EventResult:
 			result = &evts[i]
 		}
 	}
-	if textCount != 1 {
-		t.Fatalf("text event count = %d, want 1", textCount)
+	if got, want := strings.Join(text, ""), "checking firstfinal answer"; got != want {
+		t.Fatalf("text content = %q, want %q", got, want)
 	}
 	if result == nil {
 		t.Fatal("missing result event")
 	}
-	if result.Content != "" {
-		t.Fatalf("result content = %q, want empty to avoid duplicate", result.Content)
+	if result.Content != "final answer" {
+		t.Fatalf("result content = %q, want authoritative final answer", result.Content)
 	}
 }
 

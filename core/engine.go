@@ -4673,13 +4673,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			persistLearnedAgentSessionID(session, sessions, currentAgentSession, agentName)
 			e.setRuntimeTurn(state, msgID, false, false)
 
+			// EventResult.Content is the adapter's authoritative final response.
+			// Accumulated text is only a fallback for adapters without one.
 			fullResponse := event.Content
-			// When tool progress is hidden, segmentStart stays 0 and textParts
-			// contains ALL text across tool boundaries. Prefer the full accumulated
-			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				fullResponse = strings.Join(textParts, "")
-			} else if fullResponse == "" && len(textParts) > 0 {
+			if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
