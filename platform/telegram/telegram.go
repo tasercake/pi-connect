@@ -35,35 +35,9 @@ type replyContext struct {
 	chatID    int64
 	threadID  int
 	messageID int
-	deferred  *deferredReplyTarget
-}
-
-type deferredReplyTarget struct {
-	once  sync.Once
-	ready chan struct{}
-	rctx  replyContext
-	err   error
-}
-
-func newDeferredReplyTarget() *deferredReplyTarget {
-	return &deferredReplyTarget{ready: make(chan struct{})}
-}
-
-func (d *deferredReplyTarget) resolve(rctx replyContext, err error) {
-	d.once.Do(func() {
-		d.rctx = rctx
-		d.err = err
-		close(d.ready)
-	})
-}
-
-func (d *deferredReplyTarget) wait(ctx context.Context) (replyContext, error) {
-	select {
-	case <-d.ready:
-		return d.rctx, d.err
-	case <-ctx.Done():
-		return replyContext{}, ctx.Err()
-	}
+	// deliveryReady is an output-only barrier. Session identity is already
+	// final; replies wait only so the source reference can be posted first.
+	deliveryReady <-chan struct{}
 }
 
 type mediaGroupKey struct {
@@ -73,15 +47,16 @@ type mediaGroupKey struct {
 	mediaGroupID string
 }
 
-type pendingTopicRouteKey struct {
-	chatID   int64
-	threadID int
-	userID   int64
+type generalRouteKey struct {
+	chatID    int64
+	messageID int
 }
 
 type pendingMediaGroup struct {
 	key      mediaGroupKey
+	token    uint64
 	items    []pendingMediaGroupItem
+	seen     map[int]struct{}
 	accepted bool
 	timer    *time.Timer
 }
@@ -115,6 +90,7 @@ type telegramBot interface {
 	FileDownloadLink(f *models.File) string
 	SetMessageReaction(ctx context.Context, params *tgbot.SetMessageReactionParams) (bool, error)
 	CreateForumTopic(ctx context.Context, params *tgbot.CreateForumTopicParams) (*models.ForumTopic, error)
+	EditForumTopic(ctx context.Context, params *tgbot.EditForumTopicParams) (bool, error)
 }
 
 type backoffTimer interface {
@@ -183,6 +159,7 @@ type Platform struct {
 	handler             core.MessageHandler
 	lifecycleHandler    core.PlatformLifecycleHandler
 	cancel              context.CancelFunc
+	lifecycleCtx        context.Context
 	stopping            bool
 	generation          uint64
 	unavailableNotified bool
@@ -195,9 +172,12 @@ type Platform struct {
 	mediaGroupMu       sync.Mutex
 	mediaGroupDebounce time.Duration
 	mediaGroups        map[mediaGroupKey]*pendingMediaGroup
+	sealedMediaGroups  map[mediaGroupKey]time.Time
+	mediaGroupToken    uint64
 
-	pendingTopicMu     sync.RWMutex
-	pendingTopicRoutes map[pendingTopicRouteKey]string
+	generalRouteMu sync.Mutex
+	generalRoutes  map[generalRouteKey]time.Time
+	titleSem       chan struct{}
 }
 
 const (
@@ -205,6 +185,10 @@ const (
 	maxReconnectBackoff       = 30 * time.Second
 	stableConnectionWindow    = 10 * time.Second
 	defaultMediaGroupDebounce = 1500 * time.Millisecond
+	telegramAPITimeout        = 10 * time.Second
+	generalRouteTTL           = 10 * time.Minute
+	titleConcurrency          = 1
+	telegramMessageLimit      = 4096
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -236,7 +220,11 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
+	return &Platform{
+		token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions,
+		httpClient: httpClient, titleSem: make(chan struct{}, titleConcurrency),
+	}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
@@ -277,6 +265,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.handler = handler
 	p.cancel = cancel
+	p.lifecycleCtx = ctx
 	p.bot = nil
 	p.selfUser = nil
 
@@ -432,9 +421,6 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		threadID = msg.MessageThreadID
 	}
 	sessionKey := p.buildSessionKey(msg.Chat.ID, threadID, msg.From.ID)
-	if provisional := p.pendingTopicSessionKey(msg.Chat.ID, threadID, msg.From.ID); provisional != "" {
-		sessionKey = provisional
-	}
 	channelKey := buildChannelKey(msg.Chat.ID, threadID)
 
 	userID := strconv.FormatInt(msg.From.ID, 10)
@@ -485,9 +471,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			})
 			return
 		}
-		imgData, err := p.downloadFile(best.FileID)
+		imgData, err := p.downloadFile(ctx, best.FileID)
 		if err != nil {
 			slog.Error("telegram: download photo failed", "error", err)
+			p.sendAttachmentDownloadFailure(ctx, msg)
 			return
 		}
 		base.Images = []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}}
@@ -497,9 +484,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	if msg.Voice != nil {
 		slog.Debug("telegram: voice received", "user", userName, "duration", msg.Voice.Duration)
-		audioData, err := p.downloadFile(msg.Voice.FileID)
+		audioData, err := p.downloadFile(ctx, msg.Voice.FileID)
 		if err != nil {
 			slog.Error("telegram: download voice failed", "error", err)
+			p.sendAttachmentDownloadFailure(ctx, msg)
 			return
 		}
 		p.dispatchMessage(ctx, &core.Message{
@@ -520,9 +508,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 
 	if msg.Audio != nil {
 		slog.Debug("telegram: audio file received", "user", userName)
-		audioData, err := p.downloadFile(msg.Audio.FileID)
+		audioData, err := p.downloadFile(ctx, msg.Audio.FileID)
 		if err != nil {
 			slog.Error("telegram: download audio failed", "error", err)
+			p.sendAttachmentDownloadFailure(ctx, msg)
 			return
 		}
 		format := "mp3"
@@ -572,9 +561,10 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 			})
 			return
 		}
-		fileData, err := p.downloadFile(msg.Document.FileID)
+		fileData, err := p.downloadFile(ctx, msg.Document.FileID)
 		if err != nil {
 			slog.Error("telegram: download document failed", "error", err)
+			p.sendAttachmentDownloadFailure(ctx, msg)
 			return
 		}
 		base.Files = []core.FileAttachment{{MimeType: msg.Document.MimeType, Data: fileData, FileName: msg.Document.FileName}}
@@ -624,41 +614,67 @@ func (p *Platform) enqueueMediaGroupItem(key mediaGroupKey, item pendingMediaGro
 	}
 
 	p.mediaGroupMu.Lock()
+	now := time.Now()
+	for sealedKey, expires := range p.sealedMediaGroups {
+		if !expires.After(now) {
+			delete(p.sealedMediaGroups, sealedKey)
+		}
+	}
+	if expires := p.sealedMediaGroups[key]; expires.After(now) {
+		p.mediaGroupMu.Unlock()
+		return
+	}
 	if p.mediaGroups == nil {
 		p.mediaGroups = make(map[mediaGroupKey]*pendingMediaGroup)
 	}
 	group := p.mediaGroups[key]
 	if group == nil {
-		group = &pendingMediaGroup{key: key}
+		p.mediaGroupToken++
+		group = &pendingMediaGroup{key: key, token: p.mediaGroupToken, seen: make(map[int]struct{})}
 		p.mediaGroups[key] = group
 	}
+	if _, duplicate := group.seen[item.messageID]; duplicate {
+		p.mediaGroupMu.Unlock()
+		return
+	}
+	group.seen[item.messageID] = struct{}{}
 	group.items = append(group.items, item)
 	group.accepted = group.accepted || item.directed
 	if group.timer != nil {
 		group.timer.Stop()
 	}
+	token := group.token
 	group.timer = time.AfterFunc(debounce, func() {
-		p.flushMediaGroup(key)
+		p.flushMediaGroup(key, token)
 	})
 	p.mediaGroupMu.Unlock()
 }
 
-func (p *Platform) flushMediaGroup(key mediaGroupKey) {
+func (p *Platform) flushMediaGroup(key mediaGroupKey, token uint64) {
 	p.mediaGroupMu.Lock()
 	group := p.mediaGroups[key]
-	if group == nil {
+	if group == nil || group.token != token {
 		p.mediaGroupMu.Unlock()
 		return
 	}
 	delete(p.mediaGroups, key)
+	if p.sealedMediaGroups == nil {
+		p.sealedMediaGroups = make(map[mediaGroupKey]time.Time)
+	}
+	expires := time.Now().Add(generalRouteTTL)
+	p.sealedMediaGroups[key] = expires
+	time.AfterFunc(generalRouteTTL, func() {
+		p.mediaGroupMu.Lock()
+		if p.sealedMediaGroups[key].Equal(expires) {
+			delete(p.sealedMediaGroups, key)
+		}
+		p.mediaGroupMu.Unlock()
+	})
 	accepted := group.accepted
 	items := append([]pendingMediaGroupItem(nil), group.items...)
 	p.mediaGroupMu.Unlock()
 
-	if !accepted {
-		return
-	}
-	if len(items) == 0 {
+	if !accepted || len(items) == 0 || p.isStopping() {
 		return
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].messageID < items[j].messageID })
@@ -675,27 +691,31 @@ func (p *Platform) flushMediaGroup(key mediaGroupKey) {
 	out.Images = nil
 	out.Files = nil
 	out.MessageID = strconv.Itoa(items[0].messageID)
+	ctx, cancel := p.operationContext(context.Background(), telegramAPITimeout)
+	defer cancel()
 	for _, item := range items {
 		if item.imageFile != "" {
-			imgData, err := p.downloadFile(item.imageFile)
+			imgData, err := p.downloadFile(ctx, item.imageFile)
 			if err != nil {
 				slog.Error("telegram: download media group photo failed", "error", err, "message_id", item.messageID)
+				p.sendAttachmentDownloadFailure(ctx, items[baseIdx].message)
 				return
 			}
 			out.Images = append(out.Images, core.ImageAttachment{MimeType: "image/jpeg", Data: imgData})
 			continue
 		}
 		if item.fileID != "" {
-			fileData, err := p.downloadFile(item.fileID)
+			fileData, err := p.downloadFile(ctx, item.fileID)
 			if err != nil {
 				slog.Error("telegram: download media group document failed", "error", err, "message_id", item.messageID)
+				p.sendAttachmentDownloadFailure(ctx, items[baseIdx].message)
 				return
 			}
 			out.Files = append(out.Files, core.FileAttachment{MimeType: item.fileMime, Data: fileData, FileName: item.fileName})
 		}
 	}
 
-	p.dispatchMessage(context.Background(), &out, items[baseIdx].message)
+	p.dispatchMessage(ctx, &out, items[baseIdx].message)
 }
 
 func (p *Platform) cancelMediaGroups() {
@@ -707,159 +727,186 @@ func (p *Platform) cancelMediaGroups() {
 		}
 		delete(p.mediaGroups, key)
 	}
+	clear(p.sealedMediaGroups)
 }
 
 const telegramForumTopicNameLimit = 128
 
-func (p *Platform) pendingTopicRouteKey(chatID int64, threadID int, userID int64) pendingTopicRouteKey {
-	if p.shareSessionInChannel {
-		userID = 0
-	}
-	return pendingTopicRouteKey{chatID: chatID, threadID: threadID, userID: userID}
-}
-
-func (p *Platform) setPendingTopicRoute(chatID int64, threadID int, userID int64, sessionKey string) {
-	key := p.pendingTopicRouteKey(chatID, threadID, userID)
-	p.pendingTopicMu.Lock()
-	if p.pendingTopicRoutes == nil {
-		p.pendingTopicRoutes = make(map[pendingTopicRouteKey]string)
-	}
-	p.pendingTopicRoutes[key] = sessionKey
-	p.pendingTopicMu.Unlock()
-}
-
-func (p *Platform) pendingTopicSessionKey(chatID int64, threadID int, userID int64) string {
-	key := p.pendingTopicRouteKey(chatID, threadID, userID)
-	p.pendingTopicMu.RLock()
-	sessionKey := p.pendingTopicRoutes[key]
-	p.pendingTopicMu.RUnlock()
-	return sessionKey
-}
-
-func (p *Platform) clearPendingTopicRoute(chatID int64, threadID int, userID int64) {
-	key := p.pendingTopicRouteKey(chatID, threadID, userID)
-	p.pendingTopicMu.Lock()
-	delete(p.pendingTopicRoutes, key)
-	p.pendingTopicMu.Unlock()
-}
-
-func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Message, tgMsg *models.Message) bool {
+// routeGeneralForumMessage creates a fallback-named topic synchronously so the
+// first core dispatch uses final identity. Returned function starts source
+// delivery; optional title decoration waits for core dispatch completion.
+func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Message, tgMsg *models.Message) (func(<-chan struct{}), bool) {
 	if !isGeneralForumMessage(tgMsg) {
-		return true
+		return nil, true
+	}
+	if !p.claimGeneralRoute(tgMsg.Chat.ID, tgMsg.ID) {
+		slog.Debug("telegram: duplicate General message ignored", "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		return nil, false
 	}
 
 	bot, err := p.connectedBot("create forum topic")
 	if err != nil {
 		slog.Error("telegram: prepare forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
-		return false
+		return nil, false
 	}
-	titleGenerator := p.conversationTitleGenerator()
-	if titleGenerator == nil {
-		err := fmt.Errorf("conversation title generator is unavailable")
-		slog.Error("telegram: prepare forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
-		p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicNamingFailed)
-		return false
+	fallbackName := fallbackForumTopicName(tgMsg)
+	topic, err := p.createForumTopic(ctx, bot, tgMsg.Chat.ID, fallbackName)
+	if err != nil || topic == nil || topic.MessageThreadID <= 1 {
+		if err == nil {
+			err = fmt.Errorf("invalid topic response")
+		}
+		slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		failureCtx, cancel := p.operationContext(ctx, telegramAPITimeout)
+		p.sendTopicCreationFailure(failureCtx, bot, tgMsg)
+		cancel()
+		return nil, false
 	}
 
-	provisionalID := fmt.Sprintf("pending-%d", tgMsg.ID)
-	msg.SessionKey = fmt.Sprintf("telegram:%d:%s", tgMsg.Chat.ID, provisionalID)
-	if !p.shareSessionInChannel {
-		msg.SessionKey += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
-	}
-	// Use the source General topic for initial workspace resolution. The engine
-	// copies any existing binding to the final topic when it binds the route.
-	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, tgMsg.MessageThreadID)
-
-	target := newDeferredReplyTarget()
-	msg.ReplyCtx = replyContext{deferred: target}
-	resultCh := make(chan core.DeferredRouteResult, 1)
-	boundCh := make(chan error, 1)
-	msg.DeferredRoute = &core.DeferredRoute{Result: resultCh, Bound: boundCh}
+	threadID := topic.MessageThreadID
+	sourceChannelKey := buildChannelKey(tgMsg.Chat.ID, tgMsg.MessageThreadID)
+	msg.SessionKey = p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
+	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, threadID)
+	msg.WorkspaceSourceChannelKey = sourceChannelKey
+	deliveryReady := make(chan struct{})
+	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID, deliveryReady: deliveryReady}
 	titleInput := forumTopicNamingInput(msg, tgMsg)
 
-	go func() {
-		name, err := titleGenerator(ctx, titleInput)
-		if err == nil {
-			name, err = normalizeGeneratedForumTopicName(name)
-		}
-		if err != nil {
-			err = fmt.Errorf("generate forum topic name: %w", err)
-			slog.Error("telegram: generate forum topic name failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
-			resultCh <- core.DeferredRouteResult{Err: err}
-			target.resolve(replyContext{}, err)
-			p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicNamingFailed)
-			return
-		}
+	return func(dispatchDone <-chan struct{}) {
+		go p.finishGeneralRoute(bot, tgMsg, threadID, titleInput, deliveryReady, dispatchDone)
+	}, true
+}
 
-		topic, err := bot.CreateForumTopic(ctx, &tgbot.CreateForumTopicParams{
-			ChatID: tgMsg.Chat.ID,
-			Name:   name,
-		})
-		if err != nil || topic == nil || topic.MessageThreadID <= 1 {
-			if err == nil {
-				err = fmt.Errorf("invalid topic response")
-			}
-			err = fmt.Errorf("create forum topic: %w", err)
-			slog.Error("telegram: create forum topic failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
-			resultCh <- core.DeferredRouteResult{Err: err}
-			target.resolve(replyContext{}, err)
-			p.sendTopicCreationFailure(ctx, bot, tgMsg)
-			return
+func (p *Platform) claimGeneralRoute(chatID int64, messageID int) bool {
+	p.generalRouteMu.Lock()
+	defer p.generalRouteMu.Unlock()
+	if p.generalRoutes == nil {
+		p.generalRoutes = make(map[generalRouteKey]time.Time)
+	}
+	now := time.Now()
+	for key, expires := range p.generalRoutes {
+		if !expires.After(now) {
+			delete(p.generalRoutes, key)
 		}
-
-		threadID := topic.MessageThreadID
-		if err := p.sendOriginalMessageLink(ctx, bot, tgMsg, threadID); err != nil {
-			err = fmt.Errorf("send original message link: %w", err)
-			slog.Error("telegram: send original message link failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
-			resultCh <- core.DeferredRouteResult{Err: err}
-			target.resolve(replyContext{}, err)
-			p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicOriginLinkFailed)
-			return
+	}
+	key := generalRouteKey{chatID: chatID, messageID: messageID}
+	if p.generalRoutes[key].After(now) {
+		return false
+	}
+	expires := now.Add(generalRouteTTL)
+	p.generalRoutes[key] = expires
+	time.AfterFunc(generalRouteTTL, func() {
+		p.generalRouteMu.Lock()
+		if p.generalRoutes[key].Equal(expires) {
+			delete(p.generalRoutes, key)
 		}
-
-		finalSessionKey := p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
-		finalChannelKey := buildChannelKey(tgMsg.Chat.ID, threadID)
-		p.setPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID, msg.SessionKey)
-		resultCh <- core.DeferredRouteResult{
-			SessionKey: finalSessionKey,
-			ChannelKey: finalChannelKey,
-			Title:      name,
-		}
-
-		// Normal agent turns acknowledge immediately after the core session is
-		// rebound. Early-return commands have no backend session to bind, so a
-		// short timeout lets their deferred reply continue in the created topic.
-		select {
-		case bindErr := <-boundCh:
-			if bindErr != nil {
-				p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
-				target.resolve(replyContext{}, bindErr)
-				p.sendTopicFailure(ctx, bot, tgMsg, core.MsgForumTopicBindingFailed)
-				return
-			}
-		case <-time.After(2 * time.Second):
-			slog.Debug("telegram: deferred route had no backend binding", "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
-		case <-ctx.Done():
-			p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
-			target.resolve(replyContext{}, ctx.Err())
-			return
-		}
-		p.clearPendingTopicRoute(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
-		target.resolve(replyContext{chatID: tgMsg.Chat.ID, threadID: threadID}, nil)
-
-		link := telegramMessageLink(tgMsg.Chat, threadID)
-		if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
-			ChatID: tgMsg.Chat.ID,
-			Text:   name + "\n" + link,
-			ReplyParameters: &models.ReplyParameters{
-				MessageID: tgMsg.ID,
-			},
-		}); err != nil {
-			slog.Error("telegram: send forum topic link failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
-		}
-	}()
-
+		p.generalRouteMu.Unlock()
+	})
 	return true
+}
+
+func fallbackForumTopicName(msg *models.Message) string {
+	base := core.NewI18n(telegramMessageLanguage(strings.TrimSpace(msg.Text+" "+msg.Caption), msg)).T(core.MsgForumTopicNewRequest)
+	name := fmt.Sprintf("%s · %d", base, msg.ID)
+	runes := []rune(name)
+	if len(runes) > telegramForumTopicNameLimit {
+		name = string(runes[:telegramForumTopicNameLimit])
+	}
+	return name
+}
+
+func (p *Platform) createForumTopic(ctx context.Context, bot telegramBot, chatID int64, name string) (*models.ForumTopic, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		callCtx, cancel := p.operationContext(ctx, telegramAPITimeout)
+		topic, err := bot.CreateForumTopic(callCtx, &tgbot.CreateForumTopicParams{ChatID: chatID, Name: name})
+		cancel()
+		if err == nil {
+			return topic, nil
+		}
+		var rateErr *tgbot.TooManyRequestsError
+		if !errors.As(err, &rateErr) || attempt > 0 || rateErr.RetryAfter < 0 || rateErr.RetryAfter > 2 {
+			return nil, err
+		}
+		timer := time.NewTimer(time.Duration(rateErr.RetryAfter) * time.Second)
+		base := p.operationBaseContext(ctx)
+		select {
+		case <-base.Done():
+			timer.Stop()
+			return nil, base.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("topic creation retry exhausted")
+}
+
+func (p *Platform) finishGeneralRoute(bot telegramBot, tgMsg *models.Message, threadID int, titleInput string, deliveryReady chan struct{}, dispatchDone <-chan struct{}) {
+	refCtx, cancel := p.operationContext(context.Background(), telegramAPITimeout)
+	err := p.sendOriginalMessageReference(refCtx, bot, tgMsg, threadID)
+	cancel()
+	if err != nil {
+		slog.Warn("telegram: send original message reference failed; releasing output", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+	}
+	close(deliveryReady)
+
+	handoffCtx, handoffCancel := p.operationContext(context.Background(), telegramAPITimeout)
+	_, err = bot.SendMessage(handoffCtx, &tgbot.SendMessageParams{
+		ChatID:             tgMsg.Chat.ID,
+		Text:               telegramMessageLink(tgMsg.Chat, threadID),
+		ReplyParameters:    &models.ReplyParameters{MessageID: tgMsg.ID},
+		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: tgbot.True()},
+	})
+	handoffCancel()
+	if err != nil {
+		slog.Warn("telegram: send forum topic handoff failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+	}
+
+	select {
+	case <-dispatchDone:
+	case <-p.operationBaseContext(context.Background()).Done():
+		return
+	}
+	p.renameForumTopic(bot, tgMsg, threadID, titleInput)
+}
+
+func (p *Platform) renameForumTopic(bot telegramBot, tgMsg *models.Message, threadID int, titleInput string) {
+	generator := p.conversationTitleGenerator()
+	if generator == nil {
+		slog.Debug("telegram: optional forum topic rename skipped; generator unavailable", "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		return
+	}
+	sem := p.titleSemaphore()
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	default:
+		slog.Warn("telegram: optional forum topic rename dropped; title worker saturated", "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		return
+	}
+
+	titleCtx, cancel := p.operationContext(context.Background(), 2*time.Minute)
+	name, err := generator(titleCtx, titleInput)
+	cancel()
+	if err == nil {
+		name, err = normalizeGeneratedForumTopicName(name)
+	}
+	if err != nil {
+		slog.Warn("telegram: optional forum topic rename failed", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID)
+		return
+	}
+	editCtx, editCancel := p.operationContext(context.Background(), telegramAPITimeout)
+	_, err = bot.EditForumTopic(editCtx, &tgbot.EditForumTopicParams{ChatID: tgMsg.Chat.ID, MessageThreadID: threadID, Name: name})
+	editCancel()
+	if err != nil {
+		slog.Warn("telegram: edit forum topic failed; keeping fallback title", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
+	}
+}
+
+func (p *Platform) titleSemaphore() chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.titleSem == nil {
+		p.titleSem = make(chan struct{}, titleConcurrency)
+	}
+	return p.titleSem
 }
 
 func isGeneralForumMessage(msg *models.Message) bool {
@@ -870,7 +917,7 @@ func isGeneralForumMessage(msg *models.Message) bool {
 }
 
 func forumTopicNamingInput(msg *core.Message, tgMsg *models.Message) string {
-	input := strings.Join(strings.Fields(msg.Content), " ")
+	input := strings.Join(strings.Fields(strings.TrimSpace(msg.ExtraContent+"\n"+msg.Content)), " ")
 	if input != "" {
 		return input
 	}
@@ -914,6 +961,12 @@ func normalizeGeneratedForumTopicName(raw string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("generated topic name is empty")
 	}
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"sure", "i can", "i'll", "i will", "here is", "you should", "happy to", "of course"} {
+		if lower == prefix || strings.HasPrefix(lower, prefix+" ") || strings.HasPrefix(lower, prefix+",") || strings.HasPrefix(lower, prefix+":") {
+			return "", fmt.Errorf("generated topic name is conversational")
+		}
+	}
 
 	runes := []rune(name)
 	if len(runes) > telegramForumTopicNameLimit {
@@ -953,20 +1006,35 @@ func telegramMessageLink(chat models.Chat, messageID int) string {
 	return fmt.Sprintf("https://t.me/c/%s/%d", internalID, messageID)
 }
 
-func (p *Platform) sendOriginalMessageLink(ctx context.Context, bot telegramBot, msg *models.Message, threadID int) error {
-	_, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID:          msg.Chat.ID,
-		MessageThreadID: threadID,
-		Text:            originalMessageReference(msg),
-		ParseMode:       models.ParseModeHTML,
-		LinkPreviewOptions: &models.LinkPreviewOptions{
-			IsDisabled: tgbot.True(),
-		},
-	})
-	return err
+func (p *Platform) sendOriginalMessageReference(ctx context.Context, bot telegramBot, msg *models.Message, threadID int) error {
+	htmlText, plainText := originalMessageReferences(msg)
+	params := &tgbot.SendMessageParams{
+		ChatID: msg.Chat.ID, MessageThreadID: threadID, Text: htmlText,
+		ParseMode:          models.ParseModeHTML,
+		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: tgbot.True()},
+	}
+	_, err := bot.SendMessage(ctx, params)
+	if err == nil || !isTelegramHTMLParseError(err) {
+		return err
+	}
+	params.Text = plainText
+	params.ParseMode = ""
+	_, fallbackErr := bot.SendMessage(ctx, params)
+	if fallbackErr != nil {
+		return errors.Join(err, fmt.Errorf("plain-text fallback: %w", fallbackErr))
+	}
+	return nil
 }
 
-func originalMessageReference(msg *models.Message) string {
+func isTelegramHTMLParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "can't parse") || strings.Contains(text, "parse entities")
+}
+
+func originalMessageReferences(msg *models.Message) (htmlText, plainText string) {
 	content := strings.TrimSpace(msg.Text)
 	if content == "" {
 		content = strings.TrimSpace(msg.Caption)
@@ -974,35 +1042,69 @@ func originalMessageReference(msg *models.Message) string {
 	if content == "" {
 		content = core.NewI18n(telegramMessageLanguage("", msg)).T(core.MsgForumTopicNewRequest)
 	}
-	content = truncateMessageLines(content, 5)
-
 	label := core.NewI18n(telegramMessageLanguage(content, msg)).T(core.MsgForumTopicReplyingTo)
+	visibleBudget := telegramMessageLimit - utf16Len(label) - 1
+	content = truncateMessage(content, 5, visibleBudget)
+
 	link := html.EscapeString(telegramMessageLink(msg.Chat, msg.ID))
-	return fmt.Sprintf(`<a href="%s">%s</a>%s%s`, link, html.EscapeString(label), "\n", html.EscapeString(content))
+	htmlText = fmt.Sprintf(`<a href="%s">%s</a>%s%s`, link, html.EscapeString(label), "\n", html.EscapeString(content))
+	plainText = label + "\n" + content
+	return htmlText, plainText
 }
 
-func truncateMessageLines(content string, maxLines int) string {
+func originalMessageReference(msg *models.Message) string {
+	htmlText, _ := originalMessageReferences(msg)
+	return htmlText
+}
+
+func truncateMessage(content string, maxLines, maxUTF16 int) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
 	content = strings.TrimSpace(content)
 	lines := strings.Split(content, "\n")
-	if len(lines) <= maxLines {
-		return content
+	truncated := len(lines) > maxLines
+	if truncated {
+		lines = lines[:maxLines]
 	}
-
-	lines = lines[:maxLines]
-	last := strings.TrimRight(lines[len(lines)-1], " \t")
-	if last == "" {
-		last = "…"
-	} else {
-		last += "…"
+	content = strings.Join(lines, "\n")
+	encoded := utf16.Encode([]rune(content))
+	if len(encoded) > maxUTF16 {
+		encoded = encoded[:maxUTF16]
+		if len(encoded) > 0 && 0xD800 <= encoded[len(encoded)-1] && encoded[len(encoded)-1] <= 0xDBFF {
+			encoded = encoded[:len(encoded)-1]
+		}
+		content = string(utf16.Decode(encoded))
+		truncated = true
 	}
-	lines[len(lines)-1] = last
-	return strings.Join(lines, "\n")
+	if truncated {
+		content = strings.TrimRight(content, " \t\n…")
+		budget := maxUTF16 - 1
+		for utf16Len(content) > budget {
+			runes := []rune(content)
+			content = string(runes[:len(runes)-1])
+		}
+		content += "…"
+	}
+	return content
 }
+
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
 
 func (p *Platform) sendTopicCreationFailure(ctx context.Context, bot telegramBot, msg *models.Message) {
 	p.sendTopicFailure(ctx, bot, msg, core.MsgForumTopicCreationFailed)
+}
+
+func (p *Platform) sendAttachmentDownloadFailure(ctx context.Context, msg *models.Message) {
+	if !isGeneralForumMessage(msg) {
+		return
+	}
+	bot, err := p.connectedBot("report attachment download failure")
+	if err != nil {
+		return
+	}
+	failureCtx, cancel := p.operationContext(ctx, telegramAPITimeout)
+	defer cancel()
+	p.sendTopicFailure(failureCtx, bot, msg, core.MsgForumTopicAttachmentFailed)
 }
 
 func (p *Platform) sendTopicFailure(ctx context.Context, bot telegramBot, msg *models.Message, key core.MsgKey) {
@@ -1018,10 +1120,6 @@ func (p *Platform) sendTopicFailure(ctx context.Context, bot telegramBot, msg *m
 }
 
 func (p *Platform) dispatchMessage(ctx context.Context, msg *core.Message, tgMsg *models.Message) {
-	if !p.routeGeneralForumMessage(ctx, msg, tgMsg) {
-		return
-	}
-
 	// Enrich with platform-specific context (reply quotes, location text, etc.)
 	var extras []string
 	if replyText := enrichReplyContent(tgMsg); replyText != "" {
@@ -1034,11 +1132,27 @@ func (p *Platform) dispatchMessage(ctx context.Context, msg *core.Message, tgMsg
 		msg.ExtraContent = strings.Join(extras, "\n")
 	}
 
-	handler := p.messageHandler()
-	if handler == nil {
+	postDispatch, ok := p.routeGeneralForumMessage(ctx, msg, tgMsg)
+	if !ok {
 		return
 	}
-	handler(p, msg)
+	handler := p.messageHandler()
+	if postDispatch == nil {
+		if handler != nil {
+			handler(p, msg)
+		}
+		return
+	}
+
+	// Start source-reference delivery first. Agent/command output waits on its
+	// barrier, avoiding synchronous command deadlocks. Optional title work waits
+	// until core dispatch returns.
+	dispatchDone := make(chan struct{})
+	postDispatch(dispatchDone)
+	if handler != nil {
+		handler(p, msg)
+	}
+	close(dispatchDone)
 }
 
 func (p *Platform) messageHandler() core.MessageHandler {
@@ -1162,6 +1276,23 @@ func (p *Platform) connectedBot(action string) (telegramBot, error) {
 		return nil, fmt.Errorf("telegram: %s: bot not connected", action)
 	}
 	return p.bot, nil
+}
+
+func (p *Platform) operationBaseContext(fallback context.Context) context.Context {
+	p.mu.RLock()
+	base := p.lifecycleCtx
+	p.mu.RUnlock()
+	if base != nil {
+		return base
+	}
+	if fallback != nil {
+		return context.WithoutCancel(fallback)
+	}
+	return context.Background()
+}
+
+func (p *Platform) operationContext(fallback context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(p.operationBaseContext(fallback), timeout)
 }
 
 func (p *Platform) botUsername() string {
@@ -1470,8 +1601,12 @@ func resolveReplyContext(ctx context.Context, rctx any) (replyContext, error) {
 	if !ok {
 		return replyContext{}, fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
-	if rc.deferred != nil {
-		return rc.deferred.wait(ctx)
+	if rc.deliveryReady != nil {
+		select {
+		case <-rc.deliveryReady:
+		case <-ctx.Done():
+			return replyContext{}, ctx.Err()
+		}
 	}
 	return rc, nil
 }
@@ -1701,12 +1836,13 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 	return err
 }
 
-func (p *Platform) downloadFile(fileID string) ([]byte, error) {
+func (p *Platform) downloadFile(parent context.Context, fileID string) ([]byte, error) {
 	bot, err := p.connectedBot("download file")
 	if err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
+	ctx, cancel := p.operationContext(parent, telegramAPITimeout)
+	defer cancel()
 	f, err := bot.GetFile(ctx, &tgbot.GetFileParams{FileID: fileID})
 	if err != nil {
 		return nil, fmt.Errorf("get file: %w", err)
@@ -1716,7 +1852,11 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 	}
 	link := bot.FileDownloadLink(f)
 
-	resp, err := p.httpClient.Get(link)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return nil, fmt.Errorf("download file %s: build request: %w", fileID, err)
+	}
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download file %s: %w", fileID, err)
 	}
@@ -1863,8 +2003,8 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 // until the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.deferred != nil {
-		// Never block agent startup while a Telegram topic is being named.
+	if !ok || rc.deliveryReady != nil {
+		// Preserve source-reference-first ordering without blocking Pi startup.
 		return func() {}
 	}
 
@@ -1952,6 +2092,9 @@ func (p *Platform) Stop() error {
 	p.mu.Unlock()
 
 	p.cancelMediaGroups()
+	p.generalRouteMu.Lock()
+	clear(p.generalRoutes)
+	p.generalRouteMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}

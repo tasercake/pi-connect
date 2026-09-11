@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -60,24 +61,29 @@ func New(opts map[string]any) (core.Agent, error) {
 	transport, _ := opts["transport"].(string)
 	transport = normalizeTransport(transport)
 
-	titleModel, _ := opts["topic_title_model"].(string)
+	titleModel, titleModelOK := opts["topic_title_model"].(string)
+	if _, configured := opts["topic_title_model"]; configured && !titleModelOK {
+		return nil, fmt.Errorf("pi: topic_title_model must be a string")
+	}
+	titleModel = strings.TrimSpace(titleModel)
 	if titleModel == "" && strings.HasPrefix(model, "openai-codex/") {
 		// Spark is the smallest ChatGPT Codex model and has no separate API bill.
 		titleModel = "openai-codex/gpt-5.3-codex-spark"
 	}
 	titleTimeout := 20 * time.Second
-	switch value := opts["topic_title_timeout_seconds"].(type) {
-	case int:
-		if value > 0 {
+	if raw, configured := opts["topic_title_timeout_seconds"]; configured {
+		switch value := raw.(type) {
+		case int:
 			titleTimeout = time.Duration(value) * time.Second
-		}
-	case int64:
-		if value > 0 {
+		case int64:
 			titleTimeout = time.Duration(value) * time.Second
-		}
-	case float64:
-		if value > 0 {
+		case float64:
 			titleTimeout = time.Duration(value * float64(time.Second))
+		default:
+			return nil, fmt.Errorf("pi: topic_title_timeout_seconds must be numeric")
+		}
+		if titleTimeout <= 0 || titleTimeout > 2*time.Minute {
+			return nil, fmt.Errorf("pi: topic_title_timeout_seconds must be greater than 0 and at most 120")
 		}
 	}
 
@@ -196,6 +202,39 @@ func conversationTitleUserPrompt(content string) string {
 
 // GenerateConversationTitle runs an isolated, tool-free Pi call. It reuses Pi's
 // configured provider credentials while avoiding session and project context.
+const titleCaptureLimit = 64 * 1024
+
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	remaining := b.max - b.buf.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.buf.Write(p)
+	}
+	return originalLen, nil
+}
+
+func (b *limitedBuffer) String() string { return b.buf.String() }
+
+var titleSecretPattern = regexp.MustCompile(`(?i)(api[_-]?key|token|authorization|bearer)(["' :=]+)([^\s,"']+)`)
+
+func safeTitleErrorDetail(detail string) string {
+	detail = strings.ToValidUTF8(strings.TrimSpace(detail), "�")
+	detail = titleSecretPattern.ReplaceAllString(detail, "$1$2[REDACTED]")
+	runes := []rune(detail)
+	if len(runes) > 300 {
+		detail = string(runes[:300]) + "…"
+	}
+	return detail
+}
+
 func (a *Agent) GenerateConversationTitle(ctx context.Context, content string) (string, error) {
 	a.mu.Lock()
 	cmdPath := a.cmd
@@ -238,20 +277,18 @@ func (a *Agent) GenerateConversationTitle(ctx context.Context, content string) (
 
 	command := exec.CommandContext(callCtx, cmdPath, args...)
 	command.Dir = workDir
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	stdout := &limitedBuffer{max: titleCaptureLimit}
+	stderr := &limitedBuffer{max: titleCaptureLimit}
+	command.Stdout = stdout
+	command.Stderr = stderr
 	err := command.Run()
 	if err != nil {
 		if callCtx.Err() != nil {
 			return "", fmt.Errorf("pi: generate conversation title: %w", callCtx.Err())
 		}
-		detail := strings.TrimSpace(stderr.String())
+		detail := safeTitleErrorDetail(stderr.String())
 		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
-		}
-		if len(detail) > 300 {
-			detail = detail[:300]
+			detail = safeTitleErrorDetail(stdout.String())
 		}
 		if detail != "" {
 			return "", fmt.Errorf("pi: generate conversation title: %w: %s", err, detail)

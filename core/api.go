@@ -282,13 +282,6 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session_key is required: set CC_SESSION_KEY env, pass --session-key, or ensure exactly one active session exists", http.StatusBadRequest)
 		return
 	}
-	s.mu.RLock()
-	engine := s.engines[project]
-	s.mu.RUnlock()
-	if engine != nil {
-		sessionKey = engine.resolveDeferredDeliveryKey(sessionKey)
-	}
-
 	job := &CronJob{
 		ID:          GenerateCronID(),
 		Project:     project,

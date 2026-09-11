@@ -136,43 +136,26 @@ type LocationAttachment struct {
 	ProximityAlertRadius int     // maximum distance for proximity alerts in meters (optional)
 }
 
-// DeferredRouteResult binds a provisional session to its final platform route.
-// Err is set when the route could not be created.
-type DeferredRouteResult struct {
-	SessionKey string
-	ChannelKey string
-	Title      string
-	Err        error
-}
-
-// DeferredRoute coordinates delayed platform routing with early agent startup.
-// The platform sends one Result after creating the final route. Bound must be a
-// buffered one-shot channel so the engine can acknowledge persistence safely.
-type DeferredRoute struct {
-	Result <-chan DeferredRouteResult
-	Bound  chan<- error
-}
-
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey    string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform      string
-	MessageID     string // platform message ID for tracing
-	Recalled      bool   // true for platform message recall/delete events targeting MessageID
-	UserID        string
-	UserName      string
-	ChatName      string // human-readable chat/group name (optional)
-	Content       string
-	Images        []ImageAttachment   // attached images (if any)
-	Files         []FileAttachment    // attached files (if any)
-	Audio         *AudioAttachment    // voice message (if any)
-	Location      *LocationAttachment // geographical location (if any)
-	ExtraContent  string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
-	ChannelKey    string              // platform-provided channel identifier for workspace binding (optional)
-	ReplyCtx      any                 // platform-specific context needed for replying
-	FromVoice     bool                // true if message originated from voice transcription
-	ModeOverride  string              // if set, temporarily override agent permission mode for this message
-	DeferredRoute *DeferredRoute      // optional route resolved after backend processing starts
+	SessionKey                string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform                  string
+	MessageID                 string // platform message ID for tracing
+	Recalled                  bool   // true for platform message recall/delete events targeting MessageID
+	UserID                    string
+	UserName                  string
+	ChatName                  string // human-readable chat/group name (optional)
+	Content                   string
+	Images                    []ImageAttachment   // attached images (if any)
+	Files                     []FileAttachment    // attached files (if any)
+	Audio                     *AudioAttachment    // voice message (if any)
+	Location                  *LocationAttachment // geographical location (if any)
+	ExtraContent              string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
+	ChannelKey                string              // platform-provided channel identifier for workspace binding (optional)
+	WorkspaceSourceChannelKey string              // optional source channel whose binding is copied to ChannelKey before routing
+	ReplyCtx                  any                 // platform-specific context needed for replying
+	FromVoice                 bool                // true if message originated from voice transcription
+	ModeOverride              string              // if set, temporarily override agent permission mode for this message
 }
 
 // EventType distinguishes different kinds of agent output.

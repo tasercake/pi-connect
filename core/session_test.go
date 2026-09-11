@@ -890,44 +890,6 @@ func TestLegacyData_PartiallyMigratedData(t *testing.T) {
 // TestLegacyData_ClearsAfterFirstNewCommand verifies the full migration
 // lifecycle: legacy data → disable filter → /new populates PastAgentSessionIDs
 // → filter re-enables on next cycle.
-func TestSessionManagerRebindUserKeyPersists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sessions.json")
-	sm := NewSessionManager(path)
-	session := sm.GetOrCreateActive("telegram:1:pending-10:7")
-	session.SetAgentSessionID("agent-session", "pi")
-	sm.UpdateUserMeta("telegram:1:pending-10:7", "alice", "forum")
-
-	if err := sm.RebindUserKey("telegram:1:pending-10:7", "telegram:1:77:7"); err != nil {
-		t.Fatal(err)
-	}
-	if got := sm.GetOrCreateActive("telegram:1:77:7"); got != session {
-		t.Fatal("final key did not retain the provisional session")
-	}
-	if got := sm.GetUserMeta("telegram:1:77:7"); got == nil || got.UserName != "alice" {
-		t.Fatalf("final metadata = %#v", got)
-	}
-	if got := sm.GetUserMeta("telegram:1:pending-10:7"); got != nil {
-		t.Fatalf("provisional metadata remains: %#v", got)
-	}
-
-	reloaded := NewSessionManager(path)
-	if got := reloaded.GetOrCreateActive("telegram:1:77:7").GetAgentSessionID(); got != "agent-session" {
-		t.Fatalf("reloaded agent session ID = %q", got)
-	}
-	if got := reloaded.ActiveSessionID("telegram:1:pending-10:7"); got != "" {
-		t.Fatalf("reloaded provisional active session = %q", got)
-	}
-}
-
-func TestSessionManagerRebindUserKeyRejectsExistingDestination(t *testing.T) {
-	sm := NewSessionManager("")
-	sm.GetOrCreateActive("pending")
-	sm.GetOrCreateActive("final")
-	if err := sm.RebindUserKey("pending", "final"); err == nil {
-		t.Fatal("expected destination collision error")
-	}
-}
-
 func TestLegacyData_ClearsAfterFirstNewCommand(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")

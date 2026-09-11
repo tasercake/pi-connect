@@ -74,10 +74,11 @@ type = "pi"
 [projects.agent.options]
 work_dir = "/path/to/your/project"
 mode = "default"
-# Optional: use a small/cheap model for General-topic title generation.
+# Optional: use a small/cheap model for asynchronous General-topic renames.
+# A fallback title is created first; rename failure never blocks Pi.
 # OpenAI Codex defaults to Spark; other providers use the normal agent model.
 topic_title_model = "openai-codex/gpt-5.3-codex-spark"
-topic_title_timeout_seconds = 20
+topic_title_timeout_seconds = 20 # valid range: 1-120
 
 [[projects.platforms]]
 type = "telegram"
@@ -196,15 +197,18 @@ as part of the Telegram session key, so each topic has its own independent
 conversation context.
 
 In a forum-enabled supergroup, each accepted message sent to the General topic
-starts Pi processing and a separate, tool-free LLM title call in parallel. The
-Telegram topic is created only after the LLM returns a valid concise name. Agent
-output waits for that topic, while backend processing can start immediately.
-After creation, pi-connect posts a clickable `Replying to:` label and a snippet
-of up to five lines from the original General message as the first bot message
-in the new topic. It then binds the Pi session to the topic,
-replies to the original General message with a topic link, and sends agent
-output only inside the new topic. If title generation fails or times out, no
-topic is created.
+first creates a dedicated topic with a localized fallback name such as
+`New request · 123`. Pi processing then starts with the final topic session key.
+After core dispatch starts, pi-connect can make a separate, tool-free LLM call
+to rename the topic. Title generation is optional, concurrency-bounded, and
+dropped when saturated. Missing generators, invalid output, timeouts, and
+Telegram rename failures leave the fallback name and do not affect Pi.
+
+Before agent output is delivered, pi-connect attempts to post a clickable
+`Replying to:` label and a snippet of up to five lines from the original General
+message as the first bot message in the new topic. This delivery barrier does
+not delay Pi processing. Reference failure is nonfatal and releases output.
+pi-connect also replies to the original General message with a topic link.
 
 The title call uses `topic_title_model` when configured. Choose a small, cheap,
 or free model supported by your Pi provider. For an `openai-codex/*` agent,
@@ -215,6 +219,9 @@ session. Its structured prompt treats the message as quoted source data and
 requires one impersonal noun-phrase title. It explicitly forbids answering the
 user, offering help, acknowledgements, conversational lead-ins, and first- or
 second-person phrasing.
+
+Duplicate or replayed General-message updates are suppressed for ten minutes,
+so they create at most one topic and dispatch at most once during that window.
 
 The bot must be an administrator with **Manage Topics** permission. Messages
 already inside a non-General topic continue in that topic. Standard groups and
