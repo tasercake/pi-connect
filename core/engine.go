@@ -4945,6 +4945,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.mu.Unlock()
+				turnStart = time.Now()
 
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
@@ -4986,7 +4987,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				textParts = nil
 				segmentStart = 0
 				toolCount = 0
-				turnStart = time.Now()
 				watchdogStartedAt = watchdogClock.Now()
 				stallDetector.beginOperation(watchdogStartedAt)
 				pendingWedgeCleanup = false
@@ -5256,6 +5256,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
 		state.mu.Unlock()
+		turnStart := time.Now()
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
@@ -5286,7 +5287,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, operationID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, operationID, turnStart, stopTyping, sendDone, queued.replyCtx)
 	}
 }
 

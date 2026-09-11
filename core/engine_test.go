@@ -7099,6 +7099,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	sess := newQueuingSession("qs2")
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
 
 	key := "test:user1"
 	session := e.sessions.GetOrCreateActive(key)
@@ -7123,7 +7124,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	go func() {
 		// Turn 1 result
 		sess.events <- Event{Type: EventText, Content: "response1"}
-		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		sess.events <- Event{Type: EventResult, Content: "response1", InputTokens: 28000, Done: true}
 		// Wait for the queued message's Send() call before pushing turn 2 events.
 		sess.sendMu.Lock()
 		for len(sess.sendCalls) == 0 {
@@ -7134,7 +7135,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 		sess.sendMu.Unlock()
 		// Turn 2 result (for the queued message)
 		sess.events <- Event{Type: EventText, Content: "response2"}
-		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+		sess.events <- Event{Type: EventResult, Content: "response2", InputTokens: 28000, Done: true}
 	}()
 
 	session.AddHistory("user", "initial-msg")
@@ -7145,7 +7146,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	// processInteractiveEvents should handle both turns.
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now().Add(-2*time.Hour-8*time.Minute-15*time.Second), nil, sendDone, nil)
 		close(done)
 	}()
 
@@ -7162,6 +7163,19 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	state.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("pendingMessages after processing = %d, want 0", remaining)
+	}
+
+	// Each final turn gets duration metadata. The queued turn resets its start
+	// time when processing begins instead of inheriting the prior turn's age.
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %#v, want two final replies", sent)
+	}
+	if !strings.Contains(sent[0], "worked 2h 8m") {
+		t.Fatalf("first final reply = %q, want duration from original turn start", sent[0])
+	}
+	if !strings.Contains(sent[1], "worked ") || strings.Contains(sent[1], "worked 2h") {
+		t.Fatalf("queued final reply = %q, want independently reset duration", sent[1])
 	}
 
 	// Verify both turns recorded in session history.
