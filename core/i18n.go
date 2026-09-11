@@ -159,6 +159,7 @@ const (
 	MsgQuietOff                    MsgKey = "quiet_off"
 	MsgDisplayModeCompact          MsgKey = "display_mode_compact"
 	MsgDisplayModeStaging          MsgKey = "display_mode_staging"
+	MsgDisplayModeNextTurn         MsgKey = "display_mode_next_turn"
 	MsgQuietUsage                  MsgKey = "quiet_usage"
 	MsgStagingStepsOmitted         MsgKey = "staging_steps_omitted"
 	MsgStagingBodyOmitted          MsgKey = "staging_body_omitted"
@@ -951,6 +952,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📝 暫存模式 — 即時進度集中在一則持續更新的時間軸中，最終答覆另行傳送。",
 		LangJapanese:           "📝 ステージングモード — ライブ進捗を1件のタイムラインで更新し、最終回答は別に送信します。",
 		LangSpanish:            "📝 Modo staging — el progreso se actualiza en una sola cronología; la respuesta final se envía aparte.",
+	},
+	MsgDisplayModeNextTurn: {
+		LangEnglish:            "This applies to new turns. Active turns keep their current display mode.",
+		LangChinese:            "此设置适用于新任务。正在进行的任务会保留当前显示模式。",
+		LangTraditionalChinese: "此設定適用於新任務。正在進行的任務會保留目前顯示模式。",
+		LangJapanese:           "この設定は新しいターンに適用されます。実行中のターンは現在の表示モードを維持します。",
+		LangSpanish:            "Este cambio se aplica a los turnos nuevos. Los turnos activos conservan su modo de visualización actual.",
 	},
 	MsgQuietUsage: {
 		LangEnglish:            "Usage: /quiet [full|quiet|staging|compact]",

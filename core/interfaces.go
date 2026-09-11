@@ -233,6 +233,21 @@ type ProgressUpdateThrottler interface {
 	ProgressUpdateInterval() time.Duration
 }
 
+// ProgressUpdateScheduler is an optional platform-level gate shared by all
+// progress writers. It prevents concurrent turns from collectively exceeding
+// one platform's edit budget. DeferProgressUpdates applies API-directed
+// backoff, such as Telegram's retry_after response, to every writer.
+type ProgressUpdateScheduler interface {
+	WaitProgressUpdate(ctx context.Context) error
+	DeferProgressUpdates(delay time.Duration)
+}
+
+// ProgressUpdateRetryClassifier lets a platform identify a transient progress
+// update failure and return the minimum delay before retrying it.
+type ProgressUpdateRetryClassifier interface {
+	ProgressUpdateRetryAfter(err error) (time.Duration, bool)
+}
+
 // ButtonOption represents a clickable inline button.
 type ButtonOption struct {
 	Text string // display text on the button

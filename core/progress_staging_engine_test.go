@@ -1,6 +1,8 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,7 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
 
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "engine staging preview")
 	starts, updates, sent := p.snapshot()
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want exactly one", len(starts))
@@ -39,10 +42,8 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 	if len(sent) != 1 || sent[0] != "final answer" {
 		t.Fatalf("standalone sends = %#v, want separate final answer only", sent)
 	}
-	if len(updates) == 0 {
-		t.Fatal("staging timeline was not edited")
-	}
-	finalTimeline := updates[len(updates)-1]
+	renders := append(starts, updates...)
+	finalTimeline := renders[len(renders)-1]
 	for _, want := range []string{"✅ ", "💭 inspect", "🔧 #1 Bash", "echo hi", "✅ #1 Bash", "hi", "✍️ draft text"} {
 		if !strings.Contains(finalTimeline, want) {
 			t.Fatalf("final timeline missing %q:\n%s", want, finalTimeline)
@@ -54,6 +55,55 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 	if strings.Count(finalTimeline, "✍️") != 1 {
 		t.Fatalf("intermediate text was not coalesced:\n%s", finalTimeline)
 	}
+}
+
+type blockingStagingSchedulerPlatform struct {
+	*stagingCapturePlatform
+	release chan struct{}
+}
+
+func (p *blockingStagingSchedulerPlatform) WaitProgressUpdate(ctx context.Context) error {
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (p *blockingStagingSchedulerPlatform) DeferProgressUpdates(time.Duration) {}
+
+func TestStagingProgressWaitDoesNotDelayPermissionPrompt(t *testing.T) {
+	capture := &stagingCapturePlatform{}
+	p := &blockingStagingSchedulerPlatform{stagingCapturePlatform: capture, release: make(chan struct{})}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "staging", ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	sessionKey := "capable:permission-priority"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("permission-priority-session")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	agentSession.events <- Event{Type: EventPermissionRequest, RequestID: "permission-1", ToolName: "Write", ToolInput: "file.txt"}
+	waitStaging(t, func() bool { _, _, sent := capture.snapshot(); return len(sent) == 1 }, "permission prompt while progress gate is blocked")
+	if starts, _, _ := capture.snapshot(); len(starts) != 0 {
+		t.Fatal("progress gate was not blocked during permission prompt assertion")
+	}
+
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	if pending == nil {
+		t.Fatal("permission was not actionable")
+	}
+	close(pending.Resolved)
+	close(p.release)
+	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	<-done
 }
 
 type queuedStagingSession struct {
@@ -98,6 +148,10 @@ func TestProcessInteractiveEventsStagingResetsForQueuedTurn(t *testing.T) {
 
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message-1", time.Now(), nil, nil, state.replyCtx)
 	<-secondDone
+	waitStaging(t, func() bool {
+		starts, updates, _ := p.snapshot()
+		return len(starts) == 2 && strings.Contains(strings.Join(append(starts, updates...), "\n"), "second thought")
+	}, "queued staging final timeline")
 	starts, updates, sent := p.snapshot()
 	if len(starts) != 2 {
 		t.Fatalf("preview starts = %d, want one per queued turn", len(starts))
@@ -105,8 +159,47 @@ func TestProcessInteractiveEventsStagingResetsForQueuedTurn(t *testing.T) {
 	if len(sent) != 2 || sent[0] != "first answer" || sent[1] != "second answer" {
 		t.Fatalf("queued final answers = %#v", sent)
 	}
-	if !strings.Contains(strings.Join(updates, "\n"), "second thought") {
-		t.Fatalf("second staging timeline missing: %#v", updates)
+	if !strings.Contains(strings.Join(append(starts, updates...), "\n"), "second thought") {
+		t.Fatalf("second staging timeline missing: starts=%#v updates=%#v", starts, updates)
+	}
+}
+
+func TestCmdQuietMidTurnAppliesStagingOnlyToNewTurns(t *testing.T) {
+	p := &stagingCapturePlatform{}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	sessionKey := "capable:mid-turn-mode"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("mid-turn-mode-session")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	agentSession.events <- Event{Type: EventThinking, Content: "before command"}
+	waitStaging(t, func() bool { _, _, sent := p.snapshot(); return len(sent) >= 1 }, "first full-mode progress")
+
+	e.cmdQuiet(p, &Message{ReplyCtx: "command"}, []string{"staging"})
+	replies := p.replySnapshot()
+	if len(replies) != 1 || !strings.Contains(replies[0], "new turns") || !strings.Contains(replies[0], "Active turns") {
+		t.Fatalf("mid-turn command response is ambiguous: %#v", replies)
+	}
+
+	agentSession.events <- Event{Type: EventThinking, Content: "after command"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	<-done
+	starts, _, sent := p.snapshot()
+	if len(starts) != 0 {
+		t.Fatalf("active full-mode turn hot-switched to staging: %d previews", len(starts))
+	}
+	joined := strings.Join(sent, "\n")
+	for _, want := range []string{"before command", "after command", "final answer"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("active turn did not retain full display; missing %q in %#v", want, sent)
+		}
 	}
 }
 
@@ -134,7 +227,43 @@ func TestConfigModeSetterAcceptsStaging(t *testing.T) {
 	}
 }
 
-func TestProcessInteractiveEventsStagingUpdateFailureFallsBackWithoutEventLoss(t *testing.T) {
+func TestProcessInteractiveEventsStaging429RetriesWithoutBlockingFinal(t *testing.T) {
+	transientErr := errors.New("telegram 429")
+	p := &stagingCapturePlatform{updateErrAt: 1, updateErr: transientErr, retryDelay: 250 * time.Millisecond}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "staging", ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
+	sessionKey := "capable:staging-429"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("staging-429-session")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "429 test preview")
+	agentSession.events <- Event{Type: EventThinking, Content: "coalesced thought"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "latest state"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("429 retry blocked final answer/event loop")
+	}
+	_, _, sent := p.snapshot()
+	if len(sent) != 1 || sent[0] != "final answer" {
+		t.Fatalf("429 emitted legacy progress: %#v", sent)
+	}
+	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 2 }, "429 latest-snapshot retry")
+	_, updates, _ := p.snapshot()
+	if len(updates) != 1 || !strings.Contains(updates[0], "latest state") {
+		t.Fatalf("429 retry did not retain latest timeline: %#v", updates)
+	}
+}
+
+func TestProcessInteractiveEventsStagingPermanentUpdateFailureDoesNotFlood(t *testing.T) {
 	p := &stagingCapturePlatform{updateErrAt: 1}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{Mode: "staging", ThinkingMessages: true, ToolMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500})
@@ -144,16 +273,22 @@ func TestProcessInteractiveEventsStagingUpdateFailureFallsBackWithoutEventLoss(t
 	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
 	e.interactiveStates[sessionKey] = state
 
-	agentSession.events <- Event{Type: EventThinking, Content: "fallback thought"}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "failure test preview")
+	agentSession.events <- Event{Type: EventThinking, Content: "must not become standalone"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo quiet"}
 	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+	<-done
 
 	starts, _, sent := p.snapshot()
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want one attempted staging message", len(starts))
 	}
-	joined := strings.Join(sent, "\n")
-	if !strings.Contains(joined, "fallback thought") || !strings.Contains(joined, "final answer") {
-		t.Fatalf("fallback lost event/final answer: %#v", sent)
+	if len(sent) != 1 || sent[0] != "final answer" {
+		t.Fatalf("permanent failure flooded standalone progress: %#v", sent)
 	}
 }

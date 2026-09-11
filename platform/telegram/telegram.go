@@ -179,6 +179,10 @@ type Platform struct {
 	generalRouteMu sync.Mutex
 	generalRoutes  map[generalRouteKey]time.Time
 	titleSem       chan struct{}
+
+	progressMu       sync.Mutex
+	progressNext     time.Time
+	progressInterval time.Duration
 }
 
 const (
@@ -190,6 +194,7 @@ const (
 	generalRouteTTL           = 10 * time.Minute
 	titleConcurrency          = 1
 	telegramMessageLimit      = 4096
+	telegramProgressInterval  = 5 * time.Second
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -1938,6 +1943,61 @@ type telegramPreviewHandle struct {
 	threadID  int
 	messageID int
 }
+
+func (p *Platform) progressIntervalLocked() time.Duration {
+	if p.progressInterval > 0 {
+		return p.progressInterval
+	}
+	return telegramProgressInterval
+}
+
+// WaitProgressUpdate reserves the next shared Telegram progress API slot.
+func (p *Platform) WaitProgressUpdate(ctx context.Context) error {
+	for {
+		p.progressMu.Lock()
+		now := time.Now()
+		if !p.progressNext.After(now) {
+			p.progressNext = now.Add(p.progressIntervalLocked())
+			p.progressMu.Unlock()
+			return nil
+		}
+		delay := time.Until(p.progressNext)
+		p.progressMu.Unlock()
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// DeferProgressUpdates applies Telegram's global retry_after window to all
+// concurrent staging writers on this platform instance.
+func (p *Platform) DeferProgressUpdates(delay time.Duration) {
+	if delay < 0 {
+		return
+	}
+	p.progressMu.Lock()
+	deferredUntil := time.Now().Add(delay)
+	if deferredUntil.After(p.progressNext) {
+		p.progressNext = deferredUntil
+	}
+	p.progressMu.Unlock()
+}
+
+func (p *Platform) ProgressUpdateRetryAfter(err error) (time.Duration, bool) {
+	var rateErr *tgbot.TooManyRequestsError
+	if !errors.As(err, &rateErr) {
+		return 0, false
+	}
+	return time.Duration(max(0, rateErr.RetryAfter)) * time.Second, true
+}
+
+var _ core.ProgressUpdateScheduler = (*Platform)(nil)
+var _ core.ProgressUpdateRetryClassifier = (*Platform)(nil)
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
