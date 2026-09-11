@@ -213,6 +213,11 @@ func main() {
 		slog.Error("runtime lifecycle store unavailable", "error", err)
 		os.Exit(1)
 	}
+	pendingMessages, err := core.NewPendingMessageStore(cfg.DataDir)
+	if err != nil {
+		slog.Error("pending message store unavailable", "error", err)
+		os.Exit(1)
+	}
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
@@ -279,6 +284,7 @@ func main() {
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 		engine.SetRuntimeLifecycleStore(runtimeLifecycle)
+		engine.SetPendingMessageStore(pendingMessages)
 		showCtx := true
 		if proj.ShowContextIndicator != nil {
 			showCtx = *proj.ShowContextIndicator
