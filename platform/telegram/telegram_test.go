@@ -106,6 +106,7 @@ type stubTelegramBot struct {
 	files                  map[string]*models.File
 	downloadURL            string
 	sendMessageParams      []*tgbot.SendMessageParams
+	editMessageTextParams  []*tgbot.EditMessageTextParams
 	createForumTopicParams []*tgbot.CreateForumTopicParams
 	editForumTopicParams   []*tgbot.EditForumTopicParams
 }
@@ -187,9 +188,11 @@ func (b *stubTelegramBot) SendChatAction(_ context.Context, _ *tgbot.SendChatAct
 	return true, nil
 }
 
-func (b *stubTelegramBot) EditMessageText(_ context.Context, _ *tgbot.EditMessageTextParams) (*models.Message, error) {
+func (b *stubTelegramBot) EditMessageText(_ context.Context, params *tgbot.EditMessageTextParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.editMessageTextCalls++
+	paramsCopy := *params
+	b.editMessageTextParams = append(b.editMessageTextParams, &paramsCopy)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
@@ -408,6 +411,33 @@ func TestProgressUpdateRetryAfterClassifiesWrappedTelegram429(t *testing.T) {
 	}
 	if _, ok := p.ProgressUpdateRetryAfter(errors.New("permanent")); ok {
 		t.Fatal("permanent error classified as transient")
+	}
+}
+
+func TestStagingToolBodiesRenderAsTelegramCodeBlocks(t *testing.T) {
+	stubBot := newStubTelegramBot()
+	p := &Platform{bot: stubBot}
+	style := p.StagingProgressStyle()
+	if !style.ToolBodiesAsCode || !style.RepeatLiveHeader || !style.CompactOnComplete {
+		t.Fatalf("Telegram staging style = %#v", style)
+	}
+	call := "⏳ 1s · 🔧 1 · 🪜 1\n\n🔧 #1 Bash\n```\nprintf '<tag>'\n```\n\n⏳ 1s · 🔧 1 · 🪜 1"
+	handle, err := p.SendPreviewStart(context.Background(), replyContext{chatID: 1}, call)
+	if err != nil {
+		t.Fatalf("SendPreviewStart: %v", err)
+	}
+	result := "⏳ 2s · 🔧 1 · 🪜 2\n\n✅ #1 Bash · completed · ↩ 0\n```\n<tag>\n```\n\n⏳ 2s · 🔧 1 · 🪜 2"
+	if err := p.UpdateMessage(context.Background(), handle, result); err != nil {
+		t.Fatalf("UpdateMessage: %v", err)
+	}
+
+	stubBot.mu.Lock()
+	defer stubBot.mu.Unlock()
+	if got := stubBot.sendMessageParams[0]; got.ParseMode != models.ParseModeHTML || !strings.Contains(got.Text, "<pre><code>printf '&lt;tag&gt;'</code></pre>") {
+		t.Fatalf("tool call was not sent as Telegram code block: %#v", got)
+	}
+	if got := stubBot.editMessageTextParams[0]; got.ParseMode != models.ParseModeHTML || !strings.Contains(got.Text, "<pre><code>&lt;tag&gt;</code></pre>") {
+		t.Fatalf("tool result was not updated as Telegram code block: %#v", got)
 	}
 }
 

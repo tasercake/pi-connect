@@ -83,6 +83,7 @@ type stagingProgressWriter struct {
 	replyCtx        any
 	starter         PreviewStarter
 	updater         MessageUpdater
+	cleaner         PreviewCleaner
 	scheduler       ProgressUpdateScheduler
 	retryClassifier ProgressUpdateRetryClassifier
 	waitOutbound    func(context.Context) error
@@ -100,12 +101,14 @@ type stagingProgressWriter struct {
 	enabled           bool
 	degraded          bool
 	terminal          bool
+	discarded         bool
 	terminalDeadline  time.Time
 	stopped           bool
 	lastSent          string
 	lastUpdateAt      time.Time
 	minUpdateInterval time.Duration
 	terminalLifetime  time.Duration
+	style             StagingProgressStyle
 
 	newTicker  func(time.Duration) stagingTicker
 	ticker     stagingTicker
@@ -155,6 +158,10 @@ func newStagingProgressWriter(ctx context.Context, p Platform, replyCtx any, sta
 	}
 	w.starter = starter
 	w.updater = updater
+	w.cleaner, _ = p.(PreviewCleaner)
+	if styleProvider, ok := p.(StagingProgressStyleProvider); ok {
+		w.style = styleProvider.StagingProgressStyle()
+	}
 	if throttler, ok := p.(ProgressUpdateThrottler); ok {
 		w.minUpdateInterval = throttler.ProgressUpdateInterval()
 	}
@@ -244,8 +251,8 @@ func (w *stagingProgressWriter) append(entry stagingEntry, coalesceText bool) bo
 	if w.transform != nil && entry.body != "" {
 		entry.body = w.transform(entry.body)
 	}
-	// Timeline is plain compact text. Remove fence delimiters so truncation can
-	// never leave malformed markdown around multiline tool bodies.
+	// Tool bodies are rendered in fenced code blocks. Neutralize nested fences
+	// so tool-provided content cannot close the staging block early.
 	entry.body = strings.ReplaceAll(entry.body, "```", "'''")
 	entry.body = middleTruncateStaging(entry.body, stagingProgressBodyRunes, w.bodyOmission)
 
@@ -305,10 +312,32 @@ func (w *stagingProgressWriter) Finalize(state stagingProgressState) bool {
 		// preview exists, it exits instead of creating one after the final answer.
 		w.cancelRunning()
 	}
-	if w.degraded {
+	// A failed live edit suppresses periodic updates, but completion gets one
+	// final cleanup attempt so detailed tool content does not remain forever.
+	w.degraded = false
+	w.signalLocked()
+	return true
+}
+
+// Discard removes the staging preview without publishing a terminal snapshot.
+// It is used when a turn intentionally produces no final response.
+func (w *stagingProgressWriter) Discard() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.enabled {
 		w.stopWorkerLocked()
-		return true
+		return false
 	}
+	if w.terminal {
+		return w.discarded
+	}
+	w.terminal = true
+	w.discarded = true
+	w.terminalDeadline = time.Now().Add(w.terminalLifetime)
+	if w.cancelRunning != nil {
+		w.cancelRunning()
+	}
+	w.degraded = false
 	w.signalLocked()
 	return true
 }
@@ -353,9 +382,86 @@ func (w *stagingProgressWriter) runWorker() {
 func (w *stagingProgressWriter) deliverLatest() bool {
 	for {
 		w.mu.Lock()
-		if w.stopped || w.degraded {
+		if w.stopped {
 			w.mu.Unlock()
 			return false
+		}
+		if w.discarded {
+			handle := w.handle
+			cleaner := w.cleaner
+			lastUpdateAt := w.lastUpdateAt
+			if handle == nil || cleaner == nil {
+				w.stopped = true
+				w.stopWorkerLocked()
+				w.mu.Unlock()
+				return false
+			}
+			w.mu.Unlock()
+
+			if w.minUpdateInterval > 0 {
+				if delay := w.minUpdateInterval - w.now().Sub(lastUpdateAt); delay > 0 && !w.waitForDelivery(delay) {
+					return false
+				}
+			}
+			deliveryCtx, cancelDelivery := w.deliveryContext()
+			releaseProgress := func(bool) {}
+			if w.scheduler != nil {
+				var err error
+				releaseProgress, err = w.scheduler.AcquireProgressUpdate(deliveryCtx)
+				if err != nil {
+					cancelDelivery()
+					if w.shouldRestartTerminal(err) {
+						continue
+					}
+					return false
+				}
+			}
+			if w.waitOutbound != nil {
+				if err := w.waitOutbound(deliveryCtx); err != nil {
+					releaseProgress(false)
+					cancelDelivery()
+					if w.shouldRestartTerminal(err) {
+						continue
+					}
+					return false
+				}
+			}
+			callCtx, cancelCall := w.withAPITimeout(deliveryCtx)
+			err := cleaner.DeletePreviewMessage(callCtx, handle)
+			cancelCall()
+			if err != nil {
+				delay, transient := w.retryAfter(err)
+				if transient && w.scheduler != nil {
+					w.scheduler.DeferProgressUpdates(delay)
+				}
+				releaseProgress(true)
+				cancelDelivery()
+				if w.shouldRestartTerminal(err) {
+					continue
+				}
+				if transient {
+					slog.Warn("staging progress: transient silent-preview deletion failure; retrying", "platform", w.platform.Name(), "retry_after", delay, "error", err)
+					if w.waitForDelivery(delay) {
+						continue
+					}
+					return false
+				}
+				slog.Warn("staging progress: failed to discard silent preview", "platform", w.platform.Name(), "error", err)
+				return false
+			}
+			releaseProgress(true)
+			cancelDelivery()
+			w.mu.Lock()
+			w.stopped = true
+			w.stopWorkerLocked()
+			w.mu.Unlock()
+			return false
+		}
+		if w.degraded {
+			// Suppress periodic live retries. Finalize or Discard clears degraded
+			// and wakes this worker for one terminal cleanup attempt.
+			w.mu.Unlock()
+			return true
 		}
 		content := w.renderLocked()
 		handle := w.handle
@@ -418,11 +524,17 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 		// Re-render after pacing waits so bursts and retry windows send only the
 		// newest state. The shared progress lease stays held through the API call.
 		w.mu.Lock()
-		if w.stopped || w.degraded || (w.terminal && w.handle == nil) {
+		if w.stopped || (w.terminal && w.handle == nil) {
 			w.mu.Unlock()
 			releaseProgress(false)
 			cancelDelivery()
 			return false
+		}
+		if w.discarded || w.degraded {
+			w.mu.Unlock()
+			releaseProgress(false)
+			cancelDelivery()
+			continue
 		}
 		content = w.renderLocked()
 		handle = w.handle
@@ -460,13 +572,33 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 				}
 				continue
 			}
-			slog.Warn("staging progress: delivery failed permanently; suppressing further progress", "platform", w.platform.Name(), "error", err)
 			w.mu.Lock()
-			w.degraded = true
-			w.stopped = true
-			w.stopWorkerLocked()
+			terminal = w.terminal
+			discarded := w.discarded
+			latest := w.renderLocked()
+			if discarded {
+				w.mu.Unlock()
+				continue
+			}
+			if terminal && latest != content {
+				// Terminal state won a race with a failed live edit. Retry once
+				// using the terminal snapshot instead of leaving detailed content.
+				w.mu.Unlock()
+				continue
+			}
+			if terminal {
+				w.stopped = true
+				w.stopWorkerLocked()
+			} else {
+				w.degraded = true
+			}
 			w.mu.Unlock()
-			return false
+			if terminal {
+				slog.Warn("staging progress: terminal delivery failed permanently", "platform", w.platform.Name(), "error", err)
+				return false
+			}
+			slog.Warn("staging progress: live delivery failed permanently; suppressing updates until terminal cleanup", "platform", w.platform.Name(), "error", err)
+			return true
 		}
 		releaseProgress(true)
 		cancelDelivery()
@@ -479,11 +611,15 @@ func (w *stagingProgressWriter) deliverLatest() bool {
 		w.lastUpdateAt = w.now()
 		latest := w.renderLocked()
 		terminal = w.terminal
-		if terminal && latest == content {
+		discarded := w.discarded
+		if terminal && latest == content && !discarded {
 			w.stopped = true
 			w.stopWorkerLocked()
 		}
 		w.mu.Unlock()
+		if discarded {
+			continue
+		}
 		if terminal && latest == content {
 			return false
 		}
@@ -552,6 +688,12 @@ func (w *stagingProgressWriter) waitForDelivery(delay time.Duration) bool {
 
 func (w *stagingProgressWriter) renderLocked() string {
 	header := fmt.Sprintf("%s %ds · 🔧 %d · 🪜 %d", stagingStateIcon(w.state), max(0, int(w.now().Sub(w.startTime)/time.Second)), w.toolCount, w.stepCount)
+	// After the final answer has been sent, retain only the compact status
+	// summary. Tool inputs and outputs must not remain in the terminal message.
+	if w.state == stagingStateCompleted && w.style.CompactOnComplete {
+		return header
+	}
+
 	lines := make([]string, len(w.entries))
 	for i := range w.entries {
 		lines[i] = w.renderEntry(w.entries[i])
@@ -564,6 +706,10 @@ func (w *stagingProgressWriter) renderLocked() string {
 			parts = append(parts, w.i18n.Tf(MsgStagingStepsOmitted, omitted))
 		}
 		parts = append(parts, lines...)
+		// Repeat the live status at the bottom once there is a timeline body.
+		if len(lines) > 0 && w.style.RepeatLiveHeader {
+			parts = append(parts, header)
+		}
 		content := strings.Join(parts, "\n\n")
 		if utf8.RuneCountInString(content) <= stagingProgressMaxRunes {
 			return content
@@ -573,11 +719,10 @@ func (w *stagingProgressWriter) renderLocked() string {
 			omitted++
 			continue
 		}
-		available := stagingProgressMaxRunes - utf8.RuneCountInString(strings.Join(parts[:len(parts)-len(lines)], "\n\n")) - 2
-		if available < 1 || len(lines) == 0 {
-			return runePrefix(header, stagingProgressMaxRunes)
-		}
-		lines[0] = middleTruncateStaging(lines[0], available, w.bodyOmission)
+		// Individual bodies are capped well below the platform limit. Keep
+		// fenced code blocks structurally valid if an unusually long localized
+		// omission marker consumes the remaining budget.
+		return runePrefix(header, stagingProgressMaxRunes)
 	}
 }
 
@@ -590,6 +735,9 @@ func (w *stagingProgressWriter) renderEntry(entry stagingEntry) string {
 		label := fmt.Sprintf("🔧 #%d", entry.toolNo)
 		if entry.tool != "" {
 			label += " " + entry.tool
+		}
+		if w.style.ToolBodiesAsCode {
+			return appendStagingCodeBody(label, entry.body)
 		}
 		return appendStagingBody(label, body)
 	case stagingEntryToolResult:
@@ -617,6 +765,9 @@ func (w *stagingProgressWriter) renderEntry(entry stagingEntry) string {
 		}
 		if len(metadata) > 0 {
 			label += " · " + strings.Join(metadata, " · ")
+		}
+		if w.style.ToolBodiesAsCode {
+			return appendStagingCodeBody(label, entry.body)
 		}
 		return appendStagingBody(label, body)
 	case stagingEntryText:
@@ -652,6 +803,13 @@ func appendStagingBody(label, body string) string {
 		return label
 	}
 	return label + " " + body
+}
+
+func appendStagingCodeBody(label, body string) string {
+	if body == "" {
+		return label
+	}
+	return label + "\n```\n" + body + "\n```"
 }
 
 func indentStagingBody(body string) string {

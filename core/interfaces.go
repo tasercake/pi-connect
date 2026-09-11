@@ -221,6 +221,20 @@ type ProgressStyleProvider interface {
 	ProgressStyle() string
 }
 
+// StagingProgressStyle controls platform-specific staging timeline rendering.
+// Zero values preserve the original plain, top-header-only timeline.
+type StagingProgressStyle struct {
+	ToolBodiesAsCode  bool
+	RepeatLiveHeader  bool
+	CompactOnComplete bool
+}
+
+// StagingProgressStyleProvider lets a platform opt in to staging presentation
+// features that its message renderer supports safely.
+type StagingProgressStyleProvider interface {
+	StagingProgressStyle() StagingProgressStyle
+}
+
 // ProgressCardPayloadSupport is an optional interface for platforms that can
 // parse and render structured progress-card payloads.
 type ProgressCardPayloadSupport interface {

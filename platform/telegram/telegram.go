@@ -2026,6 +2026,16 @@ func (p *Platform) ProgressUpdateRetryAfter(err error) (time.Duration, bool) {
 
 var _ core.ProgressUpdateScheduler = (*Platform)(nil)
 var _ core.ProgressUpdateRetryClassifier = (*Platform)(nil)
+var _ core.StagingProgressStyleProvider = (*Platform)(nil)
+
+// StagingProgressStyle enables Telegram-safe rich staging presentation.
+func (p *Platform) StagingProgressStyle() core.StagingProgressStyle {
+	return core.StagingProgressStyle{
+		ToolBodiesAsCode:  true,
+		RepeatLiveHeader:  true,
+		CompactOnComplete: true,
+	}
+}
 
 // SendPreviewStart sends a new message and returns a handle for subsequent edits.
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
