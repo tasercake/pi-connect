@@ -239,14 +239,19 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
-	platformLifecycleMu sync.Mutex
-	platformReady       map[Platform]bool
-	lifecycleWorkers    map[Platform]bool
-	lifecycleWorkersWG  sync.WaitGroup
-	stopping            bool
-	runtimeLifecycle    *RuntimeLifecycleStore
-	replyFooterMu       sync.Mutex
-	replyFooterUsage    replyFooterUsageCache
+	platformLifecycleMu    sync.Mutex
+	platformReady          map[Platform]bool
+	lifecycleWorkers       map[Platform]bool
+	lifecycleWorkersWG     sync.WaitGroup
+	stopping               bool
+	runtimeLifecycle       *RuntimeLifecycleStore
+	pendingMessages        *PendingMessageStore
+	pendingRecoveryStarted map[Platform]bool
+	recoveredPendingMu     sync.Mutex
+	recoveredPendingIDs    map[string]bool
+	pendingMutationMu      sync.Mutex // serializes spool deletion with Engine.Stop
+	replyFooterMu          sync.Mutex
+	replyFooterUsage       replyFooterUsageCache
 
 	// /web command callbacks
 	webSetupFunc  func() (port int, token string, needRestart bool, err error)
@@ -277,6 +282,7 @@ type queuedMessage struct {
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
 	channelKey    string // platform-provided channel identifier (preferred over sessionKey extraction)
+	durableID     string // durable queue record; empty for volatile/test queues
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -285,6 +291,7 @@ type interactiveState struct {
 	platform               Platform
 	replyCtx               any
 	currentMessageID       string
+	currentDurableQueueID  string
 	workspaceDir           string
 	agent                  Agent
 	mu                     sync.Mutex
@@ -421,32 +428,34 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:                  name,
-		agent:                 ag,
-		platforms:             platforms,
-		sessions:              NewSessionManager(sessionStorePath),
-		ctx:                   ctx,
-		cancel:                cancel,
-		i18n:                  NewI18n(lang),
-		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
-		commands:              NewCommandRegistry(),
-		skills:                NewSkillRegistry(),
-		aliases:               make(map[string]string),
-		interactiveStates:     make(map[string]*interactiveState),
-		platformReady:         make(map[Platform]bool),
-		lifecycleWorkers:      make(map[Platform]bool),
-		startedAt:             time.Now(),
-		streamPreview:         DefaultStreamPreviewCfg(),
-		references:            DefaultReferenceRenderCfg(),
-		eventIdleTimeout:      defaultEventIdleTimeout,
-		stallProbeTimeout:     defaultStallProbeTimeout,
-		stallProbeInterval:    defaultStallProbeInterval,
-		stallProbeFailures:    defaultStallProbeFailures,
-		stallGraceProbeCount:  defaultStallGraceProbeCount,
-		stallClock:            realWatchdogClock{},
-		maxQueuedMessages:     defaultMaxQueuedMessages,
-		showContextIndicator:  true,
+		name:                   name,
+		agent:                  ag,
+		platforms:              platforms,
+		sessions:               NewSessionManager(sessionStorePath),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		i18n:                   NewI18n(lang),
+		attachmentSendEnabled:  true,
+		display:                DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		commands:               NewCommandRegistry(),
+		skills:                 NewSkillRegistry(),
+		aliases:                make(map[string]string),
+		interactiveStates:      make(map[string]*interactiveState),
+		platformReady:          make(map[Platform]bool),
+		lifecycleWorkers:       make(map[Platform]bool),
+		pendingRecoveryStarted: make(map[Platform]bool),
+		recoveredPendingIDs:    make(map[string]bool),
+		startedAt:              time.Now(),
+		streamPreview:          DefaultStreamPreviewCfg(),
+		references:             DefaultReferenceRenderCfg(),
+		eventIdleTimeout:       defaultEventIdleTimeout,
+		stallProbeTimeout:      defaultStallProbeTimeout,
+		stallProbeInterval:     defaultStallProbeInterval,
+		stallProbeFailures:     defaultStallProbeFailures,
+		stallGraceProbeCount:   defaultStallGraceProbeCount,
+		stallClock:             realWatchdogClock{},
+		maxQueuedMessages:      defaultMaxQueuedMessages,
+		showContextIndicator:   true,
 	}
 
 	if ag != nil {
@@ -1513,6 +1522,12 @@ func (e *Engine) SetRuntimeLifecycleStore(store *RuntimeLifecycleStore) {
 	e.runtimeLifecycle = store
 }
 
+// SetPendingMessageStore enables durable storage for accepted busy-session prompts.
+// Embedders that do not set a store retain the legacy volatile queue.
+func (e *Engine) SetPendingMessageStore(store *PendingMessageStore) {
+	e.pendingMessages = store
+}
+
 func (e *Engine) Start() error {
 	var startErrs []error
 	readyCount := 0
@@ -1567,12 +1582,16 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) Stop() error {
+	// Linearize shutdown against spool deletion. Deletions that acquired this
+	// lock first complete before shutdown; after cancellation, none can begin.
+	e.pendingMutationMu.Lock()
 	e.platformLifecycleMu.Lock()
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
 	// Cancel first so late lifecycle callbacks observe shutdown immediately.
 	e.cancel()
+	e.pendingMutationMu.Unlock()
 
 	// Lifecycle delivery may be inside Platform.Send. Let context-aware sends
 	// unwind before Platform.Stop tears down their clients; bound wait so a
@@ -1660,6 +1679,7 @@ func (e *Engine) onPlatformReady(p Platform) {
 	slog.Info("platform ready", "project", e.name, "platform", p.Name())
 	e.initPlatformCapabilities(p)
 	e.startLifecycleDelivery(p)
+	e.startPendingMessageRecovery(p)
 }
 
 func (e *Engine) markPlatformReady(p Platform) bool {
@@ -1688,6 +1708,193 @@ func (e *Engine) markPlatformUnavailable(p Platform) bool {
 	}
 	e.platformReady[p] = false
 	return true
+}
+
+func (e *Engine) startPendingMessageRecovery(p Platform) {
+	if e.pendingMessages == nil {
+		return
+	}
+	e.platformLifecycleMu.Lock()
+	if e.stopping || e.pendingRecoveryStarted[p] {
+		e.platformLifecycleMu.Unlock()
+		return
+	}
+	e.pendingRecoveryStarted[p] = true
+	e.lifecycleWorkersWG.Add(1)
+	e.platformLifecycleMu.Unlock()
+
+	go func() {
+		defer e.lifecycleWorkersWG.Done()
+		e.recoverPendingMessages(p)
+	}()
+}
+
+func (e *Engine) recoverPendingMessages(p Platform) {
+	reconstructor, ok := p.(ReplyContextReconstructor)
+	if !ok {
+		slog.Error("durable queue recovery unsupported", "project", e.name, "platform", p.Name())
+		return
+	}
+	records, err := e.pendingMessages.List(e.name, p.Name())
+	if err != nil {
+		slog.Error("durable queue recovery list failed", "project", e.name, "platform", p.Name(), "error", err)
+		return
+	}
+	for _, record := range records {
+		if e.ctx.Err() != nil {
+			return
+		}
+		// Reconstruction retains channel/thread destination but may not retain
+		// an original-message quote. Opaque replyCtx is deliberately not stored.
+		replyCtx, err := reconstructor.ReconstructReplyCtx(record.SessionKey)
+		if err != nil {
+			slog.Warn("durable queue reply target reconstruction failed", "project", e.name, "platform", p.Name(), "session", record.SessionKey, "error", err)
+			continue
+		}
+		if record.State == PendingMessageStateDispatching {
+			sendErr := e.waitOutgoing(p)
+			if sendErr == nil {
+				sendErr = p.Send(e.ctx, replyCtx, e.i18n.T(MsgAgentOutcomeUnknown))
+			}
+			if sendErr != nil {
+				slog.Warn("stale dispatching queue notice failed", "project", e.name, "platform", p.Name(), "durable_id", record.ID, "error", sendErr)
+				continue
+			}
+			if err := e.removePendingMessage(record.ID); err != nil {
+				if e.ctx.Err() != nil {
+					return
+				}
+				slog.Error("stale dispatching queue removal failed", "project", e.name, "durable_id", record.ID, "error", err)
+			}
+			continue
+		}
+		if !e.restorePendingMessage(p, replyCtx, record) {
+			slog.Warn("durable queued message remains pending after recovery setup failure", "project", e.name, "platform", p.Name(), "durable_id", record.ID)
+		}
+	}
+}
+
+func (e *Engine) restorePendingMessage(p Platform, replyCtx any, record PendingMessageRecord) bool {
+	if !e.trackRecoveredPending(record.ID) {
+		return true
+	}
+
+	agent := e.agent
+	sessions := e.sessions
+	interactiveKey := record.SessionKey
+	if record.WorkspaceDir != "" {
+		if !e.multiWorkspace {
+			e.untrackRecoveredPending(record.ID)
+			return false
+		}
+		var err error
+		agent, sessions, err = e.getOrCreateWorkspaceAgent(record.WorkspaceDir)
+		if err != nil {
+			e.untrackRecoveredPending(record.ID)
+			slog.Error("durable queue workspace recovery failed", "workspace", record.WorkspaceDir, "error", err)
+			return false
+		}
+		interactiveKey = record.WorkspaceDir + ":" + record.SessionKey
+	}
+
+	queued := queuedMessage{
+		messageID: record.MessageID, platform: p, replyCtx: replyCtx,
+		content: record.Content, images: record.Images, files: record.Files,
+		fromVoice: record.FromVoice, userID: record.UserID, userName: record.UserName,
+		msgPlatform: record.MsgPlatform, msgSessionKey: record.SessionKey,
+		channelKey: record.ChannelKey, durableID: record.ID,
+	}
+	session := sessions.GetOrCreateActive(record.SessionKey)
+	ownsLock := session.TryLock()
+
+	var state *interactiveState
+	if ownsLock {
+		var override Agent
+		if agent != e.agent {
+			override = agent
+		}
+		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, replyCtx, session, sessions, override, record.SessionKey)
+	} else {
+		e.interactiveMu.Lock()
+		state = e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		if state == nil {
+			e.untrackRecoveredPending(record.ID)
+			return false
+		}
+	}
+
+	state.mu.Lock()
+	cancelled := e.ctx.Err() != nil
+	if cancelled || state.stopped || (ownsLock && state.agentSession == nil) {
+		state.mu.Unlock()
+		if ownsLock {
+			session.UnlockWithoutUpdate()
+		}
+		e.untrackRecoveredPending(record.ID)
+		if cancelled && ownsLock {
+			// Recovery may finish StartSession after Engine.Stop took its state
+			// snapshot. Close that late process without cancelling spool records.
+			e.closeLateRecoveredState(interactiveKey, state)
+		}
+		return false
+	}
+	if queueContainsDurableIDLocked(state, record.ID) {
+		state.mu.Unlock()
+		if ownsLock {
+			session.UnlockWithoutUpdate()
+		}
+		return true
+	}
+	state.platform = p
+	state.replyCtx = replyCtx
+	if record.WorkspaceDir != "" {
+		state.workspaceDir = record.WorkspaceDir
+	}
+	state.pendingMessages = append(state.pendingMessages, queued)
+	state.mu.Unlock()
+
+	if ownsLock || session.TryLock() {
+		go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, record.WorkspaceDir)
+	}
+	return true
+}
+
+func (e *Engine) closeLateRecoveredState(interactiveKey string, state *interactiveState) {
+	e.interactiveMu.Lock()
+	if e.interactiveStates[interactiveKey] != state {
+		e.interactiveMu.Unlock()
+		return
+	}
+	delete(e.interactiveStates, interactiveKey)
+	e.interactiveMu.Unlock()
+	e.removeRuntimeLease(state)
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.agentSession = nil
+	state.mu.Unlock()
+	if agentSession != nil {
+		e.closeAgentSessionWithTimeout(interactiveKey, agentSession)
+	}
+}
+
+func (e *Engine) trackRecoveredPending(id string) bool {
+	e.recoveredPendingMu.Lock()
+	defer e.recoveredPendingMu.Unlock()
+	if e.recoveredPendingIDs[id] {
+		return false
+	}
+	e.recoveredPendingIDs[id] = true
+	return true
+}
+
+func (e *Engine) untrackRecoveredPending(id string) {
+	if id == "" {
+		return
+	}
+	e.recoveredPendingMu.Lock()
+	delete(e.recoveredPendingIDs, id)
+	e.recoveredPendingMu.Unlock()
 }
 
 func (e *Engine) startLifecycleDelivery(p Platform) {
@@ -1886,6 +2093,23 @@ func (e *Engine) handleMessageRecall(p Platform, msg *Message) {
 		return
 	}
 
+	if e.pendingMessages != nil {
+		removed, err := e.removePendingByMessageID(p.Name(), messageID)
+		if err != nil {
+			slog.Error("recalled durable queued message removal failed", "project", e.name, "platform", p.Name(), "msg_id", messageID, "error", err)
+			return
+		}
+		if removed > 0 {
+			// Close mark-to-send race: if dequeue transitioned this record while
+			// disk removal ran, stop newly-current live turn too.
+			if sessionKey, ok := e.findCurrentMessageSession(messageID); ok {
+				e.stopInteractiveSessionSilently(sessionKey)
+			}
+			slog.Info("recalled message removed from durable queue", "platform", p.Name(), "msg_id", messageID, "count", removed)
+			return
+		}
+	}
+
 	slog.Debug("message recall ignored; no active or queued message matched",
 		"platform", p.Name(),
 		"msg_id", messageID,
@@ -1929,17 +2153,18 @@ func (e *Engine) removeQueuedMessageByID(messageID string) (string, bool) {
 			continue
 		}
 		filtered := pending[:0]
-		removed := false
+		var removed []queuedMessage
 		for _, queued := range pending {
 			if queued.messageID == messageID {
-				removed = true
+				removed = append(removed, queued)
 				continue
 			}
 			filtered = append(filtered, queued)
 		}
-		if removed {
+		if len(removed) > 0 {
 			state.pendingMessages = filtered
 			state.mu.Unlock()
+			e.removeDurableQueuedMessages(removed)
 			return sessionKey, true
 		}
 		state.mu.Unlock()
@@ -2293,7 +2518,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
+		if e.queueMessageForBusySession(p, msg, interactiveKey, resolvedWorkspace) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
@@ -2356,6 +2581,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
 	e.interactiveMu.Unlock()
 
+	if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+		slog.Error("idle auto-reset durable queue cancellation failed", "project", e.name, "session", msg.SessionKey, "error", err)
+		return nil
+	}
+
 	if hasAgent {
 		// Notify the user before the potentially long close. The close
 		// returns as soon as the process exits (usually seconds), but
@@ -2380,7 +2610,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // session is busy. The message is NOT sent to agent stdin at queue time;
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
-func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string, workspaceDirs ...string) bool {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
@@ -2388,25 +2618,38 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if !hasState || state == nil {
 		return false
 	}
-	// Allow queueing when agentSession is nil (session is starting up,
-	// issue #565). Only reject if the session was established and died.
-	if state.agentSession != nil && !state.agentSession.Alive() {
-		return false
+	workspaceDir := ""
+	if len(workspaceDirs) > 0 {
+		workspaceDir = workspaceDirs[0]
+	}
+	if e.pendingMessages != nil {
+		if _, ok := p.(ReplyContextReconstructor); !ok {
+			slog.Error("durable queue requires reply context reconstruction", "project", e.name, "platform", p.Name())
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueuePersistenceFailed))
+			return true
+		}
 	}
 
-	// Only queue metadata — do NOT send to agent stdin yet.
-	// The agent CLI may treat a mid-turn stdin message as part of the
-	// current turn, causing the event loop to hang waiting for a second
-	// EventResult that never arrives. Instead, the event loop sends the
-	// message after the current turn's EventResult is received.
+	// Hold state.mu across capacity, persistence, and append. This makes durable
+	// acceptance and queue acknowledgement linearizable with drain/cancellation.
 	state.mu.Lock()
+	if e.ctx.Err() != nil || state.stopped {
+		state.mu.Unlock()
+		return false
+	}
+	// Allow queueing while session starts, but not after an established process dies.
+	if state.agentSession != nil && !state.agentSession.Alive() {
+		state.mu.Unlock()
+		return false
+	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		state.mu.Unlock()
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
-		return true // handled: queue-full reply sent
+		return true
 	}
-	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+
+	queued := queuedMessage{
 		messageID:     msg.MessageID,
 		platform:      p,
 		replyCtx:      msg.ReplyCtx,
@@ -2419,17 +2662,51 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
 		channelKey:    msg.ChannelKey,
-	})
+	}
+	if e.pendingMessages != nil {
+		id, created, err := e.pendingMessages.Enqueue(PendingMessageRecord{
+			Project: e.name, Platform: p.Name(), SessionKey: msg.SessionKey,
+			WorkspaceDir: workspaceDir, MessageID: msg.MessageID, Content: msg.Content,
+			UserID: msg.UserID, UserName: msg.UserName, MsgPlatform: msg.Platform,
+			ChannelKey: msg.ChannelKey, FromVoice: msg.FromVoice,
+			Images: msg.Images, Files: msg.Files,
+		})
+		if err != nil {
+			state.mu.Unlock()
+			slog.Error("queued message persistence failed", "project", e.name, "platform", p.Name(), "session", msg.SessionKey, "error", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueuePersistenceFailed))
+			return true
+		}
+		queued.durableID = id
+		if !created || queueContainsDurableIDLocked(state, id) {
+			state.mu.Unlock()
+			slog.Info("duplicate queued message already accepted", "session", msg.SessionKey, "durable_id", id)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+			return true
+		}
+	}
+	state.pendingMessages = append(state.pendingMessages, queued)
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
 
-	slog.Info("message queued for busy session",
-		"session", msg.SessionKey,
-		"user", msg.UserName,
-		"queue_depth", queueDepth,
-	)
+	slog.Info("message queued for busy session", "session", msg.SessionKey, "user", msg.UserName, "queue_depth", queueDepth)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	return true
+}
+
+func queueContainsDurableIDLocked(state *interactiveState, id string) bool {
+	if id == "" {
+		return false
+	}
+	if state.currentDurableQueueID == id {
+		return true
+	}
+	for _, queued := range state.pendingMessages {
+		if queued.durableID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
@@ -2465,8 +2742,15 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
-		if hasState && state != nil {
+	if !hasState || state == nil {
+		return
+	}
+	state.mu.Lock()
+	agentSession := state.agentSession
+	stopped := state.stopped
+	state.mu.Unlock()
+	if stopped || agentSession == nil || !agentSession.Alive() {
+		if e.ctx.Err() == nil {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 		}
 		return
@@ -3158,7 +3442,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// Close, then stop synchronously so old output cannot overlap replacement.
 		e.removeRuntimeLease(state)
 		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
-		delete(e.interactiveStates, sessionKey)
+		// Keep stopped state as placeholder until replacement is installed so
+		// queued records accepted before recycle can be adopted atomically.
 		ok = false // prevent reading stale settings below
 	}
 
@@ -3324,6 +3609,12 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 
 	// Notify senders of any queued messages that will never be processed.
 	if ok && state != nil {
+		shutdown := e.ctx.Err() != nil
+		// Engine.Stop is the exception: preserve all spool records. Other
+		// intentional cleanup cancels the current durable queued turn.
+		if !shutdown {
+			e.finishCurrentDurableMessage(state, true)
+		}
 		// Stop unsolicited reader before marking stopped to avoid goroutine leak.
 		e.stopUnsolicitedReader(state)
 
@@ -3339,7 +3630,9 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 			pending.resolve()
 		}
 
-		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		if !shutdown {
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		}
 	}
 
 	// Cleanup is now intentional and owns this process. Remove durable crash
@@ -3989,6 +4282,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	defer cancelStallControl()
 	terminalStall := func(message MsgKey, cause string) {
+		if e.ctx.Err() != nil {
+			return
+		}
 		if stagingActive {
 			staging.AppendError(e.i18n.T(message))
 			staging.Finalize(stagingStateFailed)
@@ -4018,6 +4314,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			"queued_count", queued,
 		)
 		e.send(p, replyCtx, e.i18n.T(message))
+		// Verified transport loss cannot prove whether current prompt arrived.
+		e.finishCurrentDurableMessage(state, false)
 		e.cleanupInteractiveState(sessionKey, state)
 	}
 
@@ -4045,6 +4343,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				var outcomeUnknown OutcomeUnknownError
 				unknown := errors.As(err, &outcomeUnknown) && outcomeUnknown.OutcomeUnknown()
 				e.setRuntimeTurn(state, msgID, unknown, unknown)
+				preserve := unknown || e.ctx.Err() != nil || state.isStopped()
+				e.finishCurrentDurableMessage(state, !preserve)
+				if e.ctx.Err() != nil {
+					return
+				}
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				if stagingActive {
 					staging.AppendError(e.userFacingAgentError(err))
@@ -4723,6 +5026,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			persistLearnedAgentSessionID(session, sessions, currentAgentSession, agentName)
 			e.setRuntimeTurn(state, msgID, false, false)
+			// Engine.Stop preserves spool state even if a final event races shutdown.
+			e.finishCurrentDurableMessage(state, e.ctx.Err() == nil)
+			if e.ctx.Err() != nil {
+				return
+			}
 
 			// EventResult.Content is the adapter's authoritative final response.
 			// Accumulated text is only a fallback for adapters without one.
@@ -4981,17 +5289,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			// Check for queued messages — if present, continue the event loop
-			// for the next turn instead of returning.
-			state.mu.Lock()
-			if len(state.pendingMessages) > 0 {
-				queued := state.pendingMessages[0]
-				state.pendingMessages = state.pendingMessages[1:]
+			// Check for queued messages — durable records transition to
+			// dispatching before they leave memory or reach AgentSession.Send.
+			queued, hasQueued := e.takeNextQueuedMessage(state)
+			if hasQueued {
+				state.mu.Lock()
 				remainingQueue := len(state.pendingMessages)
-				state.platform = queued.platform
-				state.replyCtx = queued.replyCtx
-				state.currentMessageID = queued.messageID
-				state.fromVoice = queued.fromVoice
 				state.mu.Unlock()
 				turnStart = time.Now()
 
@@ -5017,6 +5320,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						slog.Debug("async send error before queued turn", "error", err)
 					}
 				}
+				if e.ctx.Err() != nil || state.isStopped() {
+					return
+				}
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 				operationID := queued.messageID
@@ -5027,7 +5333,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- sendAgentSession(e.ctx, state.agentSession, queuedPrompt, queued.images, queued.files)
+					nextSend <- sendAgentSession(e.ctx, agentSession, queuedPrompt, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
 
@@ -5112,7 +5418,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 				continue
 			}
-			state.mu.Unlock()
+			if e.ctx.Err() != nil {
+				return
+			}
 
 			if pendingSend != nil {
 				if err := <-pendingSend; err != nil {
@@ -5145,10 +5453,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			terminalError := eventErrorIsTerminal(state.agentSession, event.Error)
-			e.setRuntimeTurn(state, msgID, terminalError, terminalError)
+			var outcomeUnknown OutcomeUnknownError
+			unknown := errors.As(event.Error, &outcomeUnknown) && outcomeUnknown.OutcomeUnknown()
+			preserve := unknown || e.ctx.Err() != nil || state.isStopped()
+			e.setRuntimeTurn(state, msgID, terminalError || preserve, terminalError || preserve)
+			e.finishCurrentDurableMessage(state, !preserve)
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
+			if e.ctx.Err() != nil {
+				return
+			}
 			if hasRichCard && cardMessageID != nil {
 				errCard := richCardSupporter.BuildRichCard(CardStatusError, "", toolSteps, partialText, false, time.Since(turnStart))
 				if updater, ok := p.(MessageUpdater); ok {
@@ -5198,6 +5513,7 @@ channelClosed:
 	}
 	slog.Warn("agent process exited unexpectedly", "session_key", sessionKey)
 	e.setRuntimeTurn(state, msgID, true, true)
+	e.finishCurrentDurableMessage(state, false)
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	p := state.platform
@@ -5303,15 +5619,91 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 	return steps
 }
 
-// notifyDroppedQueuedMessages drains pendingMessages from the state and
-// sends an error notification to each queued message's sender. Called when
-// the event loop exits abnormally (EventError, channel closed) and queued
-// messages can no longer be delivered to the agent.
+// takeNextQueuedMessage marks a durable record dispatching before removing it
+// from memory. Failed transitions are deferred on disk and skipped in this drain
+// attempt; they are never sent with an ambiguous durable state.
+func (e *Engine) takeNextQueuedMessage(state *interactiveState) (queuedMessage, bool) {
+	for {
+		state.mu.Lock()
+		if e.ctx.Err() != nil || state.stopped || len(state.pendingMessages) == 0 {
+			state.mu.Unlock()
+			return queuedMessage{}, false
+		}
+		queued := state.pendingMessages[0]
+		if queued.durableID != "" && e.pendingMessages != nil {
+			if err := e.pendingMessages.MarkDispatching(queued.durableID); err != nil {
+				if e.ctx.Err() != nil {
+					state.mu.Unlock()
+					return queuedMessage{}, false
+				}
+				state.pendingMessages = state.pendingMessages[1:]
+				state.mu.Unlock()
+				e.untrackRecoveredPending(queued.durableID)
+				slog.Error("queued message dispatch transition failed", "project", e.name, "durable_id", queued.durableID, "error", err)
+				e.send(queued.platform, queued.replyCtx, e.i18n.T(MsgQueueDispatchDeferred))
+				continue
+			}
+		}
+		if e.ctx.Err() != nil {
+			state.mu.Unlock()
+			return queuedMessage{}, false
+		}
+		state.pendingMessages = state.pendingMessages[1:]
+		state.currentDurableQueueID = queued.durableID
+		state.platform = queued.platform
+		state.replyCtx = queued.replyCtx
+		state.currentMessageID = queued.messageID
+		state.fromVoice = queued.fromVoice
+		state.mu.Unlock()
+		return queued, true
+	}
+}
+
+func (e *Engine) finishCurrentDurableMessage(state *interactiveState, remove bool) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	id := state.currentDurableQueueID
+	state.currentDurableQueueID = ""
+	state.mu.Unlock()
+	if id == "" {
+		return
+	}
+	if remove && e.ctx.Err() != nil {
+		remove = false
+	}
+	if remove && e.pendingMessages != nil {
+		if err := e.removePendingMessage(id); err != nil && e.ctx.Err() == nil {
+			slog.Error("durable queued message removal failed", "project", e.name, "durable_id", id, "error", err)
+		}
+	}
+	e.untrackRecoveredPending(id)
+}
+
+func (e *Engine) removeDurableQueuedMessages(messages []queuedMessage) {
+	if e.pendingMessages == nil || e.ctx.Err() != nil {
+		return
+	}
+	for _, queued := range messages {
+		if queued.durableID == "" {
+			continue
+		}
+		if err := e.removePendingMessage(queued.durableID); err != nil && e.ctx.Err() == nil {
+			slog.Error("durable queued message cancellation failed", "project", e.name, "durable_id", queued.durableID, "error", err)
+		}
+		e.untrackRecoveredPending(queued.durableID)
+	}
+}
+
+// notifyDroppedQueuedMessages drains pendingMessages and cancels corresponding
+// durable records before notifying each sender.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
 	state.mu.Lock()
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
 	state.mu.Unlock()
+	e.removeDurableQueuedMessages(remaining)
 	for _, q := range remaining {
 		e.send(q.platform, q.replyCtx, e.userFacingAgentError(reason))
 	}
@@ -5323,31 +5715,46 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 // Returns true if the session was unlocked by this call.
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string) bool {
 	for {
-		state.mu.Lock()
-		if len(state.pendingMessages) == 0 {
+		queued, ok := e.takeNextQueuedMessage(state)
+		if !ok {
+			if e.ctx.Err() != nil {
+				return false
+			}
+			state.mu.Lock()
+			if state.stopped {
+				state.mu.Unlock()
+				return false
+			}
+			if len(state.pendingMessages) != 0 {
+				state.mu.Unlock()
+				continue
+			}
 			session.Unlock()
 			state.mu.Unlock()
 			return true
 		}
-		queued := state.pendingMessages[0]
-		state.pendingMessages = state.pendingMessages[1:]
-		state.platform = queued.platform
-		state.replyCtx = queued.replyCtx
-		state.currentMessageID = queued.messageID
-		state.fromVoice = queued.fromVoice
-		state.mu.Unlock()
 		turnStart := time.Now()
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
-		if state.agentSession == nil || !state.agentSession.Alive() {
+		state.mu.Lock()
+		agentSession := state.agentSession
+		state.mu.Unlock()
+		if agentSession == nil || !agentSession.Alive() {
+			if e.ctx.Err() != nil {
+				return false
+			}
+			e.finishCurrentDurableMessage(state, true)
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
 
-		drainEvents(state.agentSession.Events())
+		drainEvents(agentSession.Events())
+		if e.ctx.Err() != nil || state.isStopped() {
+			return false
+		}
 
 		session.AddHistory("user", queued.content)
 		operationID := queued.messageID
@@ -5355,10 +5762,13 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			operationID = fmt.Sprintf("queued-%d", time.Now().UnixNano())
 		}
 		e.setRuntimeTurn(state, operationID, true, false)
+		if e.ctx.Err() != nil || state.isStopped() {
+			return false
+		}
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- sendAgentSession(e.ctx, state.agentSession, prompt, queued.images, queued.files)
+			sendDone <- sendAgentSession(e.ctx, agentSession, prompt, queued.images, queued.files)
 		}()
 
 		var stopTyping func()
@@ -6012,6 +6422,11 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+		slog.Error("cmdNew: durable queue cancellation failed", "project", e.name, "session", msg.SessionKey, "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+		return
+	}
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
@@ -6186,6 +6601,11 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+		slog.Error("cmdSwitch: durable queue cancellation failed", "project", e.name, "session", msg.SessionKey, "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+		return
+	}
 	slog.Info("cmdSwitch: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey)
 	slog.Info("cmdSwitch: cleanup done", "session_key", msg.SessionKey)
@@ -7030,6 +7450,9 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 				baseDir = absDir
 			}
 
+			if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+				return e.i18n.T(MsgQueueCancellationFailed), ""
+			}
 			if !e.multiWorkspace {
 				switcher.SetWorkDir(baseDir)
 			}
@@ -7102,6 +7525,9 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
 	}
 
+	if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+		return e.i18n.T(MsgQueueCancellationFailed), ""
+	}
 	if !e.multiWorkspace {
 		switcher.SetWorkDir(newDir)
 	}
@@ -8653,6 +9079,10 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
 		return
 	}
+	if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+		return
+	}
 	e.cleanupInteractiveState(interactiveKey)
 
 	// Keep the existing agent session ID so the next StartSession uses
@@ -8845,6 +9275,12 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	if !msg.Sessionless {
+		if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+			return
+		}
+	}
 	switcher.SetReasoningEffort(target)
 	if !msg.Sessionless {
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
@@ -8916,6 +9352,10 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	appliedLive := e.applyLiveModeChange(msg.SessionKey, newMode)
 
 	if !appliedLive {
+		if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+			return
+		}
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 	}
 
@@ -9052,13 +9492,93 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 	}
 }
 
+func (e *Engine) removePendingMessage(id string) error {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return err
+	}
+	return e.pendingMessages.Remove(id)
+}
+
+func (e *Engine) removePendingBySession(rawSessionKey string) (int, error) {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return e.pendingMessages.RemoveBySessionKey(e.name, rawSessionKey)
+}
+
+func (e *Engine) removePendingByMessageID(platform, messageID string) (int, error) {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return e.pendingMessages.RemoveByMessageID(e.name, platform, messageID)
+}
+
+func (e *Engine) removePendingByProject() (int, error) {
+	e.pendingMutationMu.Lock()
+	defer e.pendingMutationMu.Unlock()
+	if err := e.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return e.pendingMessages.RemoveByProject(e.name)
+}
+
+func (e *Engine) cancelDurablePendingForSession(rawSessionKey string) error {
+	if e.pendingMessages == nil {
+		return nil
+	}
+	_, err := e.removePendingBySession(rawSessionKey)
+	return err
+}
+
 func (e *Engine) cmdStop(p Platform, msg *Message) {
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
-	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
+	stoppedLive := e.stopInteractiveSession(iKey, p, msg.ReplyCtx)
+	if !stoppedLive {
+		if recoveredKey := e.interactiveKeyForDeliverySession(msg.SessionKey); recoveredKey != "" && recoveredKey != iKey {
+			stoppedLive = e.stopInteractiveSession(recoveredKey, p, msg.ReplyCtx)
+		}
+	}
+	if e.ctx.Err() != nil {
+		return
+	}
+	removed := 0
+	if e.pendingMessages != nil {
+		var err error
+		removed, err = e.removePendingBySession(msg.SessionKey)
+		if err != nil {
+			slog.Error("durable queued message cancellation failed", "project", e.name, "session", msg.SessionKey, "error", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+			return
+		}
+	}
+	if !stoppedLive && removed == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+func (e *Engine) interactiveKeyForDeliverySession(rawSessionKey string) string {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	for key, state := range e.interactiveStates {
+		if state == nil {
+			continue
+		}
+		state.mu.Lock()
+		deliveryKey := state.deliverySessionKey
+		state.mu.Unlock()
+		if deliveryKey == rawSessionKey || key == rawSessionKey || strings.HasSuffix(key, ":"+rawSessionKey) {
+			return key
+		}
+	}
+	return ""
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
@@ -9093,12 +9613,17 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	if pending != nil {
 		pending.resolve()
 	}
-	if notifyQueued {
-		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
-	} else {
-		state.mu.Lock()
-		state.pendingMessages = nil
-		state.mu.Unlock()
+	if e.ctx.Err() == nil {
+		e.finishCurrentDurableMessage(state, true)
+		if notifyQueued {
+			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+		} else {
+			state.mu.Lock()
+			remaining := state.pendingMessages
+			state.pendingMessages = nil
+			state.mu.Unlock()
+			e.removeDurableQueuedMessages(remaining)
+		}
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession)
 
@@ -9511,6 +10036,12 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
 
 	case "clear", "reset", "none":
+		if !msg.Sessionless {
+			if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+				return
+			}
+		}
 		switcher.SetActiveProvider("")
 		if !msg.Sessionless {
 			e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
@@ -9668,6 +10199,20 @@ func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSw
 // active sessions. Used when the provider changes via the management API
 // (where there is no single session key context).
 func (e *Engine) resetAllSessions() {
+	e.interactiveMu.Lock()
+	keys := make([]string, 0, len(e.interactiveStates))
+	for key := range e.interactiveStates {
+		keys = append(keys, key)
+	}
+	e.interactiveMu.Unlock()
+	for _, key := range keys {
+		e.cleanupInteractiveState(key)
+	}
+	if e.pendingMessages != nil {
+		if _, err := e.removePendingByProject(); err != nil {
+			slog.Error("durable queue project reset failed", "project", e.name, "error", err)
+		}
+	}
 	for _, s := range e.sessions.AllSessions() {
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
@@ -9681,6 +10226,10 @@ func (e *Engine) switchProvider(p Platform, msg *Message, switcher ProviderSwitc
 		return
 	}
 	if !msg.Sessionless {
+		if err := e.cancelDurablePendingForSession(msg.SessionKey); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueCancellationFailed))
+			return
+		}
 		e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
 		s := e.sessions.GetOrCreateActive(msg.SessionKey)
 		s.SetAgentSessionID("", "")
@@ -10437,7 +10986,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.handleModelCardAction(args, sessionKey)
 	}
 
-	if prefix == "act" {
+	if prefix == "act" && cmd == "/stop" {
+		if err := e.stopFromCard(sessionKey); err != nil {
+			return e.simpleCard(e.i18n.T(MsgCardTitleStatus), "red", e.i18n.T(MsgQueueCancellationFailed))
+		}
+	} else if prefix == "act" {
 		e.executeCardAction(cmd, args, sessionKey)
 	}
 
@@ -10537,6 +11090,11 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
+	if err == nil {
+		if cancelErr := e.cancelDurablePendingForSession(sessionKey); cancelErr != nil {
+			return e.simpleCard(e.i18n.T(MsgCardTitleModel), "red", e.i18n.T(MsgQueueCancellationFailed))
+		}
+	}
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
 	if err == nil {
 		sessions.Save()
@@ -10547,6 +11105,21 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
+func (e *Engine) stopFromCard(rawSessionKey string) error {
+	interactiveKey := e.interactiveKeyForSessionKey(rawSessionKey)
+	stopped := e.stopInteractiveSession(interactiveKey, nil, nil)
+	if !stopped {
+		if recoveredKey := e.interactiveKeyForDeliverySession(rawSessionKey); recoveredKey != "" && recoveredKey != interactiveKey {
+			e.stopInteractiveSession(recoveredKey, nil, nil)
+		}
+	}
+	if err := e.cancelDurablePendingForSession(rawSessionKey); err != nil {
+		slog.Error("durable queued message card cancellation failed", "project", e.name, "session", rawSessionKey, "error", err)
+		return err
+	}
+	return nil
+}
+
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	switch cmd {
 	case "/model":
@@ -10570,6 +11143,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			target = resolveModelSwitchTarget(target, models)
 		}
 		cancel()
+		if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+			slog.Error("model card durable queue cancellation failed", "project", e.name, "session", sessionKey, "error", err)
+			return
+		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		e.interactiveMu.Lock()
@@ -10599,6 +11176,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		for _, effort := range efforts {
 			if effort == target {
+				if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+					slog.Error("reasoning card durable queue cancellation failed", "project", e.name, "session", sessionKey, "error", err)
+					return
+				}
 				switcher.SetReasoningEffort(target)
 				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 				e.cleanupInteractiveState(interactiveKey)
@@ -10619,6 +11200,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		newMode := strings.ToLower(args)
+		if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+			slog.Error("mode card durable queue cancellation failed", "project", e.name, "session", sessionKey, "error", err)
+			return
+		}
 		switcher.SetMode(newMode)
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		if e.applyLiveModeChange(sessionKey, switcher.GetMode()) {
@@ -10669,6 +11254,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			provName = ""
 		}
 		if switcher.SetActiveProvider(provName) {
+			if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+				slog.Error("provider card durable queue cancellation failed", "project", e.name, "session", sessionKey, "error", err)
+				return
+			}
 			interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 			e.cleanupInteractiveState(interactiveKey)
 			s := e.sessions.GetOrCreateActive(sessionKey)
@@ -10720,6 +11309,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		e.executeProviderLink(sessionKey, args)
 
 	case "/new":
+		if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+			slog.Error("new-session card durable queue cancellation failed", "project", e.name, "session", sessionKey, "error", err)
+			return
+		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		_, sessions := e.sessionContextForKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
@@ -10740,6 +11333,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		agentSessions = e.applySessionFilter(agentSessions, sessions)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
+			return
+		}
+		if err := e.cancelDurablePendingForSession(sessionKey); err != nil {
+			slog.Error("switch card durable queue cancellation failed", "project", e.name, "session", sessionKey, "error", err)
 			return
 		}
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -10774,8 +11371,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/stop":
-		sessionKey = e.interactiveKeyForSessionKey(sessionKey)
-		e.stopInteractiveSession(sessionKey, nil, nil)
+		_ = e.stopFromCard(sessionKey)
 
 	case "/heartbeat":
 		if e.heartbeatScheduler == nil {
