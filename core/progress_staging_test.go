@@ -46,17 +46,18 @@ func (t *fakeStagingTicker) isStopped() bool {
 }
 
 type stagingCapturePlatform struct {
-	mu          sync.Mutex
-	starts      []string
-	updates     []string
-	sent        []string
-	replies     []string
-	updateErrAt int
-	updateErr   error
-	retryDelay  time.Duration
-	updateCalls int
-	attemptedAt []time.Time
-	updated     chan struct{}
+	mu              sync.Mutex
+	starts          []string
+	updates         []string
+	sent            []string
+	replies         []string
+	updateErrAt     int
+	updateErrAlways bool
+	updateErr       error
+	retryDelay      time.Duration
+	updateCalls     int
+	attemptedAt     []time.Time
+	updated         chan struct{}
 }
 
 func (p *stagingCapturePlatform) Name() string               { return "capable" }
@@ -88,7 +89,8 @@ func (p *stagingCapturePlatform) UpdateMessage(_ context.Context, handle any, co
 	p.updateCalls++
 	p.attemptedAt = append(p.attemptedAt, time.Now())
 	call := p.updateCalls
-	if p.updateErrAt == 0 || call != p.updateErrAt {
+	shouldFail := p.updateErrAlways || (p.updateErrAt > 0 && call == p.updateErrAt)
+	if !shouldFail {
 		p.updates = append(p.updates, content)
 	}
 	updated := p.updated
@@ -96,7 +98,7 @@ func (p *stagingCapturePlatform) UpdateMessage(_ context.Context, handle any, co
 	if updated != nil {
 		updated <- struct{}{}
 	}
-	if p.updateErrAt > 0 && call == p.updateErrAt {
+	if shouldFail {
 		if p.updateErr != nil {
 			return p.updateErr
 		}
@@ -224,7 +226,11 @@ func TestStagingProgressWriterTimelineCountsCoalescingAndFinalState(t *testing.T
 func TestStagingProgressWriterFailedAndCancelledStates(t *testing.T) {
 	p := &stagingCapturePlatform{}
 	w, ticker, _ := newTestStagingWriter(t, p)
-	if !w.Start() || !w.AppendError("agent failed") || !w.Finalize(stagingStateFailed) {
+	if !w.Start() {
+		t.Fatal("failed-state Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "failed-state preview")
+	if !w.AppendError("agent failed") || !w.Finalize(stagingStateFailed) {
 		t.Fatal("failed-state lifecycle failed")
 	}
 	waitStaging(t, ticker.isStopped, "failed final timeline")
@@ -236,7 +242,11 @@ func TestStagingProgressWriterFailedAndCancelledStates(t *testing.T) {
 
 	p2 := &stagingCapturePlatform{}
 	w2, ticker2, _ := newTestStagingWriter(t, p2)
-	if !w2.Start() || !w2.Finalize(stagingStateCancelled) {
+	if !w2.Start() {
+		t.Fatal("cancelled-state Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p2.snapshot(); return len(starts) == 1 }, "cancelled-state preview")
+	if !w2.Finalize(stagingStateCancelled) {
 		t.Fatal("cancelled-state lifecycle failed")
 	}
 	waitStaging(t, ticker2.isStopped, "cancelled final timeline")
@@ -358,6 +368,67 @@ func TestStagingProgressWriterTransientFailureRetriesLatestSnapshot(t *testing.T
 	}
 	w.Finalize(stagingStateCompleted)
 	waitStaging(t, ticker.isStopped, "transient final timeline")
+}
+
+func TestStagingProgressWriterTerminalBeforePreviewSuppressesLateTimeline(t *testing.T) {
+	capture := &stagingCapturePlatform{}
+	p := &blockingStagingSchedulerPlatform{stagingCapturePlatform: capture, release: make(chan struct{})}
+	w, _, _ := newTestStagingWriter(t, p)
+	if !w.Start() || !w.AppendThinking("fast turn") || !w.Finalize(stagingStateCompleted) {
+		t.Fatal("staging lifecycle failed")
+	}
+	close(p.release)
+	waitStaging(t, func() bool {
+		select {
+		case <-w.done:
+			return true
+		default:
+			return false
+		}
+	}, "terminal writer without preview")
+	starts, updates, _ := capture.snapshot()
+	if len(starts) != 0 || len(updates) != 0 {
+		t.Fatalf("terminal writer created late timeline: starts=%d updates=%d", len(starts), len(updates))
+	}
+}
+
+func TestStagingProgressWriterRepeated429StopsAtTerminalDeadline(t *testing.T) {
+	transientErr := errors.New("repeated 429")
+	p := &stagingCapturePlatform{
+		updateErrAlways: true,
+		updateErr:       transientErr,
+		retryDelay:      20 * time.Millisecond,
+	}
+	w := newStagingProgressWriter(context.Background(), p, "reply", time.Now(), LangEnglish, nil, &stagingProgressOptions{
+		terminalLifetime: 65 * time.Millisecond,
+	})
+	if !w.Start() {
+		t.Fatal("Start() = false")
+	}
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "repeated-429 preview")
+	started := time.Now()
+	if !w.AppendThinking("retain") || !w.Finalize(stagingStateCompleted) {
+		t.Fatal("terminal lifecycle failed")
+	}
+	waitStaging(t, func() bool {
+		select {
+		case <-w.done:
+			return true
+		default:
+			return false
+		}
+	}, "terminal retry deadline")
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("terminal retries outlived deadline: %v", elapsed)
+	}
+	calls, _ := p.attempts()
+	if calls < 2 {
+		t.Fatalf("update attempts = %d, want repeated retries", calls)
+	}
+	_, updates, sent := p.snapshot()
+	if len(updates) != 0 || len(sent) != 0 {
+		t.Fatalf("repeated 429 produced noise: updates=%d sent=%d", len(updates), len(sent))
+	}
 }
 
 func TestStagingProgressWriterUsesOutboundGateForPreviewAndEdit(t *testing.T) {

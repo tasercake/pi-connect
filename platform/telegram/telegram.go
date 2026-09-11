@@ -181,6 +181,7 @@ type Platform struct {
 	titleSem       chan struct{}
 
 	progressMu       sync.Mutex
+	progressGate     chan struct{}
 	progressNext     time.Time
 	progressInterval time.Duration
 }
@@ -1951,24 +1952,51 @@ func (p *Platform) progressIntervalLocked() time.Duration {
 	return telegramProgressInterval
 }
 
-// WaitProgressUpdate reserves the next shared Telegram progress API slot.
-func (p *Platform) WaitProgressUpdate(ctx context.Context) error {
+// AcquireProgressUpdate serializes Telegram progress calls and waits for the
+// shared spacing/backoff deadline. The caller must release after its API call.
+func (p *Platform) AcquireProgressUpdate(ctx context.Context) (func(bool), error) {
+	p.progressMu.Lock()
+	if p.progressGate == nil {
+		p.progressGate = make(chan struct{}, 1)
+		p.progressGate <- struct{}{}
+	}
+	gate := p.progressGate
+	p.progressMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-gate:
+	}
+
+	var releaseOnce sync.Once
+	release := func(attempted bool) {
+		releaseOnce.Do(func() {
+			p.progressMu.Lock()
+			if attempted {
+				next := time.Now().Add(p.progressIntervalLocked())
+				if next.After(p.progressNext) {
+					p.progressNext = next
+				}
+			}
+			gate <- struct{}{}
+			p.progressMu.Unlock()
+		})
+	}
+
 	for {
 		p.progressMu.Lock()
-		now := time.Now()
-		if !p.progressNext.After(now) {
-			p.progressNext = now.Add(p.progressIntervalLocked())
-			p.progressMu.Unlock()
-			return nil
-		}
 		delay := time.Until(p.progressNext)
 		p.progressMu.Unlock()
-
+		if delay <= 0 {
+			return release, nil
+		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			release(false)
+			return nil, ctx.Err()
 		case <-timer.C:
 		}
 	}

@@ -415,20 +415,27 @@ func TestConcurrentProgressWritersShareBudgetAndExtendedBackoff(t *testing.T) {
 	p := &Platform{progressInterval: 25 * time.Millisecond}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := p.WaitProgressUpdate(ctx); err != nil {
+	release, err := p.AcquireProgressUpdate(ctx)
+	if err != nil {
 		t.Fatalf("first reservation: %v", err)
 	}
-
 	returned := make(chan time.Time, 1)
 	go func() {
-		if err := p.WaitProgressUpdate(ctx); err == nil {
+		release, err := p.AcquireProgressUpdate(ctx)
+		if err == nil {
 			returned <- time.Now()
+			release(true)
 		}
 	}()
-	time.Sleep(5 * time.Millisecond)
+	select {
+	case <-returned:
+		t.Fatal("concurrent writer entered while first API lease was held")
+	case <-time.After(5 * time.Millisecond):
+	}
+
 	deferredAt := time.Now()
 	p.DeferProgressUpdates(40 * time.Millisecond)
-
+	release(true)
 	select {
 	case got := <-returned:
 		if delay := got.Sub(deferredAt); delay < 35*time.Millisecond {

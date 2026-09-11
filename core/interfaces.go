@@ -234,11 +234,12 @@ type ProgressUpdateThrottler interface {
 }
 
 // ProgressUpdateScheduler is an optional platform-level gate shared by all
-// progress writers. It prevents concurrent turns from collectively exceeding
-// one platform's edit budget. DeferProgressUpdates applies API-directed
-// backoff, such as Telegram's retry_after response, to every writer.
+// progress writers. AcquireProgressUpdate serializes calls across turns; its
+// release function must run with attempted=true after an API call, or false
+// when delivery aborts before one. DeferProgressUpdates applies
+// API-directed backoff, such as Telegram's retry_after response, before release.
 type ProgressUpdateScheduler interface {
-	WaitProgressUpdate(ctx context.Context) error
+	AcquireProgressUpdate(ctx context.Context) (release func(attempted bool), err error)
 	DeferProgressUpdates(delay time.Duration)
 }
 

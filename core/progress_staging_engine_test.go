@@ -24,6 +24,13 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
 	e.interactiveStates[sessionKey] = state
 
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "engine staging preview")
+
 	code, success := 0, true
 	agentSession.events <- Event{Type: EventThinking, Content: "inspect"}
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi", ToolInputRaw: map[string]any{"secret": "must-not-appear"}}
@@ -31,10 +38,12 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 	agentSession.events <- Event{Type: EventText, Content: "draft "}
 	agentSession.events <- Event{Type: EventText, Content: "text"}
 	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
-
-	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "engine staging preview")
+	<-done
+	waitStaging(t, func() bool {
+		starts, updates, _ := p.snapshot()
+		renders := append(starts, updates...)
+		return len(renders) > 0 && strings.HasPrefix(renders[len(renders)-1], "✅ ")
+	}, "engine terminal staging timeline")
 	starts, updates, sent := p.snapshot()
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want exactly one", len(starts))
@@ -62,15 +71,21 @@ type blockingStagingSchedulerPlatform struct {
 	release chan struct{}
 }
 
-func (p *blockingStagingSchedulerPlatform) WaitProgressUpdate(ctx context.Context) error {
+func (p *blockingStagingSchedulerPlatform) AcquireProgressUpdate(ctx context.Context) (func(bool), error) {
 	select {
 	case <-p.release:
-		return nil
+		return func(bool) {}, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 }
 func (p *blockingStagingSchedulerPlatform) DeferProgressUpdates(time.Duration) {}
+func (p *blockingStagingSchedulerPlatform) SendWithButtons(_ context.Context, _ any, content string, buttons [][]ButtonOption) error {
+	if len(buttons) == 0 {
+		return errors.New("missing permission buttons")
+	}
+	return p.Send(context.Background(), nil, content)
+}
 
 func TestStagingProgressWaitDoesNotDelayPermissionPrompt(t *testing.T) {
 	capture := &stagingCapturePlatform{}
@@ -136,18 +151,19 @@ func TestProcessInteractiveEventsStagingResetsForQueuedTurn(t *testing.T) {
 	}
 	e.interactiveStates[sessionKey] = state
 
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message-1", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "first queued-turn preview")
 	agentSession.events <- Event{Type: EventThinking, Content: "first thought"}
 	agentSession.events <- Event{Type: EventResult, Content: "first answer", Done: true}
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		<-agentSession.sent
-		agentSession.events <- Event{Type: EventThinking, Content: "second thought"}
-		agentSession.events <- Event{Type: EventResult, Content: "second answer", Done: true}
-	}()
-
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message-1", time.Now(), nil, nil, state.replyCtx)
-	<-secondDone
+	<-agentSession.sent
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 2 }, "second queued-turn preview")
+	agentSession.events <- Event{Type: EventThinking, Content: "second thought"}
+	agentSession.events <- Event{Type: EventResult, Content: "second answer", Done: true}
+	<-done
 	waitStaging(t, func() bool {
 		starts, updates, _ := p.snapshot()
 		return len(starts) == 2 && strings.Contains(strings.Join(append(starts, updates...), "\n"), "second thought")
@@ -283,10 +299,14 @@ func TestProcessInteractiveEventsStagingPermanentUpdateFailureDoesNotFlood(t *te
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo quiet"}
 	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
 	<-done
+	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 1 }, "permanent update failure")
 
-	starts, _, sent := p.snapshot()
+	starts, updates, sent := p.snapshot()
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want one attempted staging message", len(starts))
+	}
+	if len(updates) != 0 {
+		t.Fatalf("permanent failure unexpectedly edited timeline: %#v", updates)
 	}
 	if len(sent) != 1 || sent[0] != "final answer" {
 		t.Fatalf("permanent failure flooded standalone progress: %#v", sent)
