@@ -47,6 +47,7 @@ const (
 const (
 	replyFooterUsageTimeout  = 1500 * time.Millisecond
 	replyFooterUsageCacheTTL = 30 * time.Second
+	sessionStatusTimeout     = 2 * time.Second
 )
 
 const (
@@ -322,6 +323,12 @@ type interactiveState struct {
 	turnInFlight       bool
 	turnOutcomeUnknown bool
 	leaseStartedAt     time.Time
+	turnStartedAt      time.Time
+	turnFinishedAt     time.Time
+	turnToolCalls      int
+	currentTool        string
+	lastAgentEvent     string
+	lastAgentEventAt   time.Time
 }
 
 type pendingProviderAddState struct {
@@ -3112,11 +3119,41 @@ func (e *Engine) setRuntimeTurn(state *interactiveState, operationID string, inF
 		return
 	}
 	state.mu.Lock()
+	wasInFlight := state.turnInFlight
 	state.operationID = operationID
 	state.turnInFlight = inFlight
 	state.turnOutcomeUnknown = outcomeUnknown
+	if inFlight && !wasInFlight {
+		state.turnStartedAt = time.Now()
+		state.turnFinishedAt = time.Time{}
+		state.turnToolCalls = 0
+		state.currentTool = ""
+	}
+	if !inFlight && wasInFlight {
+		state.turnFinishedAt = time.Now()
+		state.currentTool = ""
+	}
 	state.mu.Unlock()
 	e.persistRuntimeLease(state)
+}
+
+func recordAgentRuntimeEvent(state *interactiveState, event Event) {
+	if state == nil || event.Type == EventHeartbeat {
+		return
+	}
+	state.mu.Lock()
+	state.lastAgentEvent = string(event.Type)
+	state.lastAgentEventAt = time.Now()
+	switch event.Type {
+	case EventToolUse:
+		state.turnToolCalls++
+		state.currentTool = event.ToolName
+	case EventToolResult:
+		if event.ToolName == "" || state.currentTool == event.ToolName {
+			state.currentTool = ""
+		}
+	}
+	state.mu.Unlock()
 }
 
 func (e *Engine) removeRuntimeLease(state *interactiveState) {
@@ -3649,6 +3686,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"session", sessionKey)
 				e.setRuntimeTurn(state, fmt.Sprintf("unsolicited-%d", time.Now().UnixNano()), true, false)
 			}
+			recordAgentRuntimeEvent(state, event)
 
 			state.mu.Lock()
 			p := state.platform
@@ -4215,6 +4253,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			lastEventType = string(event.Type)
 			stallDetector.eventProgress(lastEventAt)
 			resetStallTimer(e.eventIdleTimeout)
+			recordAgentRuntimeEvent(state, event)
 		}
 
 		if !firstEventLogged {
@@ -4971,6 +5010,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				operationID := queued.messageID
+				if operationID == "" {
+					operationID = fmt.Sprintf("queued-%d", time.Now().UnixNano())
+				}
+				e.setRuntimeTurn(state, operationID, true, false)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -7175,7 +7219,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if !supportsCards(p) {
-		agent, sessions, _, err := e.commandContext(p, msg)
+		agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
@@ -7220,6 +7264,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 			sessionDisplayName = s.Name
 		}
 		sessionStr := e.i18n.Tf(MsgStatusSession, sessionDisplayName, len(s.History))
+		sessionStr += e.piSessionRuntimeStatus(interactiveKey)
 
 		var cronStr string
 		if e.cronScheduler != nil {
@@ -7264,6 +7309,201 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	}
 
 	e.replyWithCard(p, msg.ReplyCtx, e.renderStatusCard(msg.SessionKey, msg.UserID))
+}
+
+type piSessionRuntimeSnapshot struct {
+	session            AgentSession
+	turnInFlight       bool
+	turnOutcomeUnknown bool
+	turnStartedAt      time.Time
+	turnFinishedAt     time.Time
+	turnToolCalls      int
+	currentTool        string
+	lastEvent          string
+	lastEventAt        time.Time
+	queuedMessages     int
+	waitingPermission  bool
+}
+
+func (e *Engine) piSessionRuntimeStatus(interactiveKey string) string {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return e.i18n.T(MsgStatusPiNotStarted)
+	}
+
+	state.mu.Lock()
+	snapshot := piSessionRuntimeSnapshot{
+		session:            state.agentSession,
+		turnInFlight:       state.turnInFlight,
+		turnOutcomeUnknown: state.turnOutcomeUnknown,
+		turnStartedAt:      state.turnStartedAt,
+		turnFinishedAt:     state.turnFinishedAt,
+		turnToolCalls:      state.turnToolCalls,
+		currentTool:        state.currentTool,
+		lastEvent:          state.lastAgentEvent,
+		lastEventAt:        state.lastAgentEventAt,
+		queuedMessages:     len(state.pendingMessages),
+		waitingPermission:  state.pending != nil,
+	}
+	state.mu.Unlock()
+
+	status := &AgentSessionStatus{}
+	var queryErr error
+	if snapshot.session != nil {
+		status.ProcessAlive = snapshot.session.Alive()
+		if reporter, ok := snapshot.session.(AgentSessionStatusReporter); ok {
+			ctx, cancel := context.WithTimeout(e.ctx, sessionStatusTimeout)
+			reported, err := reporter.GetSessionStatus(ctx)
+			cancel()
+			queryErr = err
+			if reported != nil {
+				status = reported
+			}
+		} else if usageReporter, ok := snapshot.session.(ContextUsageReporter); ok {
+			status.ContextUsage = usageReporter.GetContextUsage()
+			status.ContextTokensKnown = status.ContextUsage != nil && status.ContextUsage.UsedTokens > 0
+		}
+	}
+
+	phase := status.Phase
+	if snapshot.waitingPermission {
+		phase = StallPhase("waiting_permission")
+	} else if snapshot.turnOutcomeUnknown {
+		phase = StallPhase("outcome_unknown")
+	} else if phase == "" {
+		if snapshot.session == nil {
+			phase = StallPhase("starting")
+		} else if snapshot.turnInFlight {
+			phase = StallPhaseRunning
+		} else if !status.ProcessAlive {
+			phase = StallPhaseProcessDead
+		} else {
+			phase = StallPhaseSettled
+		}
+	}
+
+	turnText := "-"
+	if !status.ActivitySince.IsZero() {
+		observedAt := status.ObservedAt
+		if observedAt.IsZero() {
+			observedAt = time.Now()
+		}
+		if status.Active {
+			turnText = e.i18n.Tf(MsgStatusPiTurnActive, formatRuntimeDuration(observedAt.Sub(status.ActivitySince)))
+		} else {
+			turnText = e.i18n.Tf(MsgStatusPiTurnIdle, formatRuntimeDuration(observedAt.Sub(status.ActivitySince)))
+		}
+	} else if snapshot.turnInFlight {
+		if !snapshot.turnStartedAt.IsZero() {
+			turnText = e.i18n.Tf(MsgStatusPiTurnActive, formatRuntimeDuration(time.Since(snapshot.turnStartedAt)))
+		}
+	} else if !snapshot.turnFinishedAt.IsZero() {
+		turnText = e.i18n.Tf(MsgStatusPiTurnIdle, formatRuntimeDuration(time.Since(snapshot.turnFinishedAt)))
+	}
+
+	process := "❌"
+	if status.ProcessAlive {
+		process = "✅"
+		if status.PID > 0 {
+			process += fmt.Sprintf(" · PID %d", status.PID)
+		}
+	}
+	model := status.Model
+	if model == "" {
+		model = "-"
+	} else if status.Provider != "" && !strings.HasPrefix(model, status.Provider+"/") {
+		model = status.Provider + "/" + model
+	}
+	thinking := status.ThinkingLevel
+	if thinking == "" {
+		thinking = "-"
+	}
+	contextText := formatRuntimeContext(status.ContextUsage, status.ContextTokensKnown)
+	lastEvent := status.LastEventType
+	if lastEvent == "" {
+		lastEvent = snapshot.lastEvent
+	}
+	lastEventAge := "-"
+	if !snapshot.lastEventAt.IsZero() {
+		lastEventAge = formatRuntimeDuration(time.Since(snapshot.lastEventAt))
+	}
+	messages := "-"
+	tools := fmt.Sprintf("- / %d", snapshot.turnToolCalls)
+	if status.StatsAvailable {
+		messages = fmt.Sprintf("%d / %d / %d", status.UserMessages, status.AssistantMessages, status.TotalMessages)
+		tools = fmt.Sprintf("%d / %d", status.ToolCalls, snapshot.turnToolCalls)
+	} else if status.MessageCount > 0 {
+		messages = fmt.Sprintf("- / - / %d", status.MessageCount)
+	}
+
+	text := e.i18n.Tf(MsgStatusPiRuntime,
+		string(phase),
+		turnText,
+		process,
+		model,
+		thinking,
+		contextText,
+		messages,
+		tools,
+		status.PendingMessages,
+		snapshot.queuedMessages,
+		lastEvent,
+		lastEventAge,
+	)
+	if snapshot.currentTool != "" {
+		text += e.i18n.Tf(MsgStatusPiCurrentTool, snapshot.currentTool)
+	}
+	if queryErr != nil {
+		text += e.i18n.Tf(MsgStatusPiDetailsError, queryErr)
+	}
+	return text
+}
+
+func formatRuntimeDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	if d < time.Second {
+		return "0s"
+	}
+	return d.String()
+}
+
+func formatRuntimeContext(usage *ContextUsage, tokensKnown bool) string {
+	if usage == nil {
+		return "-"
+	}
+	window := usage.ContextWindow
+	if !tokensKnown {
+		if window > 0 {
+			return "- / " + formatStatusInteger(window)
+		}
+		return "-"
+	}
+	used := usage.UsedTokens
+	if window <= 0 {
+		return formatStatusInteger(used)
+	}
+	percent := float64(used) * 100 / float64(window)
+	return fmt.Sprintf("%s / %s (%.1f%%)", formatStatusInteger(used), formatStatusInteger(window), percent)
+}
+
+func formatStatusInteger(value int) string {
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	digits := strconv.Itoa(value)
+	for i := len(digits) - 3; i > 0; i -= 3 {
+		digits = digits[:i] + "," + digits[i:]
+	}
+	if negative {
+		return "-" + digits
+	}
+	return digits
 }
 
 func (e *Engine) cmdUsage(p Platform, msg *Message) {
@@ -7633,6 +7873,7 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 		sessionDisplayName = s.GetName()
 	}
 	sessionStr := e.i18n.Tf(MsgStatusSession, sessionDisplayName, len(s.History))
+	sessionStr += e.piSessionRuntimeStatus(e.interactiveKeyForSessionKey(sessionKey))
 
 	var cronStr string
 	if e.cronScheduler != nil {

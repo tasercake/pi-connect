@@ -294,6 +294,12 @@ const (
 	MsgStatusSessionKey       MsgKey = "status_session_key"
 	MsgStatusAgentSID         MsgKey = "status_agent_sid"
 	MsgStatusUserID           MsgKey = "status_user_id"
+	MsgStatusPiRuntime        MsgKey = "status_pi_runtime"
+	MsgStatusPiNotStarted     MsgKey = "status_pi_not_started"
+	MsgStatusPiCurrentTool    MsgKey = "status_pi_current_tool"
+	MsgStatusPiDetailsError   MsgKey = "status_pi_details_error"
+	MsgStatusPiTurnActive     MsgKey = "status_pi_turn_active"
+	MsgStatusPiTurnIdle       MsgKey = "status_pi_turn_idle"
 	MsgEnabledShort           MsgKey = "enabled_short"
 	MsgDisabledShort          MsgKey = "disabled_short"
 
@@ -2301,6 +2307,98 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "User ID: `%s`\n",
 		LangJapanese:           "ユーザーID: `%s`\n",
 		LangSpanish:            "ID de usuario: `%s`\n",
+	},
+	MsgStatusPiRuntime: {
+		LangEnglish: "\nPi session runtime:\n" +
+			"State: %s\n" +
+			"Turn: %s\n" +
+			"Process: %s\n" +
+			"Model: %s\n" +
+			"Thinking: %s\n" +
+			"Context: %s\n" +
+			"Messages (user / assistant / total): %s\n" +
+			"Tool calls (session / current turn): %s\n" +
+			"Queue (Pi / pi-connect): %d / %d\n" +
+			"Last event: %s · %s\n",
+		LangChinese: "\nPi 会话运行状态：\n" +
+			"状态: %s\n" +
+			"轮次: %s\n" +
+			"进程: %s\n" +
+			"模型: %s\n" +
+			"思考级别: %s\n" +
+			"上下文: %s\n" +
+			"消息（用户 / 助手 / 总计）: %s\n" +
+			"工具调用（会话 / 当前轮）: %s\n" +
+			"队列（Pi / pi-connect）: %d / %d\n" +
+			"最后事件: %s · %s\n",
+		LangTraditionalChinese: "\nPi 會話執行狀態：\n" +
+			"狀態: %s\n" +
+			"輪次: %s\n" +
+			"程序: %s\n" +
+			"模型: %s\n" +
+			"思考級別: %s\n" +
+			"上下文: %s\n" +
+			"訊息（使用者 / 助手 / 總計）: %s\n" +
+			"工具呼叫（會話 / 當前輪）: %s\n" +
+			"佇列（Pi / pi-connect）: %d / %d\n" +
+			"最後事件: %s · %s\n",
+		LangJapanese: "\nPi セッション実行状態:\n" +
+			"状態: %s\n" +
+			"ターン: %s\n" +
+			"プロセス: %s\n" +
+			"モデル: %s\n" +
+			"思考レベル: %s\n" +
+			"コンテキスト: %s\n" +
+			"メッセージ（ユーザー / アシスタント / 合計）: %s\n" +
+			"ツール呼び出し（セッション / 現在のターン）: %s\n" +
+			"キュー（Pi / pi-connect）: %d / %d\n" +
+			"最終イベント: %s · %s\n",
+		LangSpanish: "\nEstado de la sesión de Pi:\n" +
+			"Estado: %s\n" +
+			"Turno: %s\n" +
+			"Proceso: %s\n" +
+			"Modelo: %s\n" +
+			"Razonamiento: %s\n" +
+			"Contexto: %s\n" +
+			"Mensajes (usuario / asistente / total): %s\n" +
+			"Herramientas (sesión / turno actual): %s\n" +
+			"Cola (Pi / pi-connect): %d / %d\n" +
+			"Último evento: %s · %s\n",
+	},
+	MsgStatusPiNotStarted: {
+		LangEnglish:            "\nPi session runtime: not started\n",
+		LangChinese:            "\nPi 会话运行状态：尚未启动\n",
+		LangTraditionalChinese: "\nPi 會話執行狀態：尚未啟動\n",
+		LangJapanese:           "\nPi セッション実行状態: 未開始\n",
+		LangSpanish:            "\nEstado de la sesión de Pi: no iniciada\n",
+	},
+	MsgStatusPiCurrentTool: {
+		LangEnglish:            "Current tool: %s\n",
+		LangChinese:            "当前工具: %s\n",
+		LangTraditionalChinese: "目前工具: %s\n",
+		LangJapanese:           "現在のツール: %s\n",
+		LangSpanish:            "Herramienta actual: %s\n",
+	},
+	MsgStatusPiDetailsError: {
+		LangEnglish:            "Live query error: %s\n",
+		LangChinese:            "实时查询错误: %s\n",
+		LangTraditionalChinese: "即時查詢錯誤: %s\n",
+		LangJapanese:           "ライブ照会エラー: %s\n",
+		LangSpanish:            "Error de consulta en vivo: %s\n",
+	},
+	MsgStatusPiTurnActive: {
+		LangEnglish:            "active for %s",
+		LangChinese:            "已运行 %s",
+		LangTraditionalChinese: "已執行 %s",
+		LangJapanese:           "%s 実行中",
+		LangSpanish:            "activo durante %s",
+	},
+	MsgStatusPiTurnIdle: {
+		LangEnglish:            "idle for %s",
+		LangChinese:            "已空闲 %s",
+		LangTraditionalChinese: "已閒置 %s",
+		LangJapanese:           "%s アイドル",
+		LangSpanish:            "inactivo durante %s",
 	},
 	MsgEnabledShort: {
 		LangEnglish:            "ON",

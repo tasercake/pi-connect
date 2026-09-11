@@ -499,6 +499,42 @@ type ContextUsage struct {
 	ContextWindow         int
 }
 
+// AgentSessionStatusReporter is an optional interface for running sessions that
+// can query their backend for a live, session-specific runtime snapshot.
+// Implementations must honor ctx and must not mutate the conversation.
+type AgentSessionStatusReporter interface {
+	GetSessionStatus(ctx context.Context) (*AgentSessionStatus, error)
+}
+
+// AgentSessionStatus contains backend-reported runtime and conversation stats.
+// Counts are for the complete underlying agent session, not only pi-connect's
+// in-memory history.
+type AgentSessionStatus struct {
+	ObservedAt          time.Time
+	Active              bool
+	ActivitySince       time.Time
+	Phase               StallPhase
+	ProcessAlive        bool
+	TransportResponsive bool
+	PID                 int
+	Model               string
+	Provider            string
+	ThinkingLevel       string
+	IsStreaming         bool
+	IsCompacting        bool
+	PendingMessages     int
+	MessageCount        int
+	UserMessages        int
+	AssistantMessages   int
+	ToolCalls           int
+	ToolResults         int
+	TotalMessages       int
+	StatsAvailable      bool
+	ContextUsage        *ContextUsage
+	ContextTokensKnown  bool
+	LastEventType       string
+}
+
 // ContextCompressor is an optional interface for agents that support
 // compressing/compacting the conversation context within a running session.
 // CompressCommand returns the native slash command (e.g. "/compact", "/compress")
