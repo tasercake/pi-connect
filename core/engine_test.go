@@ -4590,33 +4590,56 @@ func TestCmdQuiet_TogglesDisplay(t *testing.T) {
 		t.Fatalf("sent = %q, want quiet ON message", p.sent)
 	}
 
-	// 2nd /quiet: quiet → compact
+	// 2nd /quiet: quiet → staging
+	p.sent = nil
+	e.cmdQuiet(p, msg, nil)
+	if e.display.Mode != "staging" || !e.display.ThinkingMessages || !e.display.ToolMessages {
+		t.Fatalf("after 2nd /quiet: Mode=%q, TM=%v, Tool=%v, want staging/true/true",
+			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Staging mode") {
+		t.Fatalf("sent = %q, want staging mode message", p.sent)
+	}
+
+	// 3rd /quiet: staging → compact
 	p.sent = nil
 	e.cmdQuiet(p, msg, nil)
 	if e.display.Mode != "compact" || e.display.ThinkingMessages || e.display.ToolMessages {
-		t.Fatalf("after 2nd /quiet: Mode=%q, TM=%v, Tool=%v, want compact/false/false",
+		t.Fatalf("after 3rd /quiet: Mode=%q, TM=%v, Tool=%v, want compact/false/false",
 			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Compact mode") {
 		t.Fatalf("sent = %q, want compact mode message", p.sent)
 	}
 
-	// 3rd /quiet: compact → full
+	// 4th /quiet: compact → full
 	p.sent = nil
 	e.cmdQuiet(p, msg, nil)
 	if e.display.Mode != "full" || !e.display.ThinkingMessages || !e.display.ToolMessages {
-		t.Fatalf("after 3rd /quiet: Mode=%q, TM=%v, Tool=%v, want full/true/true",
+		t.Fatalf("after 4th /quiet: Mode=%q, TM=%v, Tool=%v, want full/true/true",
 			e.display.Mode, e.display.ThinkingMessages, e.display.ToolMessages)
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "Quiet mode OFF") {
 		t.Fatalf("sent = %q, want quiet OFF message", p.sent)
 	}
 
-	// /quiet with explicit argument
+	// /quiet with explicit staging persists mode-derived visibility flags.
+	var savedMode string
+	var savedThinking, savedTools bool
+	e.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, _, _ *int, toolMessages *bool) error {
+		savedMode, savedThinking, savedTools = *mode, *thinkingMessages, *toolMessages
+		return nil
+	})
 	p.sent = nil
-	e.cmdQuiet(p, msg, []string{"compact"})
-	if e.display.Mode != "compact" {
-		t.Fatalf("after /quiet compact: Mode=%q, want compact", e.display.Mode)
+	e.cmdQuiet(p, msg, []string{"staging"})
+	if e.display.Mode != "staging" || savedMode != "staging" || !savedThinking || !savedTools {
+		t.Fatalf("explicit staging state/persistence = mode %q, saved %q/%v/%v", e.display.Mode, savedMode, savedThinking, savedTools)
+	}
+
+	p.sent = nil
+	e.cmdQuiet(p, msg, []string{"invalid"})
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "full|quiet|staging|compact") {
+		t.Fatalf("invalid mode usage = %#v", p.sent)
 	}
 }
 

@@ -158,6 +158,10 @@ const (
 	MsgQuietOn                     MsgKey = "quiet_on"
 	MsgQuietOff                    MsgKey = "quiet_off"
 	MsgDisplayModeCompact          MsgKey = "display_mode_compact"
+	MsgDisplayModeStaging          MsgKey = "display_mode_staging"
+	MsgQuietUsage                  MsgKey = "quiet_usage"
+	MsgStagingStepsOmitted         MsgKey = "staging_steps_omitted"
+	MsgStagingBodyOmitted          MsgKey = "staging_body_omitted"
 	MsgQuietGlobalOn               MsgKey = "quiet_global_on"
 	MsgQuietGlobalOff              MsgKey = "quiet_global_off"
 	MsgModeChanged                 MsgKey = "mode_changed"
@@ -949,6 +953,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📋 緊湊模式 — 隱藏思考和工具訊息，每段文字獨立發送。",
 		LangJapanese:           "📋 コンパクトモード — 思考・ツール非表示、テキストは個別に送信。",
 		LangSpanish:            "📋 Modo compacto — pensamiento/herramientas ocultos, cada segmento de texto enviado por separado.",
+	},
+	MsgDisplayModeStaging: {
+		LangEnglish:            "📝 Staging mode — live progress is kept in one updated timeline; final answer is sent separately.",
+		LangChinese:            "📝 暂存模式 — 实时进度集中在一条持续更新的时间线中，最终答复单独发送。",
+		LangTraditionalChinese: "📝 暫存模式 — 即時進度集中在一則持續更新的時間軸中，最終答覆另行傳送。",
+		LangJapanese:           "📝 ステージングモード — ライブ進捗を1件のタイムラインで更新し、最終回答は別に送信します。",
+		LangSpanish:            "📝 Modo staging — el progreso se actualiza en una sola cronología; la respuesta final se envía aparte.",
+	},
+	MsgQuietUsage: {
+		LangEnglish:            "Usage: /quiet [full|quiet|staging|compact]",
+		LangChinese:            "用法：/quiet [full|quiet|staging|compact]",
+		LangTraditionalChinese: "用法：/quiet [full|quiet|staging|compact]",
+		LangJapanese:           "使用法: /quiet [full|quiet|staging|compact]",
+		LangSpanish:            "Uso: /quiet [full|quiet|staging|compact]",
+	},
+	MsgStagingStepsOmitted: {
+		LangEnglish:            "⋯ %d older steps omitted ⋯",
+		LangChinese:            "⋯ 已省略较早的 %d 个步骤 ⋯",
+		LangTraditionalChinese: "⋯ 已省略較早的 %d 個步驟 ⋯",
+		LangJapanese:           "⋯ 以前の%dステップを省略 ⋯",
+		LangSpanish:            "⋯ %d pasos anteriores omitidos ⋯",
+	},
+	MsgStagingBodyOmitted: {
+		LangEnglish:            "… [%d characters omitted] …",
+		LangChinese:            "… [已省略 %d 个字符] …",
+		LangTraditionalChinese: "… [已省略 %d 個字元] …",
+		LangJapanese:           "… [%d文字を省略] …",
+		LangSpanish:            "… [%d caracteres omitidos] …",
 	},
 	MsgQuietGlobalOn: {
 		LangEnglish:            "🔇 Global quiet mode ON — all sessions will hide thinking and tool progress.",
@@ -3507,11 +3539,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Ver/cambiar idioma, arg: [en|zh|zh-TW|ja|es|auto]",
 	},
 	MsgBuiltinCmdQuiet: {
-		LangEnglish:            "Toggle thinking/tool progress, arg: [global]",
-		LangChinese:            "开关思考和工具进度消息, 参数: [global]",
-		LangTraditionalChinese: "開關思考和工具進度訊息, 參數: [global]",
-		LangJapanese:           "思考/ツール進捗メッセージの表示切替, 引数: [global]",
-		LangSpanish:            "Alternar mensajes de progreso, arg: [global]",
+		LangEnglish:            "Cycle/set display mode, arg: [full|quiet|staging|compact]",
+		LangChinese:            "循环/设置显示模式，参数: [full|quiet|staging|compact]",
+		LangTraditionalChinese: "循環/設定顯示模式，參數: [full|quiet|staging|compact]",
+		LangJapanese:           "表示モードの切替/設定, 引数: [full|quiet|staging|compact]",
+		LangSpanish:            "Alternar/establecer modo, arg: [full|quiet|staging|compact]",
 	},
 	MsgBuiltinCmdCompress: {
 		LangEnglish:            "Compress conversation context",
