@@ -1102,7 +1102,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/pi-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · worked 0s · ~/codes/pi-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1138,7 +1138,7 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · worked 0s · ~/code/TechStudio/projects/core/agents/ceo*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1178,8 +1178,13 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	if len(sent) == 0 {
 		t.Fatal("sent = nil, want final reply")
 	}
+	for _, intermediate := range sent[:len(sent)-1] {
+		if strings.Contains(intermediate, "worked ") {
+			t.Fatalf("intermediate reply = %q, must not contain turn duration", intermediate)
+		}
+	}
 	final := sent[len(sent)-1]
-	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · worked 0s · ~/code/TechStudio/projects/core/agents/ceo*"
 	if final != want {
 		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
 	}
@@ -1320,7 +1325,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/pi-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · worked 0s · ~/codes/pi-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -6259,6 +6264,28 @@ func TestWorkspaceReconnectWithSavedSessionIDUsesExactResume(t *testing.T) {
 	}
 }
 
+func TestFormatTurnDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     string
+	}{
+		{name: "negative", duration: -time.Second, want: "0s"},
+		{name: "subsecond", duration: 999 * time.Millisecond, want: "0s"},
+		{name: "seconds", duration: 42*time.Second + 999*time.Millisecond, want: "42s"},
+		{name: "minutes", duration: 4*time.Minute + 32*time.Second, want: "4m 32s"},
+		{name: "hours", duration: 2*time.Hour + 8*time.Minute + 15*time.Second, want: "2h 8m 15s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatTurnDuration(tt.duration); got != tt.want {
+				t.Fatalf("formatTurnDuration(%s) = %q, want %q", tt.duration, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseSelfReportedCtx(t *testing.T) {
 	tests := []struct {
 		input string
@@ -7072,6 +7099,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	sess := newQueuingSession("qs2")
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
 
 	key := "test:user1"
 	session := e.sessions.GetOrCreateActive(key)
@@ -7096,7 +7124,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	go func() {
 		// Turn 1 result
 		sess.events <- Event{Type: EventText, Content: "response1"}
-		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		sess.events <- Event{Type: EventResult, Content: "response1", InputTokens: 28000, Done: true}
 		// Wait for the queued message's Send() call before pushing turn 2 events.
 		sess.sendMu.Lock()
 		for len(sess.sendCalls) == 0 {
@@ -7107,7 +7135,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 		sess.sendMu.Unlock()
 		// Turn 2 result (for the queued message)
 		sess.events <- Event{Type: EventText, Content: "response2"}
-		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+		sess.events <- Event{Type: EventResult, Content: "response2", InputTokens: 28000, Done: true}
 	}()
 
 	session.AddHistory("user", "initial-msg")
@@ -7118,7 +7146,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	// processInteractiveEvents should handle both turns.
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now().Add(-2*time.Hour-8*time.Minute-15*time.Second), nil, sendDone, nil)
 		close(done)
 	}()
 
@@ -7135,6 +7163,19 @@ func TestProcessInteractiveEvents_DrainsQueuedMessages(t *testing.T) {
 	state.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("pendingMessages after processing = %d, want 0", remaining)
+	}
+
+	// Each final turn gets duration metadata. The queued turn resets its start
+	// time when processing begins instead of inheriting the prior turn's age.
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %#v, want two final replies", sent)
+	}
+	if !strings.Contains(sent[0], "worked 2h 8m") {
+		t.Fatalf("first final reply = %q, want duration from original turn start", sent[0])
+	}
+	if !strings.Contains(sent[1], "worked ") || strings.Contains(sent[1], "worked 2h") {
+		t.Fatalf("queued final reply = %q, want independently reset duration", sent[1])
 	}
 
 	// Verify both turns recorded in session history.
