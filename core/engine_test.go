@@ -1102,7 +1102,7 @@ func TestProcessInteractiveEvents_AppendsReplyFooterWhenEnabled(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · ~/codes/pi-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 100% left · worked 0s · ~/codes/pi-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1138,7 +1138,7 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "answer\n\n*[ctx: ~14%] · glm-5.1 · worked 0s · ~/code/TechStudio/projects/core/agents/ceo*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -1178,8 +1178,13 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	if len(sent) == 0 {
 		t.Fatal("sent = nil, want final reply")
 	}
+	for _, intermediate := range sent[:len(sent)-1] {
+		if strings.Contains(intermediate, "worked ") {
+			t.Fatalf("intermediate reply = %q, must not contain turn duration", intermediate)
+		}
+	}
 	final := sent[len(sent)-1]
-	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · ~/code/TechStudio/projects/core/agents/ceo*"
+	want := "已处理完成。\n\n*[ctx: ~14%] · glm-5.1 · worked 0s · ~/code/TechStudio/projects/core/agents/ceo*"
 	if final != want {
 		t.Fatalf("final reply = %q, want %q\nall sent = %#v", final, want, sent)
 	}
@@ -1320,7 +1325,7 @@ func TestProcessInteractiveEvents_ReplyFooterPrefersSessionRuntimeState(t *testi
 	if len(sent) != 1 {
 		t.Fatalf("sent = %#v, want one final reply", sent)
 	}
-	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · ~/codes/pi-connect*"
+	want := "answer\n\n*gpt-5.4 · xhigh · 31% left · worked 0s · ~/codes/pi-connect*"
 	if sent[0] != want {
 		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
@@ -6256,6 +6261,28 @@ func TestWorkspaceReconnectWithSavedSessionIDUsesExactResume(t *testing.T) {
 	}
 	if calls[0] != "saved-session-id" {
 		t.Fatalf("StartSession call = %q, want saved session id", calls[0])
+	}
+}
+
+func TestFormatTurnDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     string
+	}{
+		{name: "negative", duration: -time.Second, want: "0s"},
+		{name: "subsecond", duration: 999 * time.Millisecond, want: "0s"},
+		{name: "seconds", duration: 42*time.Second + 999*time.Millisecond, want: "42s"},
+		{name: "minutes", duration: 4*time.Minute + 32*time.Second, want: "4m 32s"},
+		{name: "hours", duration: 2*time.Hour + 8*time.Minute + 15*time.Second, want: "2h 8m 15s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatTurnDuration(tt.duration); got != tt.want {
+				t.Fatalf("formatTurnDuration(%s) = %q, want %q", tt.duration, got, tt.want)
+			}
+		})
 	}
 }
 

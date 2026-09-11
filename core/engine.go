@@ -4767,7 +4767,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if contextText != "" && e.replyFooterEnabled {
 					footerContext = contextText
 				}
-				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
+				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext, turnStart); footer != "" {
 					cleanResponse = appendReplyFooter(cleanResponse, footer)
 				} else if contextText != "" {
 					cleanResponse += "\n" + contextText
@@ -6104,7 +6104,7 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 	return ""
 }
 
-func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string, turnStart time.Time) string {
 	if !e.replyFooterEnabled || agent == nil {
 		return ""
 	}
@@ -6134,6 +6134,9 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		parts = append(parts, usage)
 		hasStatus = true
 	}
+	if hasStatus && !turnStart.IsZero() {
+		parts = append(parts, e.i18n.Tf(MsgReplyFooterWorked, formatTurnDuration(time.Since(turnStart))))
+	}
 	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
 		parts = append(parts, dir)
 	}
@@ -6141,6 +6144,24 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		return ""
 	}
 	return strings.Join(parts, " · ")
+}
+
+func formatTurnDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	totalSeconds := int64(duration / time.Second)
+	hours := totalSeconds / 3600
+	minutes := totalSeconds % 3600 / 60
+	seconds := totalSeconds % 60
+
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func replyFooterModel(session AgentSession, agent Agent) string {
