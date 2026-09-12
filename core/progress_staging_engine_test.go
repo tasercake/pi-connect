@@ -9,7 +9,11 @@ import (
 )
 
 func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testing.T) {
-	p := &stagingCapturePlatform{}
+	p := &blockingFinalStagingPlatform{
+		stagingCapturePlatform: &stagingCapturePlatform{updated: make(chan struct{}, 4)},
+		sendStarted:            make(chan struct{}, 1),
+		releaseSend:            make(chan struct{}),
+	}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(DisplayCfg{
 		Mode:             "staging",
@@ -38,12 +42,24 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 	agentSession.events <- Event{Type: EventText, Content: "draft "}
 	agentSession.events <- Event{Type: EventText, Content: "text"}
 	agentSession.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	select {
+	case <-p.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("final answer send did not start")
+	}
+	select {
+	case <-p.updated:
+		renders := allStagingRenders(p.stagingCapturePlatform)
+		t.Fatalf("staging updated before final answer send completed: %q", renders[len(renders)-1])
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(p.releaseSend)
 	<-done
 	waitStaging(t, func() bool {
 		starts, updates, _ := p.snapshot()
 		renders := append(starts, updates...)
 		return len(renders) > 0 && strings.HasPrefix(renders[len(renders)-1], "✅ ")
-	}, "engine terminal staging timeline")
+	}, "engine terminal staging summary")
 	starts, updates, sent := p.snapshot()
 	if len(starts) != 1 {
 		t.Fatalf("preview starts = %d, want exactly one", len(starts))
@@ -52,17 +68,89 @@ func TestProcessInteractiveEventsStagingUsesOneTimelineAndSeparateFinal(t *testi
 		t.Fatalf("standalone sends = %#v, want separate final answer only", sent)
 	}
 	renders := append(starts, updates...)
-	finalTimeline := renders[len(renders)-1]
-	for _, want := range []string{"✅ ", "💭 inspect", "🔧 #1 Bash", "echo hi", "✅ #1 Bash", "hi", "✍️ draft text"} {
-		if !strings.Contains(finalTimeline, want) {
-			t.Fatalf("final timeline missing %q:\n%s", want, finalTimeline)
+	finalSummary := renders[len(renders)-1]
+	if !strings.HasPrefix(finalSummary, "✅ ") || !strings.Contains(finalSummary, "🔧 1 · 🪜 4") || strings.Contains(finalSummary, "\n") {
+		t.Fatalf("terminal staging message is not a compact one-line summary: %q", finalSummary)
+	}
+	for _, forbidden := range []string{"inspect", "echo hi", "\nhi", "draft text", "must-not-appear", "```"} {
+		if strings.Contains(finalSummary, forbidden) {
+			t.Fatalf("terminal summary retained event content %q: %q", forbidden, finalSummary)
 		}
 	}
-	if strings.Contains(finalTimeline, "must-not-appear") {
-		t.Fatalf("raw ToolInputRaw leaked:\n%s", finalTimeline)
+}
+
+func TestProcessInteractiveEventsStagingSilentResultDiscardsPreview(t *testing.T) {
+	p := &stagingCapturePlatform{}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "staging", ThinkingMessages: true, ToolMessages: true})
+	sessionKey := "capable:staging-silent"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("staging-silent-session")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "silent staging preview")
+	agentSession.events <- Event{Type: EventThinking, Content: "private thought"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	<-done
+	waitStaging(t, func() bool { return len(p.deleteSnapshot()) == 1 }, "silent staging preview deletion")
+	starts, updates, sent := p.snapshot()
+	if len(starts) != 1 || len(updates) != 0 || len(sent) != 0 {
+		t.Fatalf("silent staging deliveries: starts=%d updates=%d sent=%d", len(starts), len(updates), len(sent))
 	}
-	if strings.Count(finalTimeline, "✍️") != 1 {
-		t.Fatalf("intermediate text was not coalesced:\n%s", finalTimeline)
+}
+
+func TestProcessInteractiveEventsStagingFinalSendFailureMarksTimelineFailed(t *testing.T) {
+	p := &stagingCapturePlatform{sendErr: errors.New("send failed")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "staging", ThinkingMessages: true, ToolMessages: true})
+	sessionKey := "capable:staging-send-failure"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("staging-send-failure-session")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx)
+		close(done)
+	}()
+	waitStaging(t, func() bool { starts, _, _ := p.snapshot(); return len(starts) == 1 }, "send-failure staging preview")
+	agentSession.events <- Event{Type: EventThinking, Content: "retained failure context"}
+	agentSession.events <- Event{Type: EventResult, Content: "unsent final answer", Done: true}
+	<-done
+	waitStaging(t, func() bool {
+		_, updates, _ := p.snapshot()
+		return len(updates) > 0 && strings.HasPrefix(updates[len(updates)-1], "❌ ")
+	}, "failed terminal staging update")
+	_, updates, sent := p.snapshot()
+	last := updates[len(updates)-1]
+	if len(sent) != 1 || sent[0] != "unsent final answer" || !strings.Contains(last, "retained failure context") || strings.HasPrefix(last, "✅ ") {
+		t.Fatalf("send-failure lifecycle: sent=%#v terminal=%q", sent, last)
+	}
+}
+
+type blockingFinalStagingPlatform struct {
+	*stagingCapturePlatform
+	sendStarted chan struct{}
+	releaseSend chan struct{}
+}
+
+func (p *blockingFinalStagingPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	select {
+	case p.sendStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-p.releaseSend:
+		return p.stagingCapturePlatform.Send(ctx, replyCtx, content)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -166,8 +254,8 @@ func TestProcessInteractiveEventsStagingResetsForQueuedTurn(t *testing.T) {
 	<-done
 	waitStaging(t, func() bool {
 		starts, updates, _ := p.snapshot()
-		return len(starts) == 2 && strings.Contains(strings.Join(append(starts, updates...), "\n"), "second thought")
-	}, "queued staging final timeline")
+		return len(starts) == 2 && len(updates) >= 2
+	}, "queued staging terminal summaries")
 	starts, updates, sent := p.snapshot()
 	if len(starts) != 2 {
 		t.Fatalf("preview starts = %d, want one per queued turn", len(starts))
@@ -175,8 +263,9 @@ func TestProcessInteractiveEventsStagingResetsForQueuedTurn(t *testing.T) {
 	if len(sent) != 2 || sent[0] != "first answer" || sent[1] != "second answer" {
 		t.Fatalf("queued final answers = %#v", sent)
 	}
-	if !strings.Contains(strings.Join(append(starts, updates...), "\n"), "second thought") {
-		t.Fatalf("second staging timeline missing: starts=%#v updates=%#v", starts, updates)
+	last := updates[len(updates)-1]
+	if !strings.HasPrefix(last, "✅ ") || !strings.Contains(last, "🔧 0 · 🪜 1") || strings.Contains(last, "second thought") || strings.Contains(last, "\n") {
+		t.Fatalf("second turn terminal summary = %q", last)
 	}
 }
 
@@ -272,10 +361,10 @@ func TestProcessInteractiveEventsStaging429RetriesWithoutBlockingFinal(t *testin
 	if len(sent) != 1 || sent[0] != "final answer" {
 		t.Fatalf("429 emitted legacy progress: %#v", sent)
 	}
-	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 2 }, "429 latest-snapshot retry")
+	waitStaging(t, func() bool { calls, _ := p.attempts(); return calls == 2 }, "429 terminal-summary retry")
 	_, updates, _ := p.snapshot()
-	if len(updates) != 1 || !strings.Contains(updates[0], "latest state") {
-		t.Fatalf("429 retry did not retain latest timeline: %#v", updates)
+	if len(updates) != 1 || !strings.HasPrefix(updates[0], "✅ ") || !strings.Contains(updates[0], "🔧 1 · 🪜 2") || strings.Contains(updates[0], "latest state") || strings.Contains(updates[0], "\n") {
+		t.Fatalf("429 retry did not send compact terminal summary: %#v", updates)
 	}
 }
 

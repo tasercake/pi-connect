@@ -4202,7 +4202,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		waitOutbound: func(ctx context.Context) error { return e.waitOutgoingContext(ctx, turnPlatform) },
 	})
 	stagingActive := turnDisplay.Mode == "staging" && staging.Start()
-	defer func() { staging.Stop() }()
+	defer func() {
+		// Any unclassified exit must terminate staging instead of leaving a live
+		// timeline frozen as running. Explicit terminal paths clear stagingActive.
+		if stagingActive {
+			terminalState := stagingStateFailed
+			if e.ctx.Err() != nil || state.isStopped() {
+				terminalState = stagingStateCancelled
+			}
+			staging.Finalize(terminalState)
+			stagingActive = false
+		}
+		staging.Stop()
+	}()
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	// It must not compete with staging for the progress-message handle.
@@ -5010,10 +5022,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			resetStallTimer(e.eventIdleTimeout)
 
 		case EventResult:
-			if stagingActive {
-				staging.Finalize(stagingStateCompleted)
-				stagingActive = false
-			}
 			cp.Finalize(ProgressCardStateCompleted)
 			state.mu.Lock()
 			currentAgentSession := state.agentSession
@@ -5242,6 +5250,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
+			}
+
+			// Do not collapse staging until the authoritative final response has
+			// finished its send path. This preserves the live timeline while the
+			// user is still waiting for the answer.
+			if stagingActive {
+				if isSilent {
+					staging.Discard()
+				} else {
+					staging.Finalize(stagingStateCompleted)
+				}
+				stagingActive = false
 			}
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {

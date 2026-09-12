@@ -333,7 +333,7 @@ Notes:
 
 ### Progress display modes
 
-Use `/quiet` to cycle `full → quiet → staging → compact → full`, or set a mode directly (for example, `/quiet staging`). Staging mode keeps thinking, tool calls/results, and intermediate assistant text in one live-updated timeline, then sends the final answer separately. The same values are accepted by `[display].mode` and per-project display settings.
+Use `/quiet` to cycle `full → quiet → staging → compact → full`, or set a mode directly (for example, `/quiet staging`). Staging mode keeps thinking, tool calls/results, and intermediate assistant text in one live-updated timeline. On Telegram, tool bodies use code blocks and the live status appears at both ends of the timeline. After the separate final answer is sent, Telegram collapses the timeline to a one-line turn summary. The same values are accepted by `[display].mode` and per-project display settings.
 
 
 ## 📚 Documentation
