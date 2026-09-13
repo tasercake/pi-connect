@@ -106,6 +106,10 @@ type stubTelegramBot struct {
 	files                  map[string]*models.File
 	downloadURL            string
 	sendMessageParams      []*tgbot.SendMessageParams
+	sendPhotoParams        []*tgbot.SendPhotoParams
+	sendDocumentParams     []*tgbot.SendDocumentParams
+	sendVoiceParams        []*tgbot.SendVoiceParams
+	sendAudioParams        []*tgbot.SendAudioParams
 	editMessageTextParams  []*tgbot.EditMessageTextParams
 	createForumTopicParams []*tgbot.CreateForumTopicParams
 	editForumTopicParams   []*tgbot.EditForumTopicParams
@@ -138,9 +142,11 @@ func (b *stubTelegramBot) SendMessage(_ context.Context, params *tgbot.SendMessa
 	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) SendPhoto(_ context.Context, _ *tgbot.SendPhotoParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendPhoto(_ context.Context, params *tgbot.SendPhotoParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendPhotoCalls++
+	paramsCopy := *params
+	b.sendPhotoParams = append(b.sendPhotoParams, &paramsCopy)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
@@ -148,9 +154,11 @@ func (b *stubTelegramBot) SendPhoto(_ context.Context, _ *tgbot.SendPhotoParams)
 	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) SendDocument(_ context.Context, _ *tgbot.SendDocumentParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendDocument(_ context.Context, params *tgbot.SendDocumentParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendDocumentCalls++
+	paramsCopy := *params
+	b.sendDocumentParams = append(b.sendDocumentParams, &paramsCopy)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
@@ -158,9 +166,11 @@ func (b *stubTelegramBot) SendDocument(_ context.Context, _ *tgbot.SendDocumentP
 	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) SendVoice(_ context.Context, _ *tgbot.SendVoiceParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendVoice(_ context.Context, params *tgbot.SendVoiceParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendVoiceCalls++
+	paramsCopy := *params
+	b.sendVoiceParams = append(b.sendVoiceParams, &paramsCopy)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr
@@ -168,9 +178,11 @@ func (b *stubTelegramBot) SendVoice(_ context.Context, _ *tgbot.SendVoiceParams)
 	return &models.Message{ID: 99}, nil
 }
 
-func (b *stubTelegramBot) SendAudio(_ context.Context, _ *tgbot.SendAudioParams) (*models.Message, error) {
+func (b *stubTelegramBot) SendAudio(_ context.Context, params *tgbot.SendAudioParams) (*models.Message, error) {
 	b.mu.Lock()
 	b.sendAudioCalls++
+	paramsCopy := *params
+	b.sendAudioParams = append(b.sendAudioParams, &paramsCopy)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return nil, b.sendErr

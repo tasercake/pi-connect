@@ -139,10 +139,9 @@ func lastIndexAnyByte(s, chars string) int {
 	return -1
 }
 
-// chunkSendOptions captures the per-call extras that can't be shared across
-// all chunks. Reply parameters apply to the first chunk only (subsequent
-// chunks would create N visual replies, which is noisy). Reply markup
-// (inline keyboards) applies to the last chunk only — the buttons belong
+// chunkSendOptions captures per-call extras. Reply parameters apply to every
+// chunk so each Telegram message remains associated with its source. Reply
+// markup (inline keyboards) applies to the last chunk only — the buttons belong
 // next to the action they're about.
 type chunkSendOptions struct {
 	replyTo      *models.ReplyParameters
@@ -179,7 +178,7 @@ func (p *Platform) sendChunked(ctx context.Context, bot telegramBot, content str
 			Text:            core.MarkdownToSimpleHTML(body),
 			ParseMode:       models.ParseModeHTML,
 		}
-		if i == 0 && opts.replyTo != nil {
+		if opts.replyTo != nil {
 			params.ReplyParameters = opts.replyTo
 		}
 		if i == n-1 && opts.replyMarkup != nil {
@@ -231,14 +230,15 @@ func sendOneChunkWithFallback(ctx context.Context, bot telegramBot, params *tgbo
 		if len(halves) < 2 {
 			return fmt.Errorf("telegram: %s: %w", logMethod, err)
 		}
-		for _, h := range halves {
+		for i, h := range halves {
 			subParams := *params
 			subParams.Text = core.MarkdownToSimpleHTML(h)
 			subParams.ParseMode = models.ParseModeHTML
-			// Reply params and markup must not be re-applied to recursive
-			// children (already attached at outer level).
-			subParams.ReplyParameters = nil
-			subParams.ReplyMarkup = nil
+			// Preserve source association on every child and action buttons only
+			// on the last child.
+			if i < len(halves)-1 {
+				subParams.ReplyMarkup = nil
+			}
 			if e := sendOneChunkWithFallback(ctx, bot, &subParams, h, logMethod); e != nil {
 				return e
 			}

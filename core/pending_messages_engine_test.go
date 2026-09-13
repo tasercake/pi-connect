@@ -43,6 +43,22 @@ func (p *durableTestPlatform) Send(ctx context.Context, replyCtx any, content st
 	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
 }
 
+type durableMessageAwarePlatform struct {
+	durableTestPlatform
+	messageIDs []string
+}
+
+func (p *durableMessageAwarePlatform) ReconstructMessageReplyCtx(sessionKey, messageID string) (any, error) {
+	base, err := p.durableTestPlatform.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	p.reconstructMu.Lock()
+	p.messageIDs = append(p.messageIDs, messageID)
+	p.reconstructMu.Unlock()
+	return base.(string) + ":" + messageID, nil
+}
+
 type durableOutcomeUnknownError struct{}
 
 func (durableOutcomeUnknownError) Error() string        { return "delivery uncertain" }
@@ -382,7 +398,7 @@ func TestDurablePendingSurvivesEngineStopAndRecoversAttachments(t *testing.T) {
 		t.Fatalf("pending did not survive stop: %#v", records)
 	}
 
-	p2 := &durableTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	p2 := &durableMessageAwarePlatform{durableTestPlatform: durableTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 	sess := newDurableTestSession()
 	e2 := newDurableEngine(t, p2, &resultAgent{session: sess}, store)
 	if err := e2.Start(); err != nil {
@@ -405,19 +421,23 @@ func TestDurablePendingSurvivesEngineStopAndRecoversAttachments(t *testing.T) {
 	}
 	p2.reconstructMu.Lock()
 	gotKeys := append([]string(nil), p2.reconstructed...)
+	gotMessageIDs := append([]string(nil), p2.messageIDs...)
 	gotCtx := append([]any(nil), p2.replyCtxs...)
 	p2.reconstructMu.Unlock()
 	if len(gotKeys) == 0 || gotKeys[0] != "raw" {
 		t.Fatalf("reconstructed keys=%v", gotKeys)
 	}
+	if len(gotMessageIDs) == 0 || gotMessageIDs[0] != "m1" {
+		t.Fatalf("reconstructed message IDs=%v", gotMessageIDs)
+	}
 	foundCtx := false
 	for _, ctx := range gotCtx {
-		if ctx == "reconstructed:raw" {
+		if ctx == "reconstructed:raw:m1" {
 			foundCtx = true
 		}
 	}
 	if !foundCtx {
-		t.Fatalf("recovered reply context not used: %v", gotCtx)
+		t.Fatalf("recovered message-aware reply context not used: %v", gotCtx)
 	}
 }
 

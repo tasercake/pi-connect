@@ -1744,9 +1744,14 @@ func (e *Engine) recoverPendingMessages(p Platform) {
 		if e.ctx.Err() != nil {
 			return
 		}
-		// Reconstruction retains channel/thread destination but may not retain
-		// an original-message quote. Opaque replyCtx is deliberately not stored.
-		replyCtx, err := reconstructor.ReconstructReplyCtx(record.SessionKey)
+		// Opaque replyCtx is deliberately not stored. Prefer message-aware
+		// reconstruction so recovered responses still reference their source.
+		var replyCtx any
+		if messageReconstructor, ok := p.(MessageReplyContextReconstructor); ok && record.MessageID != "" {
+			replyCtx, err = messageReconstructor.ReconstructMessageReplyCtx(record.SessionKey, record.MessageID)
+		} else {
+			replyCtx, err = reconstructor.ReconstructReplyCtx(record.SessionKey)
+		}
 		if err != nil {
 			slog.Warn("durable queue reply target reconstruction failed", "project", e.name, "platform", p.Name(), "session", record.SessionKey, "error", err)
 			continue
