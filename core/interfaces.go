@@ -25,6 +25,14 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// MessageReplyContextReconstructor is an optional interface for platforms that
+// can restore the originating message reference as well as the destination.
+// Durable queued-message recovery prefers this richer form when a message ID
+// was persisted.
+type MessageReplyContextReconstructor interface {
+	ReconstructMessageReplyCtx(sessionKey, messageID string) (any, error)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {

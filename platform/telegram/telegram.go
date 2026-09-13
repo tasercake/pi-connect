@@ -798,7 +798,7 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, threadID)
 	msg.WorkspaceSourceChannelKey = sourceChannelKey
 	deliveryReady := make(chan struct{})
-	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID, deliveryReady: deliveryReady}
+	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID, messageID: tgMsg.ID, deliveryReady: deliveryReady}
 	titleInput := forumTopicNamingInput(msg, tgMsg)
 
 	return func(dispatchDone <-chan struct{}) {
@@ -1041,6 +1041,7 @@ func (p *Platform) sendOriginalMessageReference(ctx context.Context, bot telegra
 	params := &tgbot.SendMessageParams{
 		ChatID: msg.Chat.ID, MessageThreadID: threadID, Text: htmlText,
 		ParseMode:          models.ParseModeHTML,
+		ReplyParameters:    &models.ReplyParameters{MessageID: msg.ID},
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: tgbot.True()},
 	}
 	_, err := bot.SendMessage(ctx, params)
@@ -1649,6 +1650,13 @@ func resolveReplyContext(ctx context.Context, rctx any) (replyContext, error) {
 	return rc, nil
 }
 
+func sourceReplyParameters(rc replyContext) *models.ReplyParameters {
+	if rc.messageID == 0 {
+		return nil
+	}
+	return &models.ReplyParameters{MessageID: rc.messageID}
+}
+
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	rc, err := resolveReplyContext(ctx, rctx)
 	if err != nil {
@@ -1658,20 +1666,16 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if err != nil {
 		return err
 	}
-	var replyTo *models.ReplyParameters
-	if rc.messageID != 0 {
-		replyTo = &models.ReplyParameters{MessageID: rc.messageID}
-	}
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
-		replyTo:      replyTo,
+		replyTo:      sourceReplyParameters(rc),
 		logMethod:    "Reply",
 		logChunkInfo: true,
 	})
 }
 
-// Send sends a new message (not a reply)
+// Send sends a response associated with the incoming message when available.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	rc, err := resolveReplyContext(ctx, rctx)
 	if err != nil {
@@ -1684,6 +1688,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
+		replyTo:      sourceReplyParameters(rc),
 		logMethod:    "Send",
 		logChunkInfo: true,
 	})
@@ -1708,6 +1713,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Photo:           &models.InputFileUpload{Filename: name, Data: bytes.NewReader(img.Data)},
+		ReplyParameters: sourceReplyParameters(rc),
 	}
 	if _, err := bot.SendPhoto(ctx, params); err != nil {
 		return fmt.Errorf("telegram: send image: %w", err)
@@ -1733,6 +1739,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Document:        &models.InputFileUpload{Filename: name, Data: bytes.NewReader(file.Data)},
+		ReplyParameters: sourceReplyParameters(rc),
 	}
 	if _, err := bot.SendDocument(ctx, params); err != nil {
 		return fmt.Errorf("telegram: send file: %w", err)
@@ -1794,6 +1801,7 @@ func (p *Platform) sendVoice(ctx context.Context, rc replyContext, audio []byte,
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Voice:           &models.InputFileUpload{Filename: "tts_audio." + telegramAudioFileExt(format), Data: bytes.NewReader(audio)},
+		ReplyParameters: sourceReplyParameters(rc),
 	}
 	if _, err := bot.SendVoice(ctx, params); err != nil {
 		return err
@@ -1810,6 +1818,7 @@ func (p *Platform) sendAudio(ctx context.Context, rc replyContext, audio []byte,
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Audio:           &models.InputFileUpload{Filename: "tts_audio." + telegramAudioFileExt(format), Data: bytes.NewReader(audio)},
+		ReplyParameters: sourceReplyParameters(rc),
 	}
 	if _, err := bot.SendAudio(ctx, params); err != nil {
 		return err
@@ -1851,6 +1860,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
+		replyTo:      sourceReplyParameters(rc),
 		replyMarkup:  &models.InlineKeyboardMarkup{InlineKeyboard: rows},
 		logMethod:    "SendWithButtons",
 		logChunkInfo: true,
@@ -1936,6 +1946,22 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	}
 
 	return replyContext{chatID: chatID, threadID: threadID}, nil
+}
+
+// ReconstructMessageReplyCtx restores a durable queued message's destination
+// and source reference after a process restart.
+func (p *Platform) ReconstructMessageReplyCtx(sessionKey, messageID string) (any, error) {
+	rctx, err := p.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	id, err := strconv.Atoi(messageID)
+	if err != nil || id <= 0 {
+		return nil, fmt.Errorf("telegram: invalid message ID %q", messageID)
+	}
+	rc := rctx.(replyContext)
+	rc.messageID = id
+	return rc, nil
 }
 
 // telegramPreviewHandle stores the chat, thread, and message IDs for an editable preview message.
@@ -2054,6 +2080,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		MessageThreadID: rc.threadID,
 		Text:            html,
 		ParseMode:       models.ParseModeHTML,
+		ReplyParameters: sourceReplyParameters(rc),
 	}
 
 	sent, err := bot.SendMessage(ctx, params)
