@@ -881,7 +881,7 @@ func (p *Platform) finishGeneralRoute(bot telegramBot, tgMsg *models.Message, th
 	_, err = bot.SendMessage(handoffCtx, &tgbot.SendMessageParams{
 		ChatID:             tgMsg.Chat.ID,
 		Text:               telegramMessageLink(tgMsg.Chat, threadID),
-		ReplyParameters:    &models.ReplyParameters{MessageID: tgMsg.ID},
+		ReplyParameters:    replyParameters(tgMsg.ID),
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: tgbot.True()},
 	})
 	handoffCancel()
@@ -1041,7 +1041,7 @@ func (p *Platform) sendOriginalMessageReference(ctx context.Context, bot telegra
 	params := &tgbot.SendMessageParams{
 		ChatID: msg.Chat.ID, MessageThreadID: threadID, Text: htmlText,
 		ParseMode:          models.ParseModeHTML,
-		ReplyParameters:    &models.ReplyParameters{MessageID: msg.ID},
+		ReplyParameters:    replyParameters(msg.ID),
 		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: tgbot.True()},
 	}
 	_, err := bot.SendMessage(ctx, params)
@@ -1140,11 +1140,9 @@ func (p *Platform) sendAttachmentDownloadFailure(ctx context.Context, msg *model
 
 func (p *Platform) sendTopicFailure(ctx context.Context, bot telegramBot, msg *models.Message, key core.MsgKey) {
 	if _, err := bot.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID: msg.Chat.ID,
-		Text:   core.NewI18n(telegramMessageLanguage(strings.TrimSpace(msg.Text+" "+msg.Caption), msg)).T(key),
-		ReplyParameters: &models.ReplyParameters{
-			MessageID: msg.ID,
-		},
+		ChatID:          msg.Chat.ID,
+		Text:            core.NewI18n(telegramMessageLanguage(strings.TrimSpace(msg.Text+" "+msg.Caption), msg)).T(key),
+		ReplyParameters: replyParameters(msg.ID),
 	}); err != nil {
 		slog.Error("telegram: send topic failure failed", "error", err, "chat_id", msg.Chat.ID, "message_id", msg.ID)
 	}
@@ -1650,11 +1648,16 @@ func resolveReplyContext(ctx context.Context, rctx any) (replyContext, error) {
 	return rc, nil
 }
 
-func sourceReplyParameters(rc replyContext) *models.ReplyParameters {
-	if rc.messageID == 0 {
+// replyParameters keeps delivery independent from the source message lifetime.
+// Telegram sends the message normally when its reply target was deleted.
+func replyParameters(messageID int) *models.ReplyParameters {
+	if messageID == 0 {
 		return nil
 	}
-	return &models.ReplyParameters{MessageID: rc.messageID}
+	return &models.ReplyParameters{
+		MessageID:                messageID,
+		AllowSendingWithoutReply: true,
+	}
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -1669,7 +1672,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
-		replyTo:      sourceReplyParameters(rc),
+		replyTo:      replyParameters(rc.messageID),
 		logMethod:    "Reply",
 		logChunkInfo: true,
 	})
@@ -1688,7 +1691,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
-		replyTo:      sourceReplyParameters(rc),
+		replyTo:      replyParameters(rc.messageID),
 		logMethod:    "Send",
 		logChunkInfo: true,
 	})
@@ -1713,7 +1716,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Photo:           &models.InputFileUpload{Filename: name, Data: bytes.NewReader(img.Data)},
-		ReplyParameters: sourceReplyParameters(rc),
+		ReplyParameters: replyParameters(rc.messageID),
 	}
 	if _, err := bot.SendPhoto(ctx, params); err != nil {
 		return fmt.Errorf("telegram: send image: %w", err)
@@ -1739,7 +1742,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Document:        &models.InputFileUpload{Filename: name, Data: bytes.NewReader(file.Data)},
-		ReplyParameters: sourceReplyParameters(rc),
+		ReplyParameters: replyParameters(rc.messageID),
 	}
 	if _, err := bot.SendDocument(ctx, params); err != nil {
 		return fmt.Errorf("telegram: send file: %w", err)
@@ -1801,7 +1804,7 @@ func (p *Platform) sendVoice(ctx context.Context, rc replyContext, audio []byte,
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Voice:           &models.InputFileUpload{Filename: "tts_audio." + telegramAudioFileExt(format), Data: bytes.NewReader(audio)},
-		ReplyParameters: sourceReplyParameters(rc),
+		ReplyParameters: replyParameters(rc.messageID),
 	}
 	if _, err := bot.SendVoice(ctx, params); err != nil {
 		return err
@@ -1818,7 +1821,7 @@ func (p *Platform) sendAudio(ctx context.Context, rc replyContext, audio []byte,
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Audio:           &models.InputFileUpload{Filename: "tts_audio." + telegramAudioFileExt(format), Data: bytes.NewReader(audio)},
-		ReplyParameters: sourceReplyParameters(rc),
+		ReplyParameters: replyParameters(rc.messageID),
 	}
 	if _, err := bot.SendAudio(ctx, params); err != nil {
 		return err
@@ -1860,7 +1863,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	return p.sendChunked(ctx, bot, content, chunkSendOptions{
 		chatID:       rc.chatID,
 		threadID:     rc.threadID,
-		replyTo:      sourceReplyParameters(rc),
+		replyTo:      replyParameters(rc.messageID),
 		replyMarkup:  &models.InlineKeyboardMarkup{InlineKeyboard: rows},
 		logMethod:    "SendWithButtons",
 		logChunkInfo: true,
@@ -2080,7 +2083,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		MessageThreadID: rc.threadID,
 		Text:            html,
 		ParseMode:       models.ParseModeHTML,
-		ReplyParameters: sourceReplyParameters(rc),
+		ReplyParameters: replyParameters(rc.messageID),
 	}
 
 	sent, err := bot.SendMessage(ctx, params)
