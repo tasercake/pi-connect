@@ -18,6 +18,9 @@ func requireSourceReply(t *testing.T, params *models.ReplyParameters, wantMessag
 	if params == nil || params.MessageID != wantMessageID {
 		t.Fatalf("ReplyParameters = %#v, want message ID %d", params, wantMessageID)
 	}
+	if !params.AllowSendingWithoutReply {
+		t.Fatalf("ReplyParameters.AllowSendingWithoutReply = false, want true")
+	}
 }
 
 func TestTextResponsePathsReferenceSourceMessage(t *testing.T) {
@@ -147,7 +150,7 @@ func TestReconstructMessageReplyCtxRestoresSourceMessage(t *testing.T) {
 func TestOversizeFallbackPreservesReplyOnEveryDeliveredChunk(t *testing.T) {
 	bot := newStubTelegramBot()
 	bot.sendMessageErrByCall = map[int]error{1: errors.New("Bad Request: message is too long")}
-	reply := &models.ReplyParameters{MessageID: 42}
+	reply := replyParameters(42)
 	markup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{Text: "OK", CallbackData: "ok"}}}}
 	p := &Platform{bot: bot}
 

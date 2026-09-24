@@ -1274,7 +1274,9 @@ func TestGeneralForumAttachmentDownloadFailureIsVisibleAndDoesNotCreateTopic(t *
 	if stubBot.createForumTopicCalls != 0 || stubBot.sendMessageCalls != 1 {
 		t.Fatalf("topic/reply calls = %d/%d", stubBot.createForumTopicCalls, stubBot.sendMessageCalls)
 	}
-	if got := stubBot.sendMessageParams[0]; got.ReplyParameters == nil || got.ReplyParameters.MessageID != 10 || !strings.Contains(got.Text, "download") {
+	got := stubBot.sendMessageParams[0]
+	requireSourceReply(t, got.ReplyParameters, 10)
+	if !strings.Contains(got.Text, "download") {
 		t.Fatalf("attachment failure reply = %#v", got)
 	}
 }
@@ -1306,9 +1308,7 @@ func TestGeneralForumCreationFailureDoesNotDispatch(t *testing.T) {
 	}
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if reply := stubBot.sendMessageParams[0].ReplyParameters; reply == nil || reply.MessageID != 10 {
-		t.Fatalf("failure reply = %#v", reply)
-	}
+	requireSourceReply(t, stubBot.sendMessageParams[0].ReplyParameters, 10)
 }
 
 func TestGeneralForumTitleWorkDropsWhenWorkerSaturated(t *testing.T) {
