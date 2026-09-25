@@ -1123,7 +1123,7 @@ func TestHandleMessageGeneralForumUsesFinalRouteBeforeOptionalTitle(t *testing.T
 		t.Fatalf("workspace source = %q", got.WorkspaceSourceChannelKey)
 	}
 	rc := got.ReplyCtx.(replyContext)
-	if rc.threadID != 77 || rc.deliveryReady == nil {
+	if rc.threadID != 77 || rc.messageID != 10 {
 		t.Fatalf("ReplyCtx = %#v", rc)
 	}
 	stubBot.mu.Lock()
@@ -1165,15 +1165,17 @@ func TestHandleMessageGeneralForumUsesFinalRouteBeforeOptionalTitle(t *testing.T
 	if stubBot.editForumTopicParams[0].Name != "Investigate flaky tests" {
 		t.Fatalf("renamed topic = %#v", stubBot.editForumTopicParams[0])
 	}
-	if first := stubBot.sendMessageParams[0]; first.MessageThreadID != 77 || first.Text != `<a href="https://t.me/testforum/10">Replying to:</a>
-please investigate why the tests are flaky` {
-		t.Fatalf("first topic message = %#v", first)
+	if len(stubBot.sendMessageParams) != 2 {
+		t.Fatalf("SendMessage calls = %d, want handoff and agent output", len(stubBot.sendMessageParams))
 	}
-	for i, params := range stubBot.sendMessageParams {
-		if params.Text == "agent result" && i == 0 {
-			t.Fatal("agent output preceded source reference")
-		}
+	if handoff := stubBot.sendMessageParams[0]; handoff.MessageThreadID != 0 || handoff.Text != "https://t.me/testforum/77" {
+		t.Fatalf("handoff = %#v", handoff)
 	}
+	output := stubBot.sendMessageParams[1]
+	if output.MessageThreadID != 77 || output.Text != "agent result" {
+		t.Fatalf("topic output = %#v", output)
+	}
+	requireSourceReply(t, output.ReplyParameters, 10)
 }
 
 func TestGeneralForumOptionalTitleFailuresKeepFallbackAndOutput(t *testing.T) {
@@ -1204,7 +1206,7 @@ func TestGeneralForumOptionalTitleFailuresKeepFallbackAndOutput(t *testing.T) {
 			if err := p.Reply(context.Background(), msg.ReplyCtx, "done"); err != nil {
 				t.Fatal(err)
 			}
-			waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() >= 3 })
+			waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() >= 2 })
 			stubBot.mu.Lock()
 			defer stubBot.mu.Unlock()
 			if stubBot.createForumTopicCalls != 1 || stubBot.createForumTopicParams[0].Name != "New request · 10" {
@@ -1216,43 +1218,6 @@ func TestGeneralForumOptionalTitleFailuresKeepFallbackAndOutput(t *testing.T) {
 			}
 			if stubBot.editForumTopicCalls != wantEdits {
 				t.Fatalf("EditForumTopic calls = %d, want %d", stubBot.editForumTopicCalls, wantEdits)
-			}
-		})
-	}
-}
-
-func TestGeneralForumSourceReferenceFallbackAndFailureReleaseOutput(t *testing.T) {
-	tests := []struct {
-		name      string
-		errs      map[int]error
-		wantCalls int
-		wantPlain bool
-	}{
-		{name: "html parse fallback", errs: map[int]error{1: errors.New("Bad Request: can't parse entities")}, wantCalls: 4, wantPlain: true},
-		{name: "both reference sends fail", errs: map[int]error{1: errors.New("can't parse entities"), 2: errors.New("send failed")}, wantCalls: 4},
-		{name: "api failure", errs: map[int]error{1: errors.New("network failed")}, wantCalls: 3},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stubBot := newStubTelegramBot()
-			stubBot.sendMessageErrByCall = tt.errs
-			handled := make(chan *core.Message, 1)
-			p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}, handler: func(_ core.Platform, msg *core.Message) { handled <- msg }}
-			p.handleMessage(context.Background(), generalForumMessage(10, "hello"))
-			msg := <-handled
-			if err := p.Send(context.Background(), msg.ReplyCtx, "agent output"); err != nil {
-				t.Fatal(err)
-			}
-			waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == tt.wantCalls })
-			stubBot.mu.Lock()
-			defer stubBot.mu.Unlock()
-			if tt.wantPlain && stubBot.sendMessageParams[1].ParseMode != "" {
-				t.Fatalf("plain fallback ParseMode = %q", stubBot.sendMessageParams[1].ParseMode)
-			}
-			for _, params := range stubBot.sendMessageParams {
-				if params.Text == "agent output" && params.MessageThreadID != 77 {
-					t.Fatalf("output thread = %d", params.MessageThreadID)
-				}
 			}
 		})
 	}
@@ -1368,7 +1333,7 @@ func TestGeneralForumDuplicateConcurrentAndReplayDispatchOnce(t *testing.T) {
 	}
 }
 
-func TestGeneralForumSynchronousCommandReplyDoesNotDeadlockBarrier(t *testing.T) {
+func TestGeneralForumSynchronousCommandReplyNeedsNoSourceBarrier(t *testing.T) {
 	stubBot := newStubTelegramBot()
 	done := make(chan error, 1)
 	p := &Platform{groupReplyAll: true, bot: stubBot, selfUser: &models.User{ID: 42}}
@@ -1382,12 +1347,24 @@ func TestGeneralForumSynchronousCommandReplyDoesNotDeadlockBarrier(t *testing.T)
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("synchronous reply deadlocked on source barrier")
+		t.Fatal("synchronous reply deadlocked")
 	}
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if len(stubBot.sendMessageParams) < 2 || stubBot.sendMessageParams[0].MessageThreadID != 77 {
-		t.Fatalf("source reference was not first: %#v", stubBot.sendMessageParams)
+	topicMessages := 0
+	for _, params := range stubBot.sendMessageParams {
+		if params.MessageThreadID != 77 {
+			continue
+		}
+		topicMessages++
+		if params.Text != "command result" {
+			t.Fatalf("unexpected topic message: %#v", params)
+		}
+		requireSourceReply(t, params.ReplyParameters, 10)
+	}
+	if topicMessages != 1 {
+		t.Fatalf("topic messages = %d, want only command result", topicMessages)
 	}
 }
 
@@ -1547,14 +1524,23 @@ func TestHandleMessageGeneralForumTopicWithoutUsernameUsesPrivateLink(t *testing
 	if err := p.Send(context.Background(), got.ReplyCtx, "done"); err != nil {
 		t.Fatal(err)
 	}
-	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 3 })
+	waitForTelegramTest(t, time.Second, func() bool { return stubBot.SendMessageCallCount() == 2 })
 	stubBot.mu.Lock()
 	defer stubBot.mu.Unlock()
-	if first := stubBot.sendMessageParams[0]; !strings.Contains(first.Text, "https://t.me/c/9876543210/11") {
-		t.Fatalf("private source link = %q", first.Text)
+	var handoff, output *tgbot.SendMessageParams
+	for _, params := range stubBot.sendMessageParams {
+		switch params.Text {
+		case "https://t.me/c/9876543210/77":
+			handoff = params
+		case "done":
+			output = params
+		}
 	}
-	if handoff := stubBot.sendMessageParams[1]; handoff.Text != "https://t.me/c/9876543210/77" || handoff.ReplyParameters == nil || handoff.ReplyParameters.MessageID != 11 {
+	if handoff == nil || handoff.ReplyParameters == nil || handoff.ReplyParameters.MessageID != 11 {
 		t.Fatalf("private handoff = %#v", handoff)
+	}
+	if output == nil || output.MessageThreadID != 77 {
+		t.Fatalf("private topic output = %#v", output)
 	}
 }
 
@@ -1670,62 +1656,6 @@ func TestForumTopicNamingInputFallbacks(t *testing.T) {
 	)
 	if spanishPhoto != "Foto" {
 		t.Fatalf("Spanish photo name = %q, want %q", spanishPhoto, "Foto")
-	}
-}
-
-func TestOriginalMessageReferenceLinksAndTruncatesSnippet(t *testing.T) {
-	msg := &models.Message{
-		ID:   12,
-		Text: "first <line>\nsecond & line\nthird\nfourth\nfifth\nsixth",
-		Chat: models.Chat{ID: -100123, Username: "@testforum"},
-	}
-	got := originalMessageReference(msg)
-	want := `<a href="https://t.me/testforum/12">Replying to:</a>
-first &lt;line&gt;
-second &amp; line
-third
-fourth
-fifth…`
-	if got != want {
-		t.Fatalf("originalMessageReference() = %q, want %q", got, want)
-	}
-	if lines := strings.Count(got, "\n"); lines != 5 {
-		t.Fatalf("newline count = %d, want header plus five snippet lines", lines)
-	}
-}
-
-func TestOriginalMessageReferenceBoundsLongContentForTelegram(t *testing.T) {
-	msg := &models.Message{
-		ID:   12,
-		Text: strings.Repeat("界<&", 3000) + "\nsecond\nthird\nfourth\nfifth\nsixth",
-		Chat: models.Chat{ID: -100123},
-	}
-	htmlText, plainText := originalMessageReferences(msg)
-	if utf16Len(plainText) > telegramMessageLimit {
-		t.Fatalf("plain reference UTF-16 length = %d", utf16Len(plainText))
-	}
-	if strings.Count(plainText, "\n") > 5 {
-		t.Fatalf("reference has too many lines: %d", strings.Count(plainText, "\n")+1)
-	}
-	if !strings.Contains(htmlText, "&lt;") || !strings.Contains(htmlText, "&amp;") {
-		t.Fatal("HTML reference did not escape source")
-	}
-	if !strings.HasSuffix(plainText, "…") {
-		t.Fatal("long reference was not truncated")
-	}
-}
-
-func TestOriginalMessageReferenceUsesCaption(t *testing.T) {
-	msg := &models.Message{
-		ID:      13,
-		Caption: "caption text",
-		Chat:    models.Chat{ID: -100123},
-	}
-	got := originalMessageReference(msg)
-	want := `<a href="https://t.me/c/123/13">Replying to:</a>
-caption text`
-	if got != want {
-		t.Fatalf("originalMessageReference() = %q, want %q", got, want)
 	}
 }
 
