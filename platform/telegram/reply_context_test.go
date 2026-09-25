@@ -118,7 +118,7 @@ func TestGeneralForumResponsesReferenceOriginalMessage(t *testing.T) {
 		t.Fatalf("SendPreviewStart: %v", err)
 	}
 
-	waitForTelegramTest(t, time.Second, func() bool { return bot.SendMessageCallCount() == 3 })
+	waitForTelegramTest(t, time.Second, func() bool { return bot.SendMessageCallCount() == 2 })
 	bot.mu.Lock()
 	paramsCopy := append([]*tgbot.SendMessageParams(nil), bot.sendMessageParams...)
 	bot.mu.Unlock()

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,9 +34,6 @@ type replyContext struct {
 	chatID    int64
 	threadID  int
 	messageID int
-	// deliveryReady is an output-only barrier. Session identity is already
-	// final; replies wait only so the source reference can be posted first.
-	deliveryReady <-chan struct{}
 }
 
 type mediaGroupKey struct {
@@ -797,12 +793,11 @@ func (p *Platform) routeGeneralForumMessage(ctx context.Context, msg *core.Messa
 	msg.SessionKey = p.buildSessionKey(tgMsg.Chat.ID, threadID, tgMsg.From.ID)
 	msg.ChannelKey = buildChannelKey(tgMsg.Chat.ID, threadID)
 	msg.WorkspaceSourceChannelKey = sourceChannelKey
-	deliveryReady := make(chan struct{})
-	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID, messageID: tgMsg.ID, deliveryReady: deliveryReady}
+	msg.ReplyCtx = replyContext{chatID: tgMsg.Chat.ID, threadID: threadID, messageID: tgMsg.ID}
 	titleInput := forumTopicNamingInput(msg, tgMsg)
 
 	return func(dispatchDone <-chan struct{}) {
-		go p.finishGeneralRoute(bot, tgMsg, threadID, titleInput, deliveryReady, dispatchDone)
+		go p.finishGeneralRoute(bot, tgMsg, threadID, titleInput, dispatchDone)
 	}, true
 }
 
@@ -868,17 +863,9 @@ func (p *Platform) createForumTopic(ctx context.Context, bot telegramBot, chatID
 	return nil, fmt.Errorf("topic creation retry exhausted")
 }
 
-func (p *Platform) finishGeneralRoute(bot telegramBot, tgMsg *models.Message, threadID int, titleInput string, deliveryReady chan struct{}, dispatchDone <-chan struct{}) {
-	refCtx, cancel := p.operationContext(context.Background(), telegramAPITimeout)
-	err := p.sendOriginalMessageReference(refCtx, bot, tgMsg, threadID)
-	cancel()
-	if err != nil {
-		slog.Warn("telegram: send original message reference failed; releasing output", "error", err, "chat_id", tgMsg.Chat.ID, "message_id", tgMsg.ID, "thread_id", threadID)
-	}
-	close(deliveryReady)
-
+func (p *Platform) finishGeneralRoute(bot telegramBot, tgMsg *models.Message, threadID int, titleInput string, dispatchDone <-chan struct{}) {
 	handoffCtx, handoffCancel := p.operationContext(context.Background(), telegramAPITimeout)
-	_, err = bot.SendMessage(handoffCtx, &tgbot.SendMessageParams{
+	_, err := bot.SendMessage(handoffCtx, &tgbot.SendMessageParams{
 		ChatID:             tgMsg.Chat.ID,
 		Text:               telegramMessageLink(tgMsg.Chat, threadID),
 		ReplyParameters:    replyParameters(tgMsg.ID),
@@ -1036,91 +1023,6 @@ func telegramMessageLink(chat models.Chat, messageID int) string {
 	return fmt.Sprintf("https://t.me/c/%s/%d", internalID, messageID)
 }
 
-func (p *Platform) sendOriginalMessageReference(ctx context.Context, bot telegramBot, msg *models.Message, threadID int) error {
-	htmlText, plainText := originalMessageReferences(msg)
-	params := &tgbot.SendMessageParams{
-		ChatID: msg.Chat.ID, MessageThreadID: threadID, Text: htmlText,
-		ParseMode:          models.ParseModeHTML,
-		ReplyParameters:    replyParameters(msg.ID),
-		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: tgbot.True()},
-	}
-	_, err := bot.SendMessage(ctx, params)
-	if err == nil || !isTelegramHTMLParseError(err) {
-		return err
-	}
-	params.Text = plainText
-	params.ParseMode = ""
-	_, fallbackErr := bot.SendMessage(ctx, params)
-	if fallbackErr != nil {
-		return errors.Join(err, fmt.Errorf("plain-text fallback: %w", fallbackErr))
-	}
-	return nil
-}
-
-func isTelegramHTMLParseError(err error) bool {
-	if err == nil {
-		return false
-	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "can't parse") || strings.Contains(text, "parse entities")
-}
-
-func originalMessageReferences(msg *models.Message) (htmlText, plainText string) {
-	content := strings.TrimSpace(msg.Text)
-	if content == "" {
-		content = strings.TrimSpace(msg.Caption)
-	}
-	if content == "" {
-		content = core.NewI18n(telegramMessageLanguage("", msg)).T(core.MsgForumTopicNewRequest)
-	}
-	label := core.NewI18n(telegramMessageLanguage(content, msg)).T(core.MsgForumTopicReplyingTo)
-	visibleBudget := telegramMessageLimit - utf16Len(label) - 1
-	content = truncateMessage(content, 5, visibleBudget)
-
-	link := html.EscapeString(telegramMessageLink(msg.Chat, msg.ID))
-	htmlText = fmt.Sprintf(`<a href="%s">%s</a>%s%s`, link, html.EscapeString(label), "\n", html.EscapeString(content))
-	plainText = label + "\n" + content
-	return htmlText, plainText
-}
-
-func originalMessageReference(msg *models.Message) string {
-	htmlText, _ := originalMessageReferences(msg)
-	return htmlText
-}
-
-func truncateMessage(content string, maxLines, maxUTF16 int) string {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	content = strings.ReplaceAll(content, "\r", "\n")
-	content = strings.TrimSpace(content)
-	lines := strings.Split(content, "\n")
-	truncated := len(lines) > maxLines
-	if truncated {
-		lines = lines[:maxLines]
-	}
-	content = strings.Join(lines, "\n")
-	encoded := utf16.Encode([]rune(content))
-	if len(encoded) > maxUTF16 {
-		encoded = encoded[:maxUTF16]
-		if len(encoded) > 0 && 0xD800 <= encoded[len(encoded)-1] && encoded[len(encoded)-1] <= 0xDBFF {
-			encoded = encoded[:len(encoded)-1]
-		}
-		content = string(utf16.Decode(encoded))
-		truncated = true
-	}
-	if truncated {
-		content = strings.TrimRight(content, " \t\n…")
-		budget := maxUTF16 - 1
-		for utf16Len(content) > budget {
-			runes := []rune(content)
-			content = string(runes[:len(runes)-1])
-		}
-		content += "…"
-	}
-	return content
-}
-
-func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
-
 func (p *Platform) sendTopicCreationFailure(ctx context.Context, bot telegramBot, msg *models.Message) {
 	p.sendTopicFailure(ctx, bot, msg, core.MsgForumTopicCreationFailed)
 }
@@ -1173,9 +1075,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msg *core.Message, tgMsg
 		return
 	}
 
-	// Start source-reference delivery first. Agent/command output waits on its
-	// barrier, avoiding synchronous command deadlocks. Optional title work waits
-	// until core dispatch returns.
+	// Start the General-to-topic handoff before dispatch. Optional title work
+	// waits until core dispatch returns.
 	dispatchDone := make(chan struct{})
 	postDispatch(dispatchDone)
 	if handler != nil {
@@ -1633,17 +1534,10 @@ func isCommand(msg *models.Message) bool {
 	return false
 }
 
-func resolveReplyContext(ctx context.Context, rctx any) (replyContext, error) {
+func resolveReplyContext(_ context.Context, rctx any) (replyContext, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return replyContext{}, fmt.Errorf("telegram: invalid reply context type %T", rctx)
-	}
-	if rc.deliveryReady != nil {
-		select {
-		case <-rc.deliveryReady:
-		case <-ctx.Done():
-			return replyContext{}, ctx.Err()
-		}
 	}
 	return rc, nil
 }
@@ -2163,8 +2057,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 // until the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.deliveryReady != nil {
-		// Preserve source-reference-first ordering without blocking Pi startup.
+	if !ok {
 		return func() {}
 	}
 

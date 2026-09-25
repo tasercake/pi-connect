@@ -211,11 +211,10 @@ current conversation tell the user to run them inside the desired topic.
 Unknown slash commands, prompt commands, and skills still create a topic because
 they may need Pi. Custom exec commands run directly in General.
 
-Before agent output is delivered, pi-connect attempts to post a clickable
-`Replying to:` label and a snippet of up to five lines from the original General
-message as the first bot message in the new topic. This delivery barrier does
-not delay Pi processing. Reference failure is nonfatal and releases output.
-pi-connect also replies to the original General message with a topic link.
+Agent output in the new topic uses Telegram's native reply metadata to quote
+the original General message. pi-connect does not post a separate source
+summary in the topic. It also replies to the original General message with a
+topic link.
 
 The title call uses `topic_title_model` when configured. Choose a small, cheap,
 or free model supported by your Pi provider. For an `openai-codex/*` agent,

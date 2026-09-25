@@ -605,7 +605,6 @@ const (
 	MsgForumTopicNewRequest       MsgKey = "forum_topic_new_request"
 	MsgForumTopicCreationFailed   MsgKey = "forum_topic_creation_failed"
 	MsgForumTopicAttachmentFailed MsgKey = "forum_topic_attachment_failed"
-	MsgForumTopicReplyingTo       MsgKey = "forum_topic_replying_to"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -664,13 +663,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "無法下載附件。請重新傳送。",
 		LangJapanese:           "添付ファイルをダウンロードできませんでした。もう一度送信してください。",
 		LangSpanish:            "No se pudo descargar el archivo adjunto. Vuelve a enviarlo.",
-	},
-	MsgForumTopicReplyingTo: {
-		LangEnglish:            "Replying to:",
-		LangChinese:            "回复：",
-		LangTraditionalChinese: "回覆：",
-		LangJapanese:           "返信先：",
-		LangSpanish:            "En respuesta a:",
 	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
